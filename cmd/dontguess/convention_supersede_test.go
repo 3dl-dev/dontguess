@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	cfconvention "github.com/campfire-net/campfire/pkg/convention"
-	"github.com/campfire-net/campfire/pkg/protocol"
-	"github.com/campfire-net/campfire/pkg/store"
+	cfconvention "github.com/campfire-net/campfire/cf-conventions/cf-convention"
+	"github.com/campfire-net/campfire/cf-protocol/protocol"
+	"github.com/campfire-net/campfire/cf-protocol/store"
 )
 
 // ---- helpers ----

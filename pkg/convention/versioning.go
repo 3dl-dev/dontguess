@@ -2,7 +2,7 @@
 // comparison, breaking-change detection, and declaration diffing helpers used by
 // the dontguess CLI's `convention supersede` command.
 //
-// It builds on top of github.com/campfire-net/campfire/pkg/convention, which
+// It builds on top of github.com/campfire-net/campfire/cf-conventions/cf-convention, which
 // owns parsing, lint, and registry publication.
 package convention
 

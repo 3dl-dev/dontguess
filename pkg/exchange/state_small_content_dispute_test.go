@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/campfire/pkg/store"
+	"github.com/campfire-net/campfire/cf-protocol/store"
 
 	"github.com/campfire-net/dontguess/pkg/exchange"
 	"github.com/campfire-net/dontguess/pkg/scrip"

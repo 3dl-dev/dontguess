@@ -3,7 +3,7 @@ module github.com/campfire-net/dontguess
 go 1.25.0
 
 require (
-	github.com/campfire-net/campfire v0.17.0
+	github.com/campfire-net/campfire v0.31.2
 	github.com/spf13/cobra v1.8.1
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -29,3 +29,5 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.46.1 // indirect
 )
+
+replace github.com/campfire-net/campfire => /home/baron/projects/campfire

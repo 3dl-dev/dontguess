@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/campfire-net/campfire/pkg/protocol"
+	"github.com/campfire-net/campfire/cf-protocol/protocol"
 )
 
 // viewDefinition matches the cf CLI's campfire:view message payload schema.

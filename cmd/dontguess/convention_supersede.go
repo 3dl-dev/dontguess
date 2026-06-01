@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
-	cfconvention "github.com/campfire-net/campfire/pkg/convention"
-	"github.com/campfire-net/campfire/pkg/protocol"
-	"github.com/campfire-net/campfire/pkg/store"
+	cfconvention "github.com/campfire-net/campfire/cf-conventions/cf-convention"
+	"github.com/campfire-net/campfire/cf-protocol/protocol"
+	"github.com/campfire-net/campfire/cf-protocol/store"
 	dgconv "github.com/campfire-net/dontguess/pkg/convention"
 	"github.com/spf13/cobra"
 )
@@ -167,6 +167,7 @@ func performSupersede(
 		newPayload,
 		client.PublicKeyHex(),
 		client.PublicKeyHex(),
+		cfconvention.DefaultDeniedTagPrefixes,
 	)
 	if err != nil {
 		result.Error = fmt.Sprintf("parse failed: %s", err)
@@ -193,6 +194,7 @@ func performSupersede(
 		oldPayload,
 		oldMsg.Sender,
 		"",
+		cfconvention.DefaultDeniedTagPrefixes,
 	)
 	if err != nil {
 		result.Error = fmt.Sprintf("parsing old declaration: %s", err)

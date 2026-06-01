@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/campfire-net/campfire/pkg/convention"
-	cfencoding "github.com/campfire-net/campfire/pkg/encoding"
+	"github.com/campfire-net/campfire/cf-conventions/cf-convention"
+	cfencoding "github.com/campfire-net/campfire/cf-protocol/encoding"
 	"github.com/campfire-net/campfire/pkg/naming"
-	"github.com/campfire-net/campfire/pkg/protocol"
+	"github.com/campfire-net/campfire/cf-protocol/protocol"
 )
 
 // Config is the local operator config written after init.

@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/campfire-net/campfire/pkg/beacon"
-	"github.com/campfire-net/campfire/pkg/convention"
+	"github.com/campfire-net/campfire/cf-conventions/cf-convention"
 	"github.com/campfire-net/campfire/pkg/naming"
-	"github.com/campfire-net/campfire/pkg/protocol"
+	"github.com/campfire-net/campfire/cf-protocol/protocol"
 
 	"github.com/campfire-net/dontguess/pkg/exchange"
 )
@@ -173,7 +173,7 @@ func TestInit_ConventionDeclarationsPromoted(t *testing.T) {
 
 	opNames := make(map[string]bool)
 	for _, msg := range msgs {
-		decl, _, err := convention.Parse(msg.Tags, msg.Payload, "", "")
+		decl, _, err := convention.Parse(msg.Tags, msg.Payload, "", "", convention.DefaultDeniedTagPrefixes)
 		if err != nil {
 			t.Errorf("parsing declaration in msg %s: %v", msg.ID, err)
 			continue
@@ -232,7 +232,7 @@ func TestInit_PutNotDoublePromoted(t *testing.T) {
 	var putCount int
 	var putVersion string
 	for _, msg := range result.Messages {
-		decl, _, parseErr := convention.Parse(msg.Tags, msg.Payload, "", "")
+		decl, _, parseErr := convention.Parse(msg.Tags, msg.Payload, "", "", convention.DefaultDeniedTagPrefixes)
 		if parseErr != nil {
 			continue
 		}
@@ -401,6 +401,7 @@ func TestRatePublishConvention_ZeroOrOneSelfPrior(t *testing.T) {
 		payload,
 		"campfire-key", // sender == campfire key for campfire_key operations
 		"campfire-key",
+		convention.DefaultDeniedTagPrefixes,
 	)
 	if err != nil {
 		t.Fatalf("Parse(rate-publish.json): %v", err)
