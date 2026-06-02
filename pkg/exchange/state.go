@@ -832,6 +832,15 @@ type State struct {
 	// Reset on Replay — rebuilt from the campfire log.
 	entryConsumeCount map[string]int
 
+	// entryDeliverCount tracks the number of times each entry has been delivered
+	// to a buyer via settle(deliver). Key: entryID.
+	// Incremented by applySettleDeliver when the entry_id can be derived from
+	// the antecedent chain (deliver → buyer-accept → match → matchToEntry).
+	// Used by AllEntryBehavioralSignals to populate BehavioralSignals.DeliverCount
+	// for the false-positive demotion signal (dontguess-046).
+	// Reset on Replay — rebuilt from the campfire log.
+	entryDeliverCount map[string]int
+
 	// priceAdjustments holds dynamic price multipliers written by the fast pricing loop.
 	// Key: entryID. The multiplier is applied on top of computePrice's base result.
 	// Stale adjustments (past ExpiresAt) are treated as 1.0x by computePrice.
@@ -990,6 +999,7 @@ func NewState() *State {
 		entryPreviewCount:     make(map[string]int),
 		entryConversionCount:  make(map[string]int),
 		entryConsumeCount:     make(map[string]int),
+		entryDeliverCount:     make(map[string]int),
 		priceAdjustments:     make(map[string]PriceAdjustment),
 		matchToBuyHold:       make(map[string]string),
 		assignsByEntry:       make(map[string][]*AssignRecord),
@@ -1043,6 +1053,7 @@ func (s *State) Replay(msgs []Message) {
 	s.entryPreviewCount = make(map[string]int)
 	s.entryConversionCount = make(map[string]int)
 	s.entryConsumeCount = make(map[string]int)
+	s.entryDeliverCount = make(map[string]int)
 	s.matchToBuyHold = make(map[string]string)
 	s.assignsByEntry = make(map[string][]*AssignRecord)
 	s.assignByID = make(map[string]*AssignRecord)
@@ -1171,12 +1182,12 @@ func (s *State) applyConsume(msg *Message) {
 }
 
 // AllEntryBehavioralSignals returns a snapshot map of per-entry behavioral signals
-// for all inventory entries that have at least one signal (consume or buyer).
+// for all inventory entries that have at least one signal (consume, buyer, or deliver).
 // Used by the exchange engine to update the matching index's behavioral signals
-// after state changes (settle:complete, consume emission).
+// after state changes (settle:complete, consume emission, settle:deliver).
 //
 // The returned map is safe to use without holding the State lock — it is a copy.
-// Entries with zero signals on both fields are omitted.
+// Entries with zero signals on all fields are omitted.
 func (s *State) AllEntryBehavioralSignals() map[string]matching.BehavioralSignals {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1204,14 +1215,99 @@ func (s *State) AllEntryBehavioralSignals() map[string]matching.BehavioralSignal
 		}
 	}
 
+	// Collect deliver counts (dontguess-046): feeds the false-positive demotion signal.
+	for entryID, count := range s.entryDeliverCount {
+		if count > 0 {
+			sig := out[entryID]
+			sig.DeliverCount = count
+			out[entryID] = sig
+		}
+	}
+
 	// Remove entries that ended up with zero signals after aggregation.
 	for entryID, sig := range out {
-		if sig.ConsumeCount == 0 && sig.DistinctBuyerCount == 0 {
+		if sig.ConsumeCount == 0 && sig.DistinctBuyerCount == 0 && sig.DeliverCount == 0 {
 			delete(out, entryID)
 		}
 	}
 
 	return out
+}
+
+// ExpiryCandidateReport describes a single inventory entry flagged as a
+// false-positive expiry candidate by the operator-facing report.
+type ExpiryCandidateReport struct {
+	// EntryID is the inventory entry's ID.
+	EntryID string
+	// DeliverCount is the number of times the entry was delivered.
+	DeliverCount int
+	// ConsumeCount is the number of times the entry was consumed.
+	ConsumeCount int
+	// Ratio is DeliverCount / max(ConsumeCount, 1). High ratio = strong false-positive signal.
+	Ratio float64
+}
+
+// ExpiryCandidates returns an operator-facing report of inventory entries that
+// are flagged as false-positive expiry candidates based on a sustained high
+// deliver-without-consume ratio.
+//
+// An entry is a candidate when:
+//   - DeliverCount >= matching.FalsePositiveWindowMin (sustained pattern, not a
+//     single miss), AND
+//   - ratio = DeliverCount / max(ConsumeCount, 1) >= matching.FalsePositiveRatioThreshold
+//
+// This is a READ-ONLY report. The exchange does NOT autonomously expire or delete
+// entries based on this signal — the operator decides what action to take.
+// Operators may use this list to manually expire entries, re-price them, or
+// request re-validation via an assign task.
+//
+// Thread-safe.
+func (s *State) ExpiryCandidates() []ExpiryCandidateReport {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Build a combined deliver+consume view.
+	type counts struct {
+		deliver int
+		consume int
+	}
+	combined := make(map[string]counts)
+	for entryID, dc := range s.entryDeliverCount {
+		if dc > 0 {
+			c := combined[entryID]
+			c.deliver = dc
+			combined[entryID] = c
+		}
+	}
+	for entryID, cc := range s.entryConsumeCount {
+		if cc > 0 {
+			c := combined[entryID]
+			c.consume = cc
+			combined[entryID] = c
+		}
+	}
+
+	var candidates []ExpiryCandidateReport
+	for entryID, c := range combined {
+		sig := matching.BehavioralSignals{
+			DeliverCount: c.deliver,
+			ConsumeCount: c.consume,
+		}
+		if matching.IsFalsePositiveExpiry(sig) {
+			consumeDenom := c.consume
+			if consumeDenom < 1 {
+				consumeDenom = 1
+			}
+			candidates = append(candidates, ExpiryCandidateReport{
+				EntryID:      entryID,
+				DeliverCount: c.deliver,
+				ConsumeCount: c.consume,
+				Ratio:        float64(c.deliver) / float64(consumeDenom),
+			})
+		}
+	}
+
+	return candidates
 }
 
 // exchangeOp returns the exchange operation tag from a message's tag list,
@@ -1804,6 +1900,13 @@ func (s *State) applySettleDeliver(msg *Message) {
 	// Record deliver→match so applySettleComplete can derive entry_id from the
 	// antecedent chain without trusting buyer-supplied payload fields.
 	s.deliverToMatch[msg.ID] = matchMsgID
+
+	// Track deliver count per entry for the false-positive demotion signal
+	// (dontguess-046). Derive entry_id from the antecedent chain to avoid
+	// trusting any payload field.
+	if entryID := s.matchToEntry[matchMsgID]; entryID != "" {
+		s.entryDeliverCount[entryID]++
+	}
 }
 
 // applySettleComplete records a completed transaction and updates seller reputation.

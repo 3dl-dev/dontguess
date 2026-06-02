@@ -28,6 +28,13 @@ type RankedResult struct {
 	// Only non-zero when the entry has above-floor similarity AND meaningful
 	// behavioral signals. Zero does not mean the entry was penalised.
 	BehavioralBoost float64
+
+	// FalsePositiveDemotion is the negative adjustment applied to CompositeScore
+	// when the entry has a sustained high deliver-without-consume ratio
+	// (dontguess-046). Range [MaxBehavioralDemotion, 0].
+	// Zero means no demotion (no sustained false-positive pattern observed).
+	// Non-zero only when DeliverCount >= FalsePositiveWindowMin AND ratio is high.
+	FalsePositiveDemotion float64
 }
 
 // BehavioralSignals carries observed post-purchase signals for a single inventory
@@ -36,7 +43,7 @@ type RankedResult struct {
 // loop described in the heritage value function.
 //
 // Signals are always observational — they measure what agents actually did, not
-// what they rated. Both fields are derived from non-spoofable, antecedent-anchored
+// what they rated. All fields are derived from non-spoofable, antecedent-anchored
 // message chains in the exchange campfire log.
 type BehavioralSignals struct {
 	// ConsumeCount is the number of exchange:consume signals emitted for this
@@ -52,6 +59,17 @@ type BehavioralSignals struct {
 	// The heritage "ungameable trust signal": independent agents reaching the
 	// same entry without coordination signals genuine utility.
 	DistinctBuyerCount int
+
+	// DeliverCount is the number of times this entry has been delivered to a
+	// buyer (settle:deliver events recorded by the exchange operator).
+	// A delivery means the buyer received the content but may not have consumed
+	// it (completed the transaction with settle:complete).
+	//
+	// The ratio DeliverCount / (ConsumeCount + 1) is the false-positive signal:
+	// a high ratio over a sustained window means the entry is often delivered but
+	// rarely consumed — buyers searched again after delivery instead of using it.
+	// Sourced from: State.entryDeliverCount (dontguess-046).
+	DeliverCount int
 }
 
 // MaxBehavioralBoost is the ceiling on the additive behavioral boost applied
@@ -63,6 +81,35 @@ type BehavioralSignals struct {
 // score (WeightQuality=0.80 * L2≈1.0), which is meaningful as a tie-breaker
 // but cannot lift a weak-similarity entry above a strong one.
 const MaxBehavioralBoost = 0.10
+
+// MaxBehavioralDemotion is the floor on the negative behavioral adjustment
+// applied to CompositeScore when an entry has a sustained high deliver-without-
+// consume ratio (dontguess-046). Mirroring MaxBehavioralBoost in magnitude
+// ensures demotion cannot push a relevant entry below a completely irrelevant
+// junk entry — the relevance floor still gates, and demotion is bounded.
+//
+// Value: -0.10 (negative, applied additively). The symmetry with MaxBehavioralBoost
+// means a maximally-demoted entry still outranks any entry that the positive
+// boost cannot reach from baseline.
+const MaxBehavioralDemotion = -0.10
+
+// FalsePositiveWindowMin is the minimum number of deliveries required before the
+// false-positive demotion signal activates. This prevents a single deliver-without-
+// consume from triggering demotion — a sustained pattern is required.
+//
+// The window requires at least 3 deliveries before any ratio-based penalty is
+// computed, mirroring the convergence threshold (3 distinct buyers) in the positive
+// signal. Below this window the demotion is zero regardless of the ratio.
+const FalsePositiveWindowMin = 3
+
+// FalsePositiveRatioThreshold is the deliver-without-consume ratio above which
+// an entry is flagged as an expiry candidate by the operator-facing report.
+// Ratio = DeliverCount / max(ConsumeCount, 1). When ratio >= threshold AND
+// DeliverCount >= FalsePositiveWindowMin, the entry is a candidate for expiry.
+//
+// A ratio of 5.0 means 5 deliveries per consume — the entry was delivered 5 times
+// as often as it was actually used. This is a strong false-positive signal.
+const FalsePositiveRatioThreshold = 5.0
 
 // RankInput carries per-entry data needed by the ranker.
 // This struct decouples the ranker from the exchange.InventoryEntry type.
@@ -316,18 +363,34 @@ func Rank(task string, candidates []RankInput, embedder Embedder, opts RankOptio
 		behavioralBoost := computeBehavioralBoost(c.Signals)
 		composite += behavioralBoost
 
+		// False-positive demotion (dontguess-046): negative adjustment for entries
+		// with a sustained high deliver-without-consume ratio.
+		//
+		// Design principles:
+		//  - Window guard: demotion is zero when DeliverCount < FalsePositiveWindowMin.
+		//    A single deliver-without-consume must NOT trigger demotion.
+		//  - Bounded: floor at MaxBehavioralDemotion (-0.10), symmetric with the
+		//    positive boost. A demoted entry still outranks a below-floor junk entry.
+		//  - Additive: applied after the positive boost, so a highly-consumed entry
+		//    with a low false-positive ratio is not penalised even if DeliverCount
+		//    is also high (the ratio gates the demotion, not the raw deliver count).
+		//  - Zero-safe: when Signals.DeliverCount == 0, demotion == 0.
+		fpDemotion := computeFalsePositiveDemotion(c.Signals)
+		composite += fpDemotion // fpDemotion is <= 0
+
 		// Confidence is the Layer 2 quality composite (what the buyer sees).
 		confidence := l2Quality
 
 		results = append(results, RankedResult{
-			EntryID:         c.EntryID,
-			Similarity:      sim,
-			Confidence:      confidence,
-			CompositeScore:  composite,
-			IsPartialMatch:  confidence < opts.partialThreshold(),
-			EfficiencyScore: l1Efficiency,
-			NoveltyBoost:    l3Novelty,
-			BehavioralBoost: behavioralBoost,
+			EntryID:               c.EntryID,
+			Similarity:            sim,
+			Confidence:            confidence,
+			CompositeScore:        composite,
+			IsPartialMatch:        confidence < opts.partialThreshold(),
+			EfficiencyScore:       l1Efficiency,
+			NoveltyBoost:          l3Novelty,
+			BehavioralBoost:       behavioralBoost,
+			FalsePositiveDemotion: fpDemotion,
 		})
 	}
 
@@ -386,4 +449,82 @@ func computeBehavioralBoost(s BehavioralSignals) float64 {
 		total = MaxBehavioralBoost
 	}
 	return total
+}
+
+// computeFalsePositiveDemotion computes the negative behavioral adjustment for
+// entries with a sustained high deliver-without-consume ratio (dontguess-046).
+//
+// A "false positive" occurs when the exchange delivers an entry to a buyer but
+// the buyer does not consume it (does not complete the transaction). The buyer
+// searching again immediately after delivery is the proxy signal — the entry
+// matched on semantics but failed on utility.
+//
+// The demotion is gated by a window requirement: DeliverCount must be >=
+// FalsePositiveWindowMin (3) before any penalty is applied. This prevents a
+// single deliver-without-consume from triggering demotion.
+//
+// When above the window, the demotion is proportional to the deliver-without-
+// consume ratio, capped at MaxBehavioralDemotion (-0.10). The ratio is computed
+// as DeliverCount / max(ConsumeCount, 1).
+//
+// Design invariant: the returned value is always <= 0 (a demotion, never a boost).
+// Returns 0.0 when Signals.DeliverCount == 0 or below the window threshold.
+func computeFalsePositiveDemotion(s BehavioralSignals) float64 {
+	// Window guard: require sustained pattern before any demotion.
+	if s.DeliverCount < FalsePositiveWindowMin {
+		return 0
+	}
+
+	// Ratio: deliveries per consume. Use max(ConsumeCount, 1) to avoid divide-by-zero.
+	consumeDenom := s.ConsumeCount
+	if consumeDenom < 1 {
+		consumeDenom = 1
+	}
+	ratio := float64(s.DeliverCount) / float64(consumeDenom)
+
+	// No demotion when the ratio is low (entry is well-consumed relative to deliveries).
+	// A ratio of 1.0 means every delivery was consumed — ideal. We start penalising
+	// above 2.0 (twice as many deliveries as consumes), ramping to full demotion at
+	// FalsePositiveRatioThreshold (5.0).
+	const ratioLow = 2.0
+	if ratio <= ratioLow {
+		return 0
+	}
+
+	// Linear ramp from 0 at ratio=ratioLow to MaxBehavioralDemotion at ratio=FalsePositiveRatioThreshold.
+	// norm in [0, 1]: 0 at ratioLow, 1 at FalsePositiveRatioThreshold.
+	norm := (ratio - ratioLow) / (FalsePositiveRatioThreshold - ratioLow)
+	if norm > 1.0 {
+		norm = 1.0
+	}
+
+	// MaxBehavioralDemotion is negative, so multiply to get a value in [MaxBehavioralDemotion, 0].
+	demotion := norm * MaxBehavioralDemotion
+	// Clamp: demotion must not exceed the floor (more negative than MaxBehavioralDemotion).
+	if demotion < MaxBehavioralDemotion {
+		demotion = MaxBehavioralDemotion
+	}
+	return demotion
+}
+
+// IsFalsePositiveExpiry reports whether an entry with the given signals should
+// be flagged as an expiry candidate based on its sustained deliver-without-consume
+// ratio. This is the criterion used by State.ExpiryCandidates().
+//
+// Criteria (dontguess-046):
+//   - DeliverCount >= FalsePositiveWindowMin (sustained, not a single miss)
+//   - ratio = DeliverCount / max(ConsumeCount, 1) >= FalsePositiveRatioThreshold
+//
+// Returns true when both conditions are met. The operator-facing report surfaces
+// these entries; the exchange does NOT autonomously expire or remove them.
+func IsFalsePositiveExpiry(s BehavioralSignals) bool {
+	if s.DeliverCount < FalsePositiveWindowMin {
+		return false
+	}
+	consumeDenom := s.ConsumeCount
+	if consumeDenom < 1 {
+		consumeDenom = 1
+	}
+	ratio := float64(s.DeliverCount) / float64(consumeDenom)
+	return ratio >= FalsePositiveRatioThreshold
 }
