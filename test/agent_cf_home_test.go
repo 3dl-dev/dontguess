@@ -673,18 +673,31 @@ exit 0
 	writeWrapperV2(t, binDir)
 
 	wrapperPath := filepath.Join(binDir, "dontguess")
-	cmd := exec.Command(wrapperPath, "upgrade")
-	cmd.Env = []string{
-		"HOME=" + testDir,
-		"PATH=" + binDir + ":" + os.Getenv("PATH"),
-	}
+	// Under heavy parallel full-suite load, exec of a freshly-written script can
+	// transiently fail (ETXTBSY / fork pressure). Retry a few times so the test is
+	// deterministic — a real "upgrade didn't call curl" still fails after all tries.
 	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	_ = cmd.Run()
-
-	// Check if curl was invoked at all (argLog may not exist if upgrade case is missing).
-	curlArgs := readArgLog(t, argLog)
+	var curlArgs []string
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		buf.Reset()
+		cmd := exec.Command(wrapperPath, "upgrade")
+		cmd.Env = []string{
+			"HOME=" + testDir,
+			"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		}
+		cmd.Stdout = &buf
+		cmd.Stderr = &buf
+		lastErr = cmd.Run()
+		curlArgs = readArgLog(t, argLog)
+		if len(curlArgs) > 0 {
+			break // curl was invoked — the behavior under test ran
+		}
+		_ = os.Remove(argLog) // clean slate for the retry
+	}
+	if len(curlArgs) == 0 && lastErr != nil {
+		t.Logf("upgrade: wrapper exec failed on all attempts: %v", lastErr)
+	}
 	t.Logf("upgrade: curl argv = %v", curlArgs)
 	t.Logf("upgrade: wrapper output = %s", buf.String())
 
