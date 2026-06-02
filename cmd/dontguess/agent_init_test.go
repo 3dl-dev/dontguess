@@ -160,6 +160,52 @@ func TestAgentInit_GeneratesDistinctIdentity(t *testing.T) {
 	}
 }
 
+// TestAgentInit_RejectsPathTraversal verifies that malicious agent names which
+// would resolve outside (or to the root of) $DG_HOME/agents are rejected — most
+// importantly ".." and ".", which would otherwise resolve to DG_HOME itself and
+// load the OPERATOR's identity, handing the caller operator signing authority
+// (HIGH-severity privilege escalation). Regression for the V4 veracity finding.
+func TestAgentInit_RejectsPathTraversal(t *testing.T) {
+	t.Parallel()
+
+	dgHome, _ := scratchExchange(t)
+
+	// The operator identity must exist and remain untouched after rejected calls.
+	opIdentity := filepath.Join(dgHome, "identity.json")
+	before, err := os.ReadFile(opIdentity)
+	if err != nil {
+		t.Fatalf("reading operator identity.json: %v", err)
+	}
+
+	for _, name := range []string{"..", ".", "../evil", "a/b", "a\\b", "", "foo/../..", "x..y"} {
+		err := runAgentInitWith(t, dgHome, name)
+		if err == nil {
+			t.Errorf("agent-init %q: expected rejection, got nil error (possible path traversal)", name)
+		}
+	}
+
+	// The operator identity.json must be byte-identical — nothing clobbered it,
+	// and `agent-init ..` must NOT have loaded/used the operator key.
+	after, err := os.ReadFile(opIdentity)
+	if err != nil {
+		t.Fatalf("reading operator identity.json after: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Error("operator identity.json changed after rejected agent-init calls — traversal not contained")
+	}
+
+	// No agent home should have been created for any rejected name.
+	if entries, err := os.ReadDir(filepath.Join(dgHome, "agents")); err == nil {
+		for _, e := range entries {
+			t.Errorf("unexpected agent home created by a rejected name: %s", e.Name())
+		}
+	}
+
+	// Note: "x..y" contains ".." and is rejected by the conservative Contains(name, "..")
+	// guard even though it is not a traversal — acceptable: agent names are operator-chosen
+	// and need not contain "..".
+}
+
 // agentExchangeID reads the exchange campfire ID from the dgHome config.
 func agentExchangeID(t *testing.T, dgHome string) string {
 	t.Helper()

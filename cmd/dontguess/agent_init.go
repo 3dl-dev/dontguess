@@ -55,8 +55,13 @@ func init() {
 
 func runAgentInit(_ *cobra.Command, args []string) error {
 	name := args[0]
-	if strings.ContainsAny(name, "/\\") {
-		return fmt.Errorf("agent name must not contain path separators")
+	// Security: the name becomes a path component under DG_HOME/agents. Reject
+	// path separators and any "." / ".." traversal — otherwise `agent-init ..`
+	// resolves to DG_HOME itself and would load the operator's identity (CVE-class
+	// privilege escalation: the caller would gain operator signing authority).
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		return fmt.Errorf("invalid agent name %q: must be a single path component without '/', '\\', or '..'", name)
 	}
 
 	dgHome := resolveDGHome()
@@ -68,7 +73,12 @@ func runAgentInit(_ *cobra.Command, args []string) error {
 	}
 
 	// Step 1: create the agent home directory.
-	agentHome := filepath.Join(dgHome, "agents", name)
+	agentsRoot := filepath.Join(dgHome, "agents")
+	agentHome := filepath.Join(agentsRoot, name)
+	// Defense in depth: the resolved path must stay strictly under agents/.
+	if agentHome == agentsRoot || !strings.HasPrefix(agentHome+string(filepath.Separator), agentsRoot+string(filepath.Separator)) {
+		return fmt.Errorf("invalid agent name %q: resolves outside the agents directory", name)
+	}
 	if err := os.MkdirAll(agentHome, 0700); err != nil {
 		return fmt.Errorf("creating agent home %s: %w", agentHome, err)
 	}
