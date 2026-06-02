@@ -617,6 +617,7 @@ func (e *Engine) handleBuy(msg *Message) error {
 	type rankedCandidate struct {
 		entry            *InventoryEntry
 		confidence       float64
+		similarity       float64 // raw cosine similarity from matching.RankedResult; 0 for fallback entries
 		isPartialMatch   bool
 		hasSemanticScore bool
 	}
@@ -635,6 +636,7 @@ func (e *Engine) handleBuy(msg *Message) error {
 		semanticMatches = append(semanticMatches, rankedCandidate{
 			entry:            entry,
 			confidence:       sr.Confidence,
+			similarity:       sr.Similarity,
 			isPartialMatch:   sr.IsPartialMatch,
 			hasSemanticScore: true,
 		})
@@ -703,6 +705,7 @@ func (e *Engine) handleBuy(msg *Message) error {
 		ContentType       string  `json:"content_type"`
 		Price             int64   `json:"price"`
 		Confidence        float64 `json:"confidence"`
+		Similarity        float64 `json:"similarity"`        // raw cosine similarity; 0 for fallback entries
 		IsPartialMatch    bool    `json:"is_partial_match"`
 		SellerReputation  int     `json:"seller_reputation"`
 		TokenCostOriginal int64   `json:"token_cost_original"`
@@ -723,6 +726,7 @@ func (e *Engine) handleBuy(msg *Message) error {
 			ContentType:       entry.ContentType,
 			Price:             e.computePrice(entry),
 			Confidence:        rc.confidence,
+			Similarity:        rc.similarity,
 			IsPartialMatch:    rc.isPartialMatch,
 			SellerReputation:  rep,
 			TokenCostOriginal: entry.TokenCost,
