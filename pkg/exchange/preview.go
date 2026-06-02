@@ -112,46 +112,66 @@ func findBoundaries(content []byte, contentType string) []int {
 
 	switch contentType {
 	case "code":
-		// Function/method/class boundaries
-		keywords := []string{"\nfunc ", "\ndef ", "\nclass ", "\nfunction ", "\nconst ", "\nvar ", "\ntype "}
-		for _, kw := range keywords {
-			idx := 0
-			for {
-				pos := strings.Index(s[idx:], kw)
-				if pos < 0 {
-					break
-				}
-				abs := idx + pos + 1 // +1 to skip the leading \n, land on the keyword
-				set[abs] = struct{}{}
-				idx = abs + 1
-				if idx >= len(s) {
-					break
-				}
-			}
-		}
-		// Also split on blank lines between blocks
-		addDoubleNewlineBoundaries(s, set)
-
+		findBoundariesCode(s, set)
 	case "analysis", "summary", "plan", "review":
-		// Paragraph boundaries (double newline)
-		addDoubleNewlineBoundaries(s, set)
-
+		findBoundariesMarkdown(s, set)
 	case "data":
-		// Record boundaries: newlines for CSV/JSONL, object boundaries for JSON arrays
-		addNewlineBoundaries(s, set)
-		// JSON object boundaries (lines starting with { or })
-		for i, ch := range s {
-			if i > 0 && (ch == '{' || ch == '[') && (s[i-1] == '\n' || s[i-1] == ',') {
-				set[i] = struct{}{}
-			}
-		}
-
+		findBoundariesData(s, set)
 	default:
-		// Line boundaries
-		addNewlineBoundaries(s, set)
+		findBoundariesText(s, set)
 	}
 
 	return sortedBoundaries(set)
+}
+
+// findBoundariesCode adds function/method/class keyword boundaries and blank-line
+// boundaries for code content.
+func findBoundariesCode(s string, set map[int]struct{}) {
+	// Function/method/class boundaries
+	keywords := []string{"\nfunc ", "\ndef ", "\nclass ", "\nfunction ", "\nconst ", "\nvar ", "\ntype "}
+	for _, kw := range keywords {
+		idx := 0
+		for {
+			pos := strings.Index(s[idx:], kw)
+			if pos < 0 {
+				break
+			}
+			abs := idx + pos + 1 // +1 to skip the leading \n, land on the keyword
+			set[abs] = struct{}{}
+			idx = abs + 1
+			if idx >= len(s) {
+				break
+			}
+		}
+	}
+	// Also split on blank lines between blocks
+	addDoubleNewlineBoundaries(s, set)
+}
+
+// findBoundariesMarkdown adds paragraph (double-newline) boundaries for
+// analysis, summary, plan, and review content.
+func findBoundariesMarkdown(s string, set map[int]struct{}) {
+	// Paragraph boundaries (double newline)
+	addDoubleNewlineBoundaries(s, set)
+}
+
+// findBoundariesData adds record boundaries (newlines for CSV/JSONL, object
+// boundaries for JSON arrays) for data content.
+func findBoundariesData(s string, set map[int]struct{}) {
+	// Record boundaries: newlines for CSV/JSONL, object boundaries for JSON arrays
+	addNewlineBoundaries(s, set)
+	// JSON object boundaries (lines starting with { or })
+	for i, ch := range s {
+		if i > 0 && (ch == '{' || ch == '[') && (s[i-1] == '\n' || s[i-1] == ',') {
+			set[i] = struct{}{}
+		}
+	}
+}
+
+// findBoundariesText adds line boundaries for all other content types.
+func findBoundariesText(s string, set map[int]struct{}) {
+	// Line boundaries
+	addNewlineBoundaries(s, set)
 }
 
 // addDoubleNewlineBoundaries adds positions after every \n\n sequence.
