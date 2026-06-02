@@ -152,9 +152,13 @@ func (idx *Index) SetBehavioralSignals(signals map[string]BehavioralSignals) {
 
 // Search returns ranked results for a buy task, capped at maxResults.
 //
-// The embedder embeds the task description at query time. All indexed entries
-// are evaluated against the 4-layer value stack. Results with composite score
-// below the minimum similarity threshold are excluded.
+// The task description is preprocessed by NormalizeQuery before embedding to
+// align buyer vocabulary with inventory description vocabulary (dontguess-af7).
+// This improves TF-IDF hit rate for informally phrased buyer tasks without
+// changing the inventory index or the 4-layer ranking algorithm.
+//
+// All indexed entries are evaluated against the 4-layer value stack. Results
+// with composite score below the minimum similarity threshold are excluded.
 //
 // Behavioral signals (consume count, distinct buyer count) stored via
 // SetBehavioralSignals are injected into each candidate's RankInput.Signals
@@ -172,6 +176,11 @@ func (idx *Index) Search(task string, maxResults int) []RankedResult {
 		return nil
 	}
 
+	// Normalize the buyer query to align with inventory vocabulary before embedding.
+	// NormalizeQuery appends generic technical synonyms for informal buyer terms,
+	// improving TF-IDF term overlap without injecting corpus-specific content.
+	normalized := NormalizeQuery(task)
+
 	// Build candidate list from indexed entries, injecting behavioral signals.
 	candidates := make([]RankInput, len(idx.entries))
 	for i, e := range idx.entries {
@@ -181,7 +190,7 @@ func (idx *Index) Search(task string, maxResults int) []RankedResult {
 		}
 	}
 
-	results := Rank(task, candidates, idx.embedder, idx.opts)
+	results := Rank(normalized, candidates, idx.embedder, idx.opts)
 
 	if maxResults > 0 && len(results) > maxResults {
 		results = results[:maxResults]
