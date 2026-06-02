@@ -9,14 +9,18 @@ import (
 // ranked search against buy task descriptions.
 //
 // Thread safety: Index is safe for concurrent reads. Mutations (Add, Remove,
-// Rebuild) must not be called concurrently with reads or each other.
-// The exchange engine calls Rebuild after state replay and Add/Remove
-// incrementally as new puts are accepted or entries expire.
+// Rebuild, SetBehavioralSignals) must not be called concurrently with reads
+// or each other. The exchange engine calls Rebuild after state replay and
+// Add/Remove/SetBehavioralSignals incrementally as entries change.
 type Index struct {
 	mu       sync.RWMutex
 	embedder Embedder
 	opts     RankOptions
 	entries  []indexedEntry
+	// signals holds the most-recently-set behavioral signals per entry.
+	// Keyed by EntryID. Updated by SetBehavioralSignals.
+	// Injected into RankInput.Signals in Search before calling Rank.
+	signals map[string]BehavioralSignals
 }
 
 // indexedEntry stores a single inventory entry and its precomputed embedding.
@@ -35,6 +39,7 @@ func NewIndex(embedder Embedder, opts RankOptions) *Index {
 	return &Index{
 		embedder: embedder,
 		opts:     opts,
+		signals:  make(map[string]BehavioralSignals),
 	}
 }
 
@@ -120,11 +125,40 @@ func (idx *Index) HasEmbedding(entryID string) bool {
 	return false
 }
 
+// SetBehavioralSignals replaces the behavioral signals map used by Search.
+// The exchange engine calls this after every state update that changes
+// consume counts or distinct buyer counts (e.g., after settle:complete
+// emits a TagConsume message and updates EntryBuyerMap).
+//
+// signals maps entryID → BehavioralSignals. Entries absent from the map
+// receive zero signals (no boost). The map is copied, so the caller may
+// reuse or mutate the original after this call.
+//
+// SetBehavioralSignals acquires a write lock.
+func (idx *Index) SetBehavioralSignals(signals map[string]BehavioralSignals) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	if len(signals) == 0 {
+		idx.signals = make(map[string]BehavioralSignals)
+		return
+	}
+	cp := make(map[string]BehavioralSignals, len(signals))
+	for k, v := range signals {
+		cp[k] = v
+	}
+	idx.signals = cp
+}
+
 // Search returns ranked results for a buy task, capped at maxResults.
 //
 // The embedder embeds the task description at query time. All indexed entries
 // are evaluated against the 4-layer value stack. Results with composite score
 // below the minimum similarity threshold are excluded.
+//
+// Behavioral signals (consume count, distinct buyer count) stored via
+// SetBehavioralSignals are injected into each candidate's RankInput.Signals
+// before calling Rank, enabling the post-floor behavioral booster.
 //
 // Partial matches (confidence < 0.5) are included with IsPartialMatch=true.
 // The caller (engine.go) decides whether to include them in the match payload.
@@ -138,10 +172,13 @@ func (idx *Index) Search(task string, maxResults int) []RankedResult {
 		return nil
 	}
 
-	// Build candidate list from indexed entries.
+	// Build candidate list from indexed entries, injecting behavioral signals.
 	candidates := make([]RankInput, len(idx.entries))
 	for i, e := range idx.entries {
 		candidates[i] = e.input
+		if sig, ok := idx.signals[e.input.EntryID]; ok {
+			candidates[i].Signals = sig
+		}
 	}
 
 	results := Rank(task, candidates, idx.embedder, idx.opts)

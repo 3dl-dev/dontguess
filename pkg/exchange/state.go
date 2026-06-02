@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/campfire-net/dontguess/pkg/matching"
 	"github.com/campfire-net/dontguess/pkg/scrip"
 )
 
@@ -807,6 +808,15 @@ type State struct {
 	// Incremented in applySettleBuyerAccept when the buyer accepts via the preview path.
 	entryConversionCount map[string]int
 
+	// entryConsumeCount tracks the number of exchange:consume signals per entry.
+	// Key: entryID. Incremented by applyConsume when a TagConsume message is
+	// processed. This is the M5 consume signal (dontguess-860): a buyer who
+	// completes settle(complete) and triggers emitConsumeSignal is counted here.
+	// Unlike EntryBuyerMap (which tracks distinct buyers), consume count tracks
+	// total consume events including repeat consumers.
+	// Reset on Replay — rebuilt from the campfire log.
+	entryConsumeCount map[string]int
+
 	// priceAdjustments holds dynamic price multipliers written by the fast pricing loop.
 	// Key: entryID. The multiplier is applied on top of computePrice's base result.
 	// Stale adjustments (past ExpiresAt) are treated as 1.0x by computePrice.
@@ -964,6 +974,7 @@ func NewState() *State {
 		smallContentDisputes:  make(map[string]int),
 		entryPreviewCount:     make(map[string]int),
 		entryConversionCount:  make(map[string]int),
+		entryConsumeCount:     make(map[string]int),
 		priceAdjustments:     make(map[string]PriceAdjustment),
 		matchToBuyHold:       make(map[string]string),
 		assignsByEntry:       make(map[string][]*AssignRecord),
@@ -1016,6 +1027,7 @@ func (s *State) Replay(msgs []Message) {
 	s.smallContentDisputes = make(map[string]int)
 	s.entryPreviewCount = make(map[string]int)
 	s.entryConversionCount = make(map[string]int)
+	s.entryConsumeCount = make(map[string]int)
 	s.matchToBuyHold = make(map[string]string)
 	s.assignsByEntry = make(map[string][]*AssignRecord)
 	s.assignByID = make(map[string]*AssignRecord)
@@ -1093,10 +1105,14 @@ func (s *State) applyLocked(msg *Message) {
 	case TagAssignAuctionClose:
 		s.applyAssignAuctionClose(msg)
 	default:
-		// Handle scrip convention messages that are not exchange operations.
+		// Handle non-exchange-op messages that carry known tags.
 		for _, tag := range msg.Tags {
-			if tag == scrip.TagScripBuyHold {
+			switch tag {
+			case scrip.TagScripBuyHold:
 				s.applyScripBuyHold(msg)
+				return
+			case TagConsume:
+				s.applyConsume(msg)
 				return
 			}
 		}
@@ -1124,6 +1140,63 @@ func (s *State) GetBuyHoldReservation(matchMsgID string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.matchToBuyHold[matchMsgID]
+}
+
+// applyConsume processes an exchange:consume message, incrementing the
+// per-entry consume counter. The entry_id is read from the payload and must
+// be non-empty to count. Called from applyLocked.
+func (s *State) applyConsume(msg *Message) {
+	var p struct {
+		EntryID string `json:"entry_id"`
+	}
+	if err := json.Unmarshal(msg.Payload, &p); err != nil || p.EntryID == "" {
+		return
+	}
+	s.entryConsumeCount[p.EntryID]++
+}
+
+// AllEntryBehavioralSignals returns a snapshot map of per-entry behavioral signals
+// for all inventory entries that have at least one signal (consume or buyer).
+// Used by the exchange engine to update the matching index's behavioral signals
+// after state changes (settle:complete, consume emission).
+//
+// The returned map is safe to use without holding the State lock — it is a copy.
+// Entries with zero signals on both fields are omitted.
+func (s *State) AllEntryBehavioralSignals() map[string]matching.BehavioralSignals {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make(map[string]matching.BehavioralSignals)
+
+	// Collect consume counts.
+	for entryID, count := range s.entryConsumeCount {
+		if count > 0 {
+			sig := out[entryID]
+			sig.ConsumeCount = count
+			out[entryID] = sig
+		}
+	}
+
+	// Collect distinct buyer counts from per-seller EntryBuyerMap.
+	for _, stats := range s.sellers {
+		for entryID, buyers := range stats.EntryBuyerMap {
+			if len(buyers) == 0 {
+				continue
+			}
+			sig := out[entryID]
+			sig.DistinctBuyerCount += len(buyers)
+			out[entryID] = sig
+		}
+	}
+
+	// Remove entries that ended up with zero signals after aggregation.
+	for entryID, sig := range out {
+		if sig.ConsumeCount == 0 && sig.DistinctBuyerCount == 0 {
+			delete(out, entryID)
+		}
+	}
+
+	return out
 }
 
 // exchangeOp returns the exchange operation tag from a message's tag list,

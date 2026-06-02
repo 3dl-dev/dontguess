@@ -300,3 +300,382 @@ func summarizeResults(results []RankedResult) []string {
 	}
 	return ids
 }
+
+// --- dontguess-860: behavioral signal booster tests ---
+
+// TestComputeBehavioralBoost_ZeroSignals verifies zero boost for zero signals.
+func TestComputeBehavioralBoost_ZeroSignals(t *testing.T) {
+	t.Parallel()
+	boost := computeBehavioralBoost(BehavioralSignals{})
+	if boost != 0.0 {
+		t.Errorf("zero signals: want 0.0, got %f", boost)
+	}
+}
+
+// TestComputeBehavioralBoost_ConsumeOnly verifies consume-only boost is positive
+// and proportional but bounded.
+func TestComputeBehavioralBoost_ConsumeOnly(t *testing.T) {
+	t.Parallel()
+	one := computeBehavioralBoost(BehavioralSignals{ConsumeCount: 1})
+	ten := computeBehavioralBoost(BehavioralSignals{ConsumeCount: 10})
+	huge := computeBehavioralBoost(BehavioralSignals{ConsumeCount: 10000})
+
+	if one <= 0 {
+		t.Errorf("1 consume: want > 0, got %f", one)
+	}
+	if ten <= one {
+		t.Errorf("10 consumes (%f) should exceed 1 consume (%f)", ten, one)
+	}
+	// At very high count, must saturate at MaxBehavioralBoost / 2 (consume half-weight).
+	halfMax := MaxBehavioralBoost / 2.0
+	if huge > halfMax+1e-9 {
+		t.Errorf("huge consume count boost %f exceeds half-weight cap %f", huge, halfMax)
+	}
+}
+
+// TestComputeBehavioralBoost_ConvergenceOnly verifies convergence-only boost.
+func TestComputeBehavioralBoost_ConvergenceOnly(t *testing.T) {
+	t.Parallel()
+	one := computeBehavioralBoost(BehavioralSignals{DistinctBuyerCount: 1})
+	three := computeBehavioralBoost(BehavioralSignals{DistinctBuyerCount: 3})
+	many := computeBehavioralBoost(BehavioralSignals{DistinctBuyerCount: 100})
+
+	if one <= 0 {
+		t.Errorf("1 buyer: want > 0, got %f", one)
+	}
+	if three <= one {
+		t.Errorf("3 buyers (%f) should exceed 1 buyer (%f)", three, one)
+	}
+	// At >= threshold, must saturate at MaxBehavioralBoost / 2 (convergence half-weight).
+	halfMax := MaxBehavioralBoost / 2.0
+	if many > halfMax+1e-9 {
+		t.Errorf("many buyers boost %f exceeds half-weight cap %f", many, halfMax)
+	}
+	// 3 buyers == full convergence half-weight
+	if three != halfMax {
+		t.Errorf("3 buyers (full convergence) boost = %f, want %f", three, halfMax)
+	}
+}
+
+// TestComputeBehavioralBoost_CombinedCappedAtMax verifies combined signals
+// are capped at MaxBehavioralBoost.
+func TestComputeBehavioralBoost_CombinedCappedAtMax(t *testing.T) {
+	t.Parallel()
+	huge := computeBehavioralBoost(BehavioralSignals{ConsumeCount: 10000, DistinctBuyerCount: 10000})
+	if huge > MaxBehavioralBoost+1e-9 {
+		t.Errorf("huge combined boost %f exceeds MaxBehavioralBoost %f", huge, MaxBehavioralBoost)
+	}
+}
+
+// TestRank_BehavioralBoostRaisesConvergedEntryAboveEquivalent verifies the
+// core dontguess-860 requirement: an entry with N distinct-agent consume signals
+// (DistinctBuyerCount >= 3) ranks above an otherwise-equivalent entry with none.
+//
+// This test exercises the REAL Rank() path with real embeddings and real signals.
+// No mocking of the matcher. Signals are injected via RankInput.Signals.
+// The task and both entry descriptions are identical so similarity is equal —
+// only behavioral signals differentiate them.
+func TestRank_BehavioralBoostRaisesConvergedEntryAboveEquivalent(t *testing.T) {
+	t.Parallel()
+	e := NewTFIDFEmbedder()
+
+	desc := "Go HTTP handler unit test generator with JSON validation"
+	ts := time.Now().Add(-1 * time.Hour).UnixNano()
+
+	// "boosted" entry: converged (3 distinct buyers) + 5 consumes.
+	boosted := RankInput{
+		EntryID:          "boosted",
+		SellerKey:        "seller-a",
+		Description:      desc,
+		ContentType:      "code",
+		Domains:          []string{"go"},
+		TokenCost:        10000,
+		Price:            1000,
+		SellerReputation: 70,
+		PutTimestamp:     ts,
+		Signals: BehavioralSignals{
+			ConsumeCount:       5,
+			DistinctBuyerCount: 3, // >= convergence threshold
+		},
+	}
+
+	// "plain" entry: identical in every way except zero signals.
+	plain := RankInput{
+		EntryID:          "plain",
+		SellerKey:        "seller-b", // different seller so novelty is equal
+		Description:      desc,
+		ContentType:      "code",
+		Domains:          []string{"go"},
+		TokenCost:        10000,
+		Price:            1000,
+		SellerReputation: 70,
+		PutTimestamp:     ts,
+		Signals:          BehavioralSignals{}, // zero signals
+	}
+
+	results := Rank("Go HTTP unit test generator JSON validation", []RankInput{boosted, plain}, e, RankOptions{})
+	if len(results) < 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	// Both must have passed the floor (similarity > 0 — they share words with task).
+	var boostedResult, plainResult *RankedResult
+	for i := range results {
+		switch results[i].EntryID {
+		case "boosted":
+			boostedResult = &results[i]
+		case "plain":
+			plainResult = &results[i]
+		}
+	}
+	if boostedResult == nil {
+		t.Fatal("boosted entry not found in results")
+	}
+	if plainResult == nil {
+		t.Fatal("plain entry not found in results")
+	}
+
+	// Boosted entry must have a non-zero behavioral boost.
+	if boostedResult.BehavioralBoost <= 0 {
+		t.Errorf("boosted entry BehavioralBoost = %f, want > 0", boostedResult.BehavioralBoost)
+	}
+	// Plain entry must have zero behavioral boost.
+	if plainResult.BehavioralBoost != 0 {
+		t.Errorf("plain entry BehavioralBoost = %f, want 0", plainResult.BehavioralBoost)
+	}
+	// Boosted entry must rank first.
+	if results[0].EntryID != "boosted" {
+		t.Errorf("boosted entry should rank first, got %q (scores: boosted=%.4f plain=%.4f)",
+			results[0].EntryID, boostedResult.CompositeScore, plainResult.CompositeScore)
+	}
+}
+
+// TestRank_BehavioralBoostDoesNotOverrideRelevanceFloor verifies §3.1/§3.2 of
+// the foundation doc: the relevance floor (MinSimilarity=0.16) gates everything.
+// An entry with maximum behavioral signals but below-floor similarity must NOT
+// appear in results — the boost only applies to above-floor survivors.
+//
+// This test exercises the REAL Rank() path with real embeddings.
+func TestRank_BehavioralBoostDoesNotOverrideRelevanceFloor(t *testing.T) {
+	t.Parallel()
+	e := NewTFIDFEmbedder()
+
+	ts := time.Now().Add(-1 * time.Hour).UnixNano()
+
+	// An entry with completely unrelated vocabulary to the task description.
+	// With TF-IDF, cosine similarity between completely disjoint vocabulary sets is 0.
+	// This entry has maximum signals but must be excluded by the floor.
+	belowFloor := RankInput{
+		EntryID:          "below-floor",
+		SellerKey:        "seller-a",
+		Description:      "financial accounting ledger quarterly report spreadsheet excel",
+		ContentType:      "data",
+		Domains:          []string{"finance"},
+		TokenCost:        10000,
+		Price:            1000,
+		SellerReputation: 90,
+		PutTimestamp:     ts,
+		Signals: BehavioralSignals{
+			ConsumeCount:       100,  // maximum consume signals
+			DistinctBuyerCount: 100, // maximum convergence
+		},
+	}
+
+	// An above-floor entry with zero signals that should appear.
+	aboveFloor := RankInput{
+		EntryID:          "above-floor",
+		SellerKey:        "seller-b",
+		Description:      "Go HTTP handler unit test generator JSON validation",
+		ContentType:      "code",
+		Domains:          []string{"go"},
+		TokenCost:        10000,
+		Price:            1000,
+		SellerReputation: 70,
+		PutTimestamp:     ts,
+		Signals:          BehavioralSignals{},
+	}
+
+	// Index corpus so IDF is computed from both descriptions.
+	docs := []string{belowFloor.Description, aboveFloor.Description}
+	e.IndexCorpus(docs)
+
+	task := "Go HTTP unit test generator JSON validation"
+	results := Rank(task, []RankInput{belowFloor, aboveFloor}, e, RankOptions{})
+
+	// below-floor entry must NOT appear regardless of its signals.
+	for _, r := range results {
+		if r.EntryID == "below-floor" {
+			t.Errorf("below-floor entry appeared in results with signals — floor gate violated (similarity=%f)",
+				r.Similarity)
+		}
+	}
+
+	// above-floor entry must appear.
+	found := false
+	for _, r := range results {
+		if r.EntryID == "above-floor" {
+			found = true
+		}
+	}
+	if !found && len(results) > 0 {
+		// Only fail if some results were returned; if both are below floor that's a fixture issue.
+		t.Errorf("above-floor entry not found in results; results: %v", summarizeResults(results))
+	}
+}
+
+// TestRank_BehavioralBoostBounded verifies that the boost is bounded at
+// MaxBehavioralBoost regardless of signal count.
+func TestRank_BehavioralBoostBounded(t *testing.T) {
+	t.Parallel()
+	e := NewTFIDFEmbedder()
+
+	ts := time.Now().Add(-1 * time.Hour).UnixNano()
+	desc := "Go HTTP handler unit test generator"
+
+	entry := RankInput{
+		EntryID:          "high-signals",
+		SellerKey:        "seller-a",
+		Description:      desc,
+		ContentType:      "code",
+		Domains:          []string{"go"},
+		TokenCost:        10000,
+		Price:            1000,
+		SellerReputation: 70,
+		PutTimestamp:     ts,
+		Signals: BehavioralSignals{
+			ConsumeCount:       999999,
+			DistinctBuyerCount: 999999,
+		},
+	}
+
+	results := Rank("Go HTTP unit test", []RankInput{entry}, e, RankOptions{})
+	if len(results) == 0 {
+		t.Skip("entry below floor — fixture issue")
+	}
+	if results[0].BehavioralBoost > MaxBehavioralBoost+1e-9 {
+		t.Errorf("BehavioralBoost = %f exceeds MaxBehavioralBoost = %f",
+			results[0].BehavioralBoost, MaxBehavioralBoost)
+	}
+}
+
+// TestIndex_SetBehavioralSignals_InjectedIntoSearch verifies the full Index path:
+// SetBehavioralSignals + Search injects signals into Rank() and the boosted
+// entry ranks above the equivalent unboosted entry.
+//
+// This is the integration path the exchange engine uses — exercises the real
+// Index.Search → Rank chain without mocking.
+func TestIndex_SetBehavioralSignals_InjectedIntoSearch(t *testing.T) {
+	t.Parallel()
+
+	e := NewTFIDFEmbedder()
+	idx := NewIndex(e, RankOptions{})
+
+	ts := time.Now().Add(-1 * time.Hour).UnixNano()
+	desc := "Go HTTP handler unit test generator JSON validation"
+
+	boostedInput := RankInput{
+		EntryID:          "idx-boosted",
+		SellerKey:        "seller-a",
+		Description:      desc,
+		ContentType:      "code",
+		Domains:          []string{"go"},
+		TokenCost:        10000,
+		Price:            1000,
+		SellerReputation: 70,
+		PutTimestamp:     ts,
+	}
+	plainInput := RankInput{
+		EntryID:          "idx-plain",
+		SellerKey:        "seller-b",
+		Description:      desc,
+		ContentType:      "code",
+		Domains:          []string{"go"},
+		TokenCost:        10000,
+		Price:            1000,
+		SellerReputation: 70,
+		PutTimestamp:     ts,
+	}
+
+	idx.Rebuild([]RankInput{boostedInput, plainInput})
+
+	// Inject behavioral signals for the "boosted" entry only.
+	signals := map[string]BehavioralSignals{
+		"idx-boosted": {
+			ConsumeCount:       5,
+			DistinctBuyerCount: 3,
+		},
+	}
+	idx.SetBehavioralSignals(signals)
+
+	results := idx.Search("Go HTTP unit test generator JSON validation", 10)
+	if len(results) < 2 {
+		t.Fatalf("expected >=2 results from index search, got %d", len(results))
+	}
+
+	var boostedResult, plainResult *RankedResult
+	for i := range results {
+		switch results[i].EntryID {
+		case "idx-boosted":
+			boostedResult = &results[i]
+		case "idx-plain":
+			plainResult = &results[i]
+		}
+	}
+	if boostedResult == nil {
+		t.Fatal("idx-boosted entry not found in results")
+	}
+	if plainResult == nil {
+		t.Fatal("idx-plain entry not found in results")
+	}
+
+	if boostedResult.BehavioralBoost <= 0 {
+		t.Errorf("idx-boosted BehavioralBoost = %f, want > 0 (signals not injected)",
+			boostedResult.BehavioralBoost)
+	}
+	if plainResult.BehavioralBoost != 0 {
+		t.Errorf("idx-plain BehavioralBoost = %f, want 0 (no signals set)",
+			plainResult.BehavioralBoost)
+	}
+	if results[0].EntryID != "idx-boosted" {
+		t.Errorf("expected idx-boosted to rank first via signals, got %q (scores: boosted=%.4f plain=%.4f)",
+			results[0].EntryID, boostedResult.CompositeScore, plainResult.CompositeScore)
+	}
+}
+
+// TestIndex_SetBehavioralSignals_ClearWithEmpty verifies that calling
+// SetBehavioralSignals with an empty map clears all prior signals.
+func TestIndex_SetBehavioralSignals_ClearWithEmpty(t *testing.T) {
+	t.Parallel()
+
+	e := NewTFIDFEmbedder()
+	idx := NewIndex(e, RankOptions{})
+
+	ts := time.Now().Add(-1 * time.Hour).UnixNano()
+	desc := "Go HTTP handler unit test generator"
+
+	input := RankInput{
+		EntryID:          "entry",
+		SellerKey:        "seller-a",
+		Description:      desc,
+		ContentType:      "code",
+		Domains:          []string{"go"},
+		TokenCost:        10000,
+		Price:            1000,
+		SellerReputation: 70,
+		PutTimestamp:     ts,
+	}
+	idx.Rebuild([]RankInput{input})
+
+	// Set signals, then clear.
+	idx.SetBehavioralSignals(map[string]BehavioralSignals{
+		"entry": {ConsumeCount: 10, DistinctBuyerCount: 5},
+	})
+	idx.SetBehavioralSignals(nil)
+
+	results := idx.Search("Go HTTP unit test", 10)
+	for _, r := range results {
+		if r.EntryID == "entry" && r.BehavioralBoost != 0 {
+			t.Errorf("after clearing signals, BehavioralBoost = %f, want 0", r.BehavioralBoost)
+		}
+	}
+}
