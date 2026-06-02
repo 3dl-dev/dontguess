@@ -23,7 +23,46 @@ type RankedResult struct {
 	EfficiencyScore float64
 	// NoveltyBoost is the Layer 3 discovery boost for underrepresented sellers.
 	NoveltyBoost float64
+	// BehavioralBoost is the additive boost applied to CompositeScore from
+	// behavioral signals (consume count + cross-agent convergence). Range [0, MaxBehavioralBoost].
+	// Only non-zero when the entry has above-floor similarity AND meaningful
+	// behavioral signals. Zero does not mean the entry was penalised.
+	BehavioralBoost float64
 }
+
+// BehavioralSignals carries observed post-purchase signals for a single inventory
+// entry. These are sourced from exchange state (consume messages + buyer maps)
+// and injected into RankInput to close the "behavioral signals over preferences"
+// loop described in the heritage value function.
+//
+// Signals are always observational — they measure what agents actually did, not
+// what they rated. Both fields are derived from non-spoofable, antecedent-anchored
+// message chains in the exchange campfire log.
+type BehavioralSignals struct {
+	// ConsumeCount is the number of exchange:consume signals emitted for this
+	// entry (TagConsume / ConsumeCountByEntry in pkg/exchange/hitrate.go).
+	// Each signal records that a buyer completed a settle(complete) for this
+	// entry — i.e. they actually received and accepted the content.
+	// Sourced from: exchange.ConsumeCountByEntry(consumeMessages)[entryID].
+	ConsumeCount int
+
+	// DistinctBuyerCount is the number of distinct buyer agent keys that have
+	// completed a purchase of this entry (cross-agent convergence signal).
+	// Sourced from: len(State.EntryBuyerMap[entryID]) via BuildConvergenceMap.
+	// The heritage "ungameable trust signal": independent agents reaching the
+	// same entry without coordination signals genuine utility.
+	DistinctBuyerCount int
+}
+
+// MaxBehavioralBoost is the ceiling on the additive behavioral boost applied
+// to CompositeScore (dontguess-860). Bounded to prevent a popular entry from
+// burying genuinely better-matched alternatives — the boost is a tie-breaker
+// and soft signal, not a guaranteed slot guarantee.
+//
+// A boost of 0.10 represents ~12.5% of the typical quality-weighted composite
+// score (WeightQuality=0.80 * L2≈1.0), which is meaningful as a tie-breaker
+// but cannot lift a weak-similarity entry above a strong one.
+const MaxBehavioralBoost = 0.10
 
 // RankInput carries per-entry data needed by the ranker.
 // This struct decouples the ranker from the exchange.InventoryEntry type.
@@ -46,6 +85,10 @@ type RankInput struct {
 	SellerReputation int
 	// PutTimestamp is the campfire-observed receipt time of the put (nanoseconds).
 	PutTimestamp int64
+	// Signals carries optional behavioral signals for this entry.
+	// Zero value (both fields 0) means no signals are available — the entry
+	// is ranked purely on relevance, efficiency, quality, and novelty.
+	Signals BehavioralSignals
 }
 
 // RankOptions configures the ranking algorithm.
@@ -251,10 +294,27 @@ func Rank(task string, candidates []RankInput, embedder Embedder, opts RankOptio
 			l3Novelty = 1.0 - float64(sellerCount[c.SellerKey])/float64(maxSellerCount)
 		}
 
-		// Final composite score.
+		// Final composite score (L1 + L2 + L3).
 		composite := opts.weightEfficiency()*l1Efficiency +
 			opts.weightQuality()*l2Quality +
 			opts.weightNovelty()*l3Novelty
+
+		// Behavioral booster (dontguess-860): additive boost for entries that
+		// have been consumed and/or convergently validated by distinct agents.
+		//
+		// Design principles (§3 of docs/design/exchange-token-savings-v06.md):
+		//  - Floor gates first: this code is only reached for above-floor entries
+		//    (sim >= MinSimilarity). The boost CANNOT resurrect below-floor entries.
+		//  - Bounded: capped at MaxBehavioralBoost (0.10) so a highly-consumed
+		//    entry cannot bury a more-relevant alternative whose similarity is
+		//    significantly higher.
+		//  - Gaming-resistant: consume signals are antecedent-anchored (engine
+		//    emits TagConsume, not the buyer); convergence requires >=3 distinct
+		//    keys (DistinctBuyerCount threshold).
+		//  - Zero-safe: when Signals is zero value, boost == 0 → no change to
+		//    existing ranking for entries without signals.
+		behavioralBoost := computeBehavioralBoost(c.Signals)
+		composite += behavioralBoost
 
 		// Confidence is the Layer 2 quality composite (what the buyer sees).
 		confidence := l2Quality
@@ -267,6 +327,7 @@ func Rank(task string, candidates []RankInput, embedder Embedder, opts RankOptio
 			IsPartialMatch:  confidence < opts.partialThreshold(),
 			EfficiencyScore: l1Efficiency,
 			NoveltyBoost:    l3Novelty,
+			BehavioralBoost: behavioralBoost,
 		})
 	}
 
@@ -278,4 +339,51 @@ func Rank(task string, candidates []RankInput, embedder Embedder, opts RankOptio
 	}
 
 	return results
+}
+
+// computeBehavioralBoost computes the additive behavioral signal boost for a
+// single inventory entry given its observed signals.
+//
+// Two signals contribute independently:
+//
+//  1. Consume signal (M5): each exchange:consume event for this entry adds a
+//     small, logarithmically-dampened boost. Using log1p dampens the effect of
+//     high consume counts so one very popular entry cannot dominate indefinitely.
+//     Weight: up to half of MaxBehavioralBoost.
+//
+//  2. Cross-agent convergence (dontguess-412): entries consumed by >=3 distinct
+//     agent keys receive a flat step-up bonus. The threshold (3) comes from the
+//     heritage "ungameable trust signal" — 3+ independent agents reaching the same
+//     entry without coordination is a strong utility signal. Entries with fewer
+//     distinct buyers get a proportional partial bonus, so convergence is a
+//     continuous reward rather than an all-or-nothing gate.
+//     Weight: up to half of MaxBehavioralBoost.
+//
+// Total boost is capped at MaxBehavioralBoost (0.10) and is always non-negative.
+// The boost is zero when both signal fields are zero (backward-compatible).
+func computeBehavioralBoost(s BehavioralSignals) float64 {
+	if s.ConsumeCount == 0 && s.DistinctBuyerCount == 0 {
+		return 0
+	}
+
+	// Consume signal: log1p-dampened, half weight.
+	// log1p(1)≈0.693, log1p(10)≈2.40, log1p(100)≈4.61 — saturates slowly.
+	// Normalize so log1p(10 consumes) → ~0.5 half-weight contribution.
+	consumeNorm := math.Log1p(float64(s.ConsumeCount)) / math.Log1p(10.0)
+	if consumeNorm > 1.0 {
+		consumeNorm = 1.0
+	}
+	consumeContrib := consumeNorm * (MaxBehavioralBoost / 2.0)
+
+	// Convergence signal: proportional to distinct buyers up to the threshold.
+	// At >=3 buyers: full half-weight (0.05). Below 3: linear partial reward.
+	const convergenceThreshold = 3.0
+	buyerNorm := math.Min(float64(s.DistinctBuyerCount)/convergenceThreshold, 1.0)
+	convergenceContrib := buyerNorm * (MaxBehavioralBoost / 2.0)
+
+	total := consumeContrib + convergenceContrib
+	if total > MaxBehavioralBoost {
+		total = MaxBehavioralBoost
+	}
+	return total
 }

@@ -1042,6 +1042,12 @@ func (e *Engine) handleSettle(msg *Message) error {
 			// Best-effort: log but do not abort the settle flow.
 			e.opts.log("engine: settle: emitConsumeSignal: %v", err)
 		}
+		// Refresh behavioral signals in the match index after settle:complete.
+		// State has just updated EntryBuyerMap (via applySettleComplete) and
+		// applyConsume will be called when the consume message replays. Calling
+		// SetBehavioralSignals here ensures the index reflects the current snapshot
+		// before the next buy arrives. Best-effort — does not affect settle flow.
+		e.matchIndex.SetBehavioralSignals(e.state.AllEntryBehavioralSignals())
 	}
 
 	if e.opts.ScripStore == nil {
@@ -2723,6 +2729,9 @@ func (e *Engine) rebuildMatchIndex() {
 		inputs[i] = e.inventoryEntryToRankInput(entry)
 	}
 	e.matchIndex.Rebuild(inputs)
+	// Refresh behavioral signals in the index after rebuild so the ranker sees
+	// current consume counts and distinct buyer counts from state.
+	e.matchIndex.SetBehavioralSignals(e.state.AllEntryBehavioralSignals())
 }
 
 // inventoryEntryToRankInput converts an InventoryEntry to a matching.RankInput.
