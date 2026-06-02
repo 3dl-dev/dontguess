@@ -989,6 +989,16 @@ func (e *Engine) handleSettle(msg *Message) error {
 		return e.handleSettleDeliverContent(msg)
 	}
 
+	// Emit a consume/accept behavioral signal when the buyer completes a
+	// transaction. This fires unconditionally (with or without ScripStore) so
+	// the reporter can measure actual buyer usage, not just matcher hits.
+	if phase == SettlePhaseStrComplete {
+		if err := e.emitConsumeSignal(msg); err != nil {
+			// Best-effort: log but do not abort the settle flow.
+			e.opts.log("engine: settle: emitConsumeSignal: %v", err)
+		}
+	}
+
 	if e.opts.ScripStore == nil {
 		return nil
 	}
@@ -1206,6 +1216,38 @@ func (e *Engine) emitSettleFailed(completeMsg *Message, reservationID, errorCode
 	if _, emitErr := e.sendOperatorMessage(payload, tags, []string{completeMsg.ID}); emitErr != nil {
 		e.opts.log("engine: settle-failed: emit: %v", emitErr)
 	}
+}
+
+// emitConsumeSignal records a buyer consume/accept behavioral signal when a
+// settle(complete) is received. The signal is an exchange:consume message
+// carrying the entry_id (derived from the antecedent chain, not the buyer
+// payload) and buyer_key, with the complete message as antecedent.
+//
+// Best-effort: the caller logs errors but does not abort the settle flow.
+//
+// This is the authoritative signal that the buyer actually used a delivered
+// candidate — stronger than a hit (matcher returned something) and the
+// foundation for the heritage "behavioral signals over preferences" metric.
+func (e *Engine) emitConsumeSignal(completeMsg *Message) error {
+	if len(completeMsg.Antecedents) == 0 {
+		return fmt.Errorf("consume signal: complete message has no antecedents")
+	}
+	deliverMsgID := completeMsg.Antecedents[0]
+	settledEntry, ok := e.state.EntryForDeliver(deliverMsgID)
+	if !ok {
+		return fmt.Errorf("consume signal: cannot derive entry for deliver=%s — antecedent chain broken", shortKey(deliverMsgID))
+	}
+	payload, err := e.marshal(map[string]any{
+		"entry_id":  settledEntry.EntryID,
+		"buyer_key": completeMsg.Sender,
+	})
+	if err != nil {
+		return fmt.Errorf("consume signal: marshal: %w", err)
+	}
+	if _, err := e.sendOperatorMessage(payload, []string{TagConsume}, []string{completeMsg.ID}); err != nil {
+		return fmt.Errorf("consume signal: send: %w", err)
+	}
+	return nil
 }
 
 // handleSettleBuyerAcceptScrip performs the scrip hold when a buyer sends a

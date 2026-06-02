@@ -178,3 +178,29 @@ func ComputeHitRate(buys, matches []Message) HitRateReport {
 func round2(f float64) float64 {
 	return float64(int64(f*100+0.5)) / 100
 }
+
+// ConsumeCountByEntry tallies the number of exchange:consume signals per
+// entry_id from a slice of consume messages.
+//
+// consume is a slice of exchange:consume messages (filtered by TagConsume
+// before calling). Returns a map from entry_id → consume count.
+//
+// The entry_id is read from the payload field "entry_id", which is set by
+// emitConsumeSignal (engine.go) using the antecedent-derived entry ID —
+// never from the buyer-supplied payload. A missing or unparseable entry_id
+// skips the message.
+//
+// Callers are responsible for windowing (passing only messages within --since).
+func ConsumeCountByEntry(consumes []Message) map[string]int {
+	counts := make(map[string]int, len(consumes))
+	for i := range consumes {
+		var p struct {
+			EntryID string `json:"entry_id"`
+		}
+		if err := json.Unmarshal(consumes[i].Payload, &p); err != nil || p.EntryID == "" {
+			continue
+		}
+		counts[p.EntryID]++
+	}
+	return counts
+}
