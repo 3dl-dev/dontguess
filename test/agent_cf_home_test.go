@@ -98,26 +98,34 @@ func runWithExtraEnv(a *agent, extraEnv []string, name string, args ...string) (
 func extractSenderFromMessages(t *testing.T, cfReadJSON string, tagSubstr string) []string {
 	t.Helper()
 	var senders []string
-	// Each JSON line is a message object: {"id":"...","sender":"...","tags":[...],...}
-	for _, line := range strings.Split(cfReadJSON, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || line == "[" || line == "]" {
-			continue
+	type msgT struct {
+		Sender string   `json:"sender"`
+		Tags   []string `json:"tags"`
+	}
+	// `cf read --json` emits a PRETTY-PRINTED JSON array (each message spans many
+	// lines), not JSONL. Parse the whole array. Isolate it from any leading/trailing
+	// log noise by slicing from the first '[' to the last ']'.
+	trimmed := strings.TrimSpace(cfReadJSON)
+	if i := strings.Index(trimmed, "["); i >= 0 {
+		if j := strings.LastIndex(trimmed, "]"); j > i {
+			trimmed = trimmed[i : j+1]
 		}
-		// Strip leading comma from JSON array elements
-		line = strings.TrimPrefix(line, ",")
-		line = strings.TrimSuffix(line, ",")
-
-		var msg struct {
-			Sender string   `json:"sender"`
-			Tags   []string `json:"tags"`
+	}
+	var msgs []msgT
+	if err := json.Unmarshal([]byte(trimmed), &msgs); err != nil {
+		// Fall back to a single object form.
+		var one msgT
+		if json.Unmarshal([]byte(trimmed), &one) == nil {
+			msgs = []msgT{one}
+		} else {
+			t.Logf("extractSenderFromMessages: could not parse cf read JSON: %v", err)
+			return senders
 		}
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue
-		}
-		for _, tag := range msg.Tags {
+	}
+	for _, m := range msgs {
+		for _, tag := range m.Tags {
 			if strings.Contains(tag, tagSubstr) {
-				senders = append(senders, msg.Sender)
+				senders = append(senders, m.Sender)
 				break
 			}
 		}
@@ -277,8 +285,9 @@ func TestAgentCFHome_DistinctSigningKeys(t *testing.T) {
 	alicePrefix8 := alicePubkey[:8]
 
 	// Assert: the put message sender == bob's key.
-	// tag substring "exchange:phase:put" targets the put/put-accept messages.
-	putSenders := extractSenderFromMessages(t, cfReadOut, "exchange:phase:put")
+	// tag substring "exchange:put" targets bob's put message (the actual emitted
+	// tag is "exchange:put", not "exchange:phase:put").
+	putSenders := extractSenderFromMessages(t, cfReadOut, "exchange:put")
 	putSignedByBob := false
 	for _, s := range putSenders {
 		if strings.HasPrefix(s, bobPubkey) || strings.HasPrefix(bobPubkey, s) {
@@ -295,8 +304,10 @@ func TestAgentCFHome_DistinctSigningKeys(t *testing.T) {
 	}
 
 	// Assert: the buy message sender == carol's key.
-	// tag substring "exchange:phase:buy" targets the buy messages.
-	buySenders := extractSenderFromMessages(t, cfReadOut, "exchange:phase:buy")
+	// tag substring "exchange:buy" targets carol's buy message (the actual emitted
+	// tag is "exchange:buy"; this also matches the operator's "exchange:buy-miss",
+	// which is harmless — the assertion only requires carol's key to be present).
+	buySenders := extractSenderFromMessages(t, cfReadOut, "exchange:buy")
 	buySignedByCarol := false
 	for _, s := range buySenders {
 		if strings.HasPrefix(s, carolPubkey) || strings.HasPrefix(carolPubkey, s) {
