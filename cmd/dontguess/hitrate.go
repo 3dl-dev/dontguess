@@ -269,8 +269,16 @@ func printHitRate(rep exchange.HitRateReport, since time.Duration, asJSON bool) 
 	fmt.Printf("=== net token savings (Track C, dontguess-eff) ===\n\n")
 	fmt.Printf("  NET TOKENS SAVED:       %+d  (saved_on_hits − miss_costs − false_positive_waste)\n", rep.NetTokensSaved)
 	fmt.Printf("  saved on real hits:     %d\n", rep.SavedOnRealHits)
+	// Derive the actual per-miss cost used during computation from the report.
+	// TotalMissCost = Misses × missCostPerQuery; recover the rate rather than
+	// hardcoding DefaultMissCostPerQuery (which would be wrong when opts.MissCostPerQuery
+	// is set to a non-default value by the caller).
+	var actualMissCost int64 = exchange.DefaultMissCostPerQuery
+	if rep.Misses > 0 {
+		actualMissCost = rep.TotalMissCost / int64(rep.Misses)
+	}
 	fmt.Printf("  miss overhead:          %d  (%d misses × ~%d tokens/miss)\n",
-		rep.TotalMissCost, rep.Misses, exchange.DefaultMissCostPerQuery)
+		rep.TotalMissCost, rep.Misses, actualMissCost)
 	fmt.Printf("  false-positive waste:   %d  (delivered+unconsumed entries re-derived)\n", rep.TotalFalsePositiveWaste)
 	if len(rep.PerQueryEconomics) > 0 {
 		fmt.Println()
