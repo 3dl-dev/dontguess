@@ -60,6 +60,7 @@ case "${1:-}" in
   init|serve|convention) exec "$DG_OP" "$@";;
   join|leave) subcmd="$1"; shift; exec "$CF" "$subcmd" "$@";;
   version|--version) echo "dontguess wrapper v0.5.0"; exit 0;;
+  upgrade) echo "Upgrading dontguess to the latest release..."; curl -fsSL https://dontguess.ai/install.sh | sh; exit 0;;
   --help|-h|help|"") echo "dontguess — token-work exchange"; exit 0;;
 esac
 if [ ! -f "$CFG" ]; then echo "No exchange configured. Run: dontguess init" >&2; exit 1; fi
@@ -251,96 +252,162 @@ func TestAgentCFHome_DistinctSigningKeys(t *testing.T) {
 		return strings.Contains(alice.cfRead(xcfid), "exchange:match")
 	})
 
-	// Read all messages as JSON and verify sender keys.
+	// Read all messages as JSON and verify sender fields.
+	// This asserts that the put message was SIGNED BY bob's key (not just that
+	// bob's key prefix appears somewhere in the output — which would also match
+	// the admit-message payload). extractSenderFromMessages parses the structured
+	// JSON output and extracts the actual "sender" field of each message.
 	cfReadOut, err := alice.run("cf", "read", xcfid, "--all", "--json")
 	if err != nil {
 		t.Logf("cf read --json warning: %v\n%s", err, cfReadOut)
-		// Fall back to non-JSON read for message verification.
-		cfReadOut = alice.cfRead(xcfid)
+		// Fall back to non-JSON read and use prefix heuristic with a note.
+		raw := alice.cfRead(xcfid)
+		bobPrefix8 := bobPubkey[:8]
+		carolPrefix8 := carolPubkey[:8]
+		t.Logf("WARNING: cf read --json failed; falling back to prefix search (weaker assertion)")
+		if !strings.Contains(raw, bobPrefix8) {
+			t.Errorf("put fallback: bob_pubkey prefix %q not found in exchange messages", bobPrefix8)
+		}
+		if !strings.Contains(raw, carolPrefix8) {
+			t.Errorf("buy fallback: carol_pubkey prefix %q not found in exchange messages", carolPrefix8)
+		}
+		return
 	}
 
-	// Read all messages. The human-readable cf output abbreviates sender to 8 hex chars.
-	// Use the first 8 chars of each key for searching.
-	raw := alice.cfRead(xcfid)
-	bobPrefix8 := bobPubkey[:8]
-	carolPrefix8 := carolPubkey[:8]
 	alicePrefix8 := alicePubkey[:8]
 
-	// Assert: bob's key prefix appears in the exchange output.
-	// (bob put a message → his 8-char pubkey prefix appears as sender in cf read output)
-	if !strings.Contains(raw, bobPrefix8) {
-		t.Errorf("put message not signed by bob: bob_pubkey prefix %q not found in exchange messages.\n"+
+	// Assert: the put message sender == bob's key.
+	// tag substring "exchange:phase:put" targets the put/put-accept messages.
+	putSenders := extractSenderFromMessages(t, cfReadOut, "exchange:phase:put")
+	putSignedByBob := false
+	for _, s := range putSenders {
+		if strings.HasPrefix(s, bobPubkey) || strings.HasPrefix(bobPubkey, s) {
+			putSignedByBob = true
+			break
+		}
+	}
+	if !putSignedByBob {
+		t.Errorf("put message not signed by bob: sender(s) %v do not match bob_pubkey %q.\n"+
 			"alice_pubkey prefix: %q\n"+
-			"Raw campfire output (last 3000 chars):\n%s",
-			bobPrefix8, alicePrefix8,
-			tailStr(raw, 3000))
+			"JSON output (last 3000 chars):\n%s",
+			putSenders, bobPubkey[:16], alicePrefix8,
+			tailStr(cfReadOut, 3000))
 	}
 
-	// Assert: carol's key prefix appears in the exchange output.
-	// (carol sent a buy → her 8-char pubkey prefix appears as sender)
-	if !strings.Contains(raw, carolPrefix8) {
-		t.Errorf("buy message not signed by carol: carol_pubkey prefix %q not found in exchange messages.\n"+
+	// Assert: the buy message sender == carol's key.
+	// tag substring "exchange:phase:buy" targets the buy messages.
+	buySenders := extractSenderFromMessages(t, cfReadOut, "exchange:phase:buy")
+	buySignedByCarol := false
+	for _, s := range buySenders {
+		if strings.HasPrefix(s, carolPubkey) || strings.HasPrefix(carolPubkey, s) {
+			buySignedByCarol = true
+			break
+		}
+	}
+	if !buySignedByCarol {
+		t.Errorf("buy message not signed by carol: sender(s) %v do not match carol_pubkey %q.\n"+
 			"alice_pubkey prefix: %q\n"+
-			"Raw campfire output (last 3000 chars):\n%s",
-			carolPrefix8, alicePrefix8,
-			tailStr(raw, 3000))
+			"JSON output (last 3000 chars):\n%s",
+			buySenders, carolPubkey[:16], alicePrefix8,
+			tailStr(cfReadOut, 3000))
 	}
 
-	_ = cfReadOut // used above via extractSenderFromMessages (kept for future --json path)
-
-	t.Logf("AGENT_CF_HOME routing verified:")
+	t.Logf("AGENT_CF_HOME routing verified via JSON sender field:")
 	t.Logf("  alice (operator): %s", alicePubkey[:16])
 	t.Logf("  bob   (seller):   %s", bobPubkey[:16])
 	t.Logf("  carol (buyer):    %s", carolPubkey[:16])
+	t.Logf("  put senders: %v", putSenders)
+	t.Logf("  buy senders: %v", buySenders)
 }
 
-// TestAgentCFHome_BackwardCompat verifies that with AGENT_CF_HOME unset, the wrapper
-// passes --cf-home $DG_HOME to cf (unchanged from v0.4.2 behavior).
+// TestAgentCFHome_BackwardCompat verifies that when AGENT_CF_HOME is unset, the
+// WRAPPER (not cf directly) passes --cf-home $DG_HOME to cf — unchanged from
+// v0.4.2 behavior. This is the upgrade-safety guarantee for existing installs.
+//
+// Previously this test called cf directly, which did NOT exercise the wrapper's
+// routing logic. Now it drives the wrapper binary with an arg-capture stub cf,
+// asserting the exact --cf-home argument passed. This mirrors the approach used
+// in TestAgentCFHome_WrapperArgCapture Case 2, but uses the wrapperV2 written
+// by setup/newAgent to confirm that the installed wrapper (not a hand-written
+// fixture) also preserves backward compatibility.
 func TestAgentCFHome_BackwardCompat(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping e2e test in short mode")
-	}
 	t.Parallel()
-	env := setup(t)
 
-	alice := env.newAgent("alice")
-	writeWrapperV2(t, alice.binDir)
+	testDir := t.TempDir()
+	binDir := filepath.Join(testDir, "bin")
+	dgHome := filepath.Join(testDir, "dg_home")
+	argLog := filepath.Join(testDir, "cf_args.log")
 
-	// Init exchange.
-	out, err := alice.run("dontguess", "init")
-	if err != nil {
-		t.Fatalf("init failed: %v\n%s", err, out)
-	}
-	xcfid := alice.exchangeID()
+	os.MkdirAll(binDir, 0755)
+	os.MkdirAll(dgHome, 0755)
 
-	cancel := alice.runBg("dontguess-operator", "serve")
-	defer cancel()
-	time.Sleep(1 * time.Second)
-
-	// With AGENT_CF_HOME unset (no extra env), alice puts using her own key.
-	out, err = alice.run("cf", xcfid, "put",
-		"--description", "backward compat: no AGENT_CF_HOME",
-		"--content", "content",
-		"--token_cost", "1000",
-		"--content_type", "code",
-		"--domain", "test")
-	if err != nil {
-		t.Fatalf("put failed: %v\n%s", err, out)
+	// Write a minimal exchange config so the wrapper can read XCFID.
+	const fakeCFID = "aabbcc1122334455aabbcc1122334455aabbcc1122334455aabbcc1122334455"
+	exchangeJSON := fmt.Sprintf(`{"exchange_campfire_id": %q}`, fakeCFID)
+	if err := os.WriteFile(filepath.Join(dgHome, "dontguess-exchange.json"), []byte(exchangeJSON), 0644); err != nil {
+		t.Fatalf("writing fake exchange config: %v", err)
 	}
 
-	waitFor(t, 10*time.Second, "put-accept", func() bool {
-		return strings.Contains(alice.cfRead(xcfid), "exchange:phase:put-accept")
-	})
-
-	// Verify alice's key is the seller key (backward compat = operator key).
-	// cf read output abbreviates sender to 8 hex chars.
-	alicePubkey := agentPubkeyHex(t, alice)
-	raw := alice.cfRead(xcfid)
-	alicePrefix8 := alicePubkey[:8]
-	if !strings.Contains(raw, alicePrefix8) {
-		t.Errorf("backward compat: alice's key prefix %q not found in exchange output", alicePrefix8)
+	// Write a valid PID (our own process) so kill -0 succeeds and the wrapper
+	// skips the operator-start path.
+	selfPID := fmt.Sprintf("%d", os.Getpid())
+	if err := os.WriteFile(filepath.Join(dgHome, "dontguess.pid"), []byte(selfPID), 0644); err != nil {
+		t.Fatalf("writing fake pid: %v", err)
 	}
-	t.Logf("Backward compat verified: alice key %s in exchange messages", alicePrefix8)
+
+	// Install a stub cf that records its argv to argLog.
+	stubCF := `#!/bin/sh
+printf '%s\n' "$@" >> ` + argLog + `
+printf '---\n' >> ` + argLog + `
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "cf"), []byte(stubCF), 0755); err != nil {
+		t.Fatalf("writing stub cf: %v", err)
+	}
+	// Install a stub dontguess-operator (not invoked in this test).
+	if err := os.WriteFile(filepath.Join(binDir, "dontguess-operator"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("writing stub operator: %v", err)
+	}
+
+	// Write the wrapperV2 (the same wrapper installed by a99).
+	writeWrapperV2(t, binDir)
+
+	// Run the wrapper with AGENT_CF_HOME unset.  DG_HOME is set to our fake dir.
+	// This is the backward-compat scenario: existing install, no per-agent identity.
+	wrapperPath := filepath.Join(binDir, "dontguess")
+	cmd := exec.Command(wrapperPath, "buy", "--task", "backward compat probe", "--budget", "100")
+	cmd.Env = []string{
+		"HOME=" + testDir,
+		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		"DG_HOME=" + dgHome,
+		// AGENT_CF_HOME intentionally absent
+	}
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	_ = cmd.Run() // stub cf exits 0; ignore wrapper exit code
+
+	args := readArgLog(t, argLog)
+	t.Logf("Backward compat (AGENT_CF_HOME unset): wrapper passed cf argv = %v", args)
+
+	// Assert: --cf-home must be DG_HOME (not any per-agent path).
+	cfHomeIdx := -1
+	for i, a := range args {
+		if a == "--cf-home" && i+1 < len(args) {
+			cfHomeIdx = i + 1
+			break
+		}
+	}
+	if cfHomeIdx == -1 {
+		t.Errorf("backward compat: --cf-home flag not found in cf args: %v\n"+
+			"wrapper output: %s", args, buf.String())
+	} else if args[cfHomeIdx] != dgHome {
+		t.Errorf("backward compat: --cf-home = %q, want %q (DG_HOME)\n"+
+			"AGENT_CF_HOME must be unset for backward compatibility",
+			args[cfHomeIdx], dgHome)
+	} else {
+		t.Logf("Backward compat verified: wrapper passed --cf-home %s (== DG_HOME)", args[cfHomeIdx])
+	}
 }
 
 // TestAgentCFHome_WrapperArgCapture is a shell-level arg-capture test.
@@ -550,6 +617,83 @@ func readArgLog(t *testing.T, path string) []string {
 		}
 	}
 	return result
+}
+
+
+// TestWrapper_UpgradeCommand verifies that "dontguess upgrade" invokes the installer
+// fetch via curl. Since the command shells out to curl, we stub curl with a script
+// that records its arguments, then assert the correct installer URL is requested.
+//
+// This is the ground-source proof for the upgrade command added in dontguess-d5b.
+// Network access is not required: the stub curl exits 0 without making any request.
+func TestWrapper_UpgradeCommand(t *testing.T) {
+	t.Parallel()
+
+	testDir := t.TempDir()
+	binDir := filepath.Join(testDir, "bin")
+	argLog := filepath.Join(testDir, "curl_args.log")
+
+	os.MkdirAll(binDir, 0755)
+
+	// Stub curl that records argv to argLog and exits 0 (no network needed).
+	stubCurl := `#!/bin/sh
+printf '%s\n' "$@" >> ` + argLog + `
+printf '---\n' >> ` + argLog + `
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "curl"), []byte(stubCurl), 0755); err != nil {
+		t.Fatalf("writing stub curl: %v", err)
+	}
+
+	// Stub sh that simply execs its args (sh -c <script> requires curl to be on PATH).
+	// Actually, "curl ... | sh" pipes to sh, which in turn would try to exec the
+	// install script. For this test we only need curl to be called with the right URL.
+	// We stub sh to exit 0 immediately (no-op install).
+	stubSh := `#!/bin/sh
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "sh"), []byte(stubSh), 0755); err != nil {
+		t.Fatalf("writing stub sh: %v", err)
+	}
+
+	// Write the wrapperV2. The upgrade case in the production wrapper calls:
+	//   curl -fsSL https://dontguess.ai/install.sh | sh
+	// We need that exact URL to appear in the stub curl args.
+	writeWrapperV2(t, binDir)
+
+	wrapperPath := filepath.Join(binDir, "dontguess")
+	cmd := exec.Command(wrapperPath, "upgrade")
+	cmd.Env = []string{
+		"HOME=" + testDir,
+		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+	}
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	_ = cmd.Run()
+
+	// Check if curl was invoked at all (argLog may not exist if upgrade case is missing).
+	curlArgs := readArgLog(t, argLog)
+	t.Logf("upgrade: curl argv = %v", curlArgs)
+	t.Logf("upgrade: wrapper output = %s", buf.String())
+
+	// The upgrade command must invoke the installer URL.
+	const installerURL = "https://dontguess.ai/install.sh"
+	found := false
+	for _, a := range curlArgs {
+		if a == installerURL {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("upgrade command did not invoke curl with %q.\n"+
+			"curl argv: %v\n"+
+			"wrapper output: %s",
+			installerURL, curlArgs, buf.String())
+	} else {
+		t.Logf("upgrade command verified: curl called with %s", installerURL)
+	}
 }
 
 // truncate returns the first n bytes of s as a string.

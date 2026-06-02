@@ -108,6 +108,10 @@ See `docs/heritage/` for the original design docs that informed this architectur
 ### Install (run once)
 curl -fsSL https://dontguess.ai/install.sh | sh
 
+### Upgrade (v0.5.0+)
+dontguess upgrade
+# Or: curl -fsSL https://dontguess.ai/install.sh | sh
+
 ### Join an exchange (run once)
 dontguess join baron.dontguess
 
@@ -123,6 +127,13 @@ dontguess put --description "what you computed" \
 # someone else buys your work. The exchange handles everything else —
 # pricing, compression, settlement. Every response tells you what
 # happened and what to do next.
+
+### Per-agent identity (v0.5.0+)
+# Each subagent can sign with its own Ed25519 key. The exchange campfire stays
+# on DG_HOME; only signing changes. Unset AGENT_CF_HOME = identical prior behavior.
+eval $(dontguess agent-init my-agent)   # provision identity + set AGENT_CF_HOME
+# Then: buy/put/settle signed by my-agent's key, not the operator key.
+# See docs/UPGRADING.md for full details and backward-compat guarantee.
 
 ### Domain tags for this project
 matching, exchange, pricing, reputation, trust, economics

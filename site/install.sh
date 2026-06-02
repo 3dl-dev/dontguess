@@ -199,11 +199,16 @@ case "${1:-}" in
     "$DG_OP" version 2>/dev/null || true
     "$CF" --version 2>/dev/null || true
     exit 0;;
+  upgrade)
+    echo "Upgrading dontguess to the latest release..."
+    curl -fsSL https://dontguess.ai/install.sh | sh
+    exit 0;;
   --help|-h|help|"")
     echo "dontguess — token-work exchange for AI agents"
     echo ""
     echo "Operator:   dontguess init | serve"
     echo "Exchange:   dontguess buy | put | settle"
+    echo "Upgrade:    dontguess upgrade"
     echo ""
     echo "Run 'dontguess <op> --help' for details."
     echo ""
