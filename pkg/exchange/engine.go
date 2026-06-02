@@ -1081,10 +1081,13 @@ func (e *Engine) handleSettle(msg *Message) error {
 		return nil
 	}
 
-	// Derive entryID for co-occurrence recording and next-work prediction.
+	// Derive entryID for co-occurrence recording, next-work prediction, and
+	// high-reuse residual classification.
 	// This is the entry that just completed — use it to update buyer session data
 	// and pre-stage standing assigns for predicted follow-on work.
-	if settledEntry, entryOK := e.state.EntryForDeliver(deliverMsgID); entryOK {
+	var settledEntry *InventoryEntry
+	if se, entryOK := e.state.EntryForDeliver(deliverMsgID); entryOK {
+		settledEntry = se
 		buyerKey := msg.Sender
 		e.recordBuyerSettlement(buyerKey, settledEntry.EntryID)
 		e.stagePredictions(settledEntry.EntryID)
@@ -1133,7 +1136,16 @@ func (e *Engine) handleSettle(msg *Message) error {
 	// => price = res.Amount * MatchingFeeRate / (MatchingFeeRate+1)
 	price := res.Amount * MatchingFeeRate / (MatchingFeeRate + 1)
 	fee := price / MatchingFeeRate
-	residual := price / ResidualRate
+
+	// High-reuse residual: settled entries in the §4 distilled-artifact class earn
+	// 20% residual per sale (price / 5) instead of the standard 10% (price / 10).
+	// This doubles the ongoing revenue stream for the most-reused artifact types.
+	// Classification uses the same two-gate IsHighReuseArtifact check as the accept path.
+	residualDenom := int64(ResidualRate) // standard: 10 → 10%
+	if settledEntry != nil && IsHighReuseArtifact(settledEntry) {
+		residualDenom = HighReuseResidualDenominator // high-reuse: 5 → 20%
+	}
+	residual := price / residualDenom
 	exchangeRevenue := price - residual // fee already came out of the buyer's pre-decrement
 
 	operatorKey := e.state.OperatorKey
@@ -2444,7 +2456,7 @@ func (e *Engine) autoAcceptPutLocked(putMsgID string, price int64, expiresAt tim
 		"entry_id":   putMsgID,
 		"price":      price,
 		"expires_at": expiresAtStr,
-		"guide":      "Your entry is now live in inventory and searchable by buyers. A compression task has been posted for you (check exchange:assign messages) — completing it earns 50% of token_cost in scrip. You earn residuals (10% of sale price) each time a buyer purchases your content.",
+		"guide":      "Your entry is now live in inventory and searchable by buyers. A compression task has been posted for you (check exchange:assign messages) — completing it earns 50% of token_cost in scrip. You earn residuals each time a buyer purchases your content (10% standard; 20% for high-reuse distilled artifacts: schema checklists, protocol/setup READMEs, CI path filters, language-level test patterns, migration recipes — put the distilled form, not session notes).",
 	})
 	if err != nil {
 		return fmt.Errorf("encoding put-accept payload: %w", err)
@@ -2951,14 +2963,24 @@ func (e *Engine) RunAutoAccept(max int64, now time.Time, skippedPuts map[string]
 			}
 			continue
 		}
-		price := entry.TokenCost * 70 / 100
+		// High-reuse artifacts (§4 class — schema checklists, protocol READMEs,
+		// CI path filters, test patterns, migration recipes) earn a 15-point
+		// accept-price premium (85% vs 70% of token_cost). This biases incentives
+		// toward the distilled-artifact class the exchange is optimized for.
+		// IsHighReuseArtifact uses a two-gate classifier (content_type + keyword +
+		// co-signal) that is substantially harder to game than a bare keyword match.
+		pricePct := StandardAcceptPriceNumerator
+		if IsHighReuseArtifact(entry) {
+			pricePct = HighReuseAcceptPriceNumerator
+		}
+		price := entry.TokenCost * pricePct / 100
 		expires := now.Add(72 * time.Hour)
 		// Call the locked variant — opMu is already held by this function.
 		if err := e.autoAcceptPutLocked(entry.PutMsgID, price, expires); err != nil {
 			e.opts.log("auto-accept put %s failed: %v", shortKey(entry.PutMsgID), err)
 		} else {
-			e.opts.log("auto-accepted put %s: price=%d (token_cost=%d)",
-				shortKey(entry.PutMsgID), price, entry.TokenCost)
+			e.opts.log("auto-accepted put %s: price=%d (token_cost=%d, high_reuse=%v)",
+				shortKey(entry.PutMsgID), price, entry.TokenCost, pricePct == HighReuseAcceptPriceNumerator)
 		}
 	}
 }

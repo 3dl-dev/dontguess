@@ -165,6 +165,21 @@ const (
 	// MaxTokensPerByte). This constant enforces the lower bound. Both checks are in
 	// applyPut and apply independently.
 	MinTokenCost = int64(200)
+
+	// HighReuseAcceptPriceNumerator is the accept-price percentage (of token_cost)
+	// paid to sellers of high-reuse distilled artifacts (§4 class, dontguess-13a).
+	// 85% vs the standard 70% — high-reuse artifacts earn a 15-point premium at put time.
+	HighReuseAcceptPriceNumerator = int64(85)
+
+	// StandardAcceptPriceNumerator is the accept-price percentage for standard puts.
+	// 70% of token_cost is the baseline price paid by the exchange to sellers.
+	StandardAcceptPriceNumerator = int64(70)
+
+	// HighReuseResidualDenominator is the residual divisor for high-reuse artifacts.
+	// residual = price / HighReuseResidualDenominator → 20% (1/5).
+	// Standard residual is price / ResidualRate → 10% (1/10).
+	// High-reuse entries earn double the residual per sale because of expected cross-project reuse.
+	HighReuseResidualDenominator = int64(5)
 )
 
 // InventoryEntry is a single cache entry in the exchange inventory.
@@ -1184,6 +1199,132 @@ func isTestLikeDescription(desc string) bool {
 	// test that polluted inventory ("upgrade smoke test cf v0.31.2 operator", etc).
 	if strings.HasPrefix(lower, "upgrade smoke test") {
 		return true
+	}
+	return false
+}
+
+// highReuseClass is a single entry in the high-reuse keyword classification table.
+// To be high-reuse, a description must match the primary keywords AND at least one
+// of the co-signals. This two-gate design prevents bare-keyword gaming: an agent
+// cannot mislabel session ephemera as high-reuse by including a single term.
+type highReuseClass struct {
+	// primary is a required keyword that must appear in the lowercased description.
+	primary string
+	// coSignals is a set of co-occurring signals; at least one must also appear.
+	// These represent structural context that distinguishes reusable artifacts from
+	// session-specific mentions (e.g. "protocol" co-signals README from "my notes on the readme").
+	coSignals []string
+}
+
+// highReuseKeywords defines the classification table for §4 high-reuse artifact classes.
+//
+// §4 classes (from exchange-matching-measurement-review.md):
+//  1. Schema correctness checklists  — e.g. "legion.tools v1.2 schema correctness checklist"
+//  2. Cross-project protocol/setup READMEs — e.g. "cf-protocol README CF_NO_PINS"
+//  3. CI path filter / CI config fragments — e.g. "GateEvaluator conformance CI path filter"
+//  4. Language-level test patterns — e.g. "flock contention test pattern for Go"
+//  5. Migration recipes/runbooks — e.g. "cf migrate-store --cf-home symlink bridge"
+//
+// GAMEABILITY NOTE: bare substring matches on common words ("readme", "pattern",
+// "guide") are gameable — an agent can mention the word in a session-ephemera
+// description and receive the high-reuse pricing tier. Each entry therefore
+// requires a co-occurring structural signal that distinguishes the real artifact
+// class from ephemeral mentions. See unit tests in put_reuse_class_test.go for
+// concrete examples of descriptions that must NOT classify as high-reuse.
+var highReuseKeywords = []highReuseClass{
+	// Class 1: schema correctness checklists
+	// Primary: "checklist" (a checklist is inherently a reusable artifact)
+	// Co-signals: schema/conformance/correctness context
+	{
+		primary:   "checklist",
+		coSignals: []string{"schema", "conformance", "correctness", "protocol", "validation"},
+	},
+	// Class 2: cross-project protocol/setup READMEs
+	// Primary: "readme" but only when describing a protocol, config, or setup doc —
+	// NOT a bare mention as in "analysis of the project readme" or "my notes on what the readme says".
+	// Co-signals: protocol/config/setup context. "readme" alone is not a distilled artifact.
+	{
+		primary:   "readme",
+		coSignals: []string{"protocol", "setup", "config", "install", "bootstrap", "integration"},
+	},
+	// Class 3: CI path filter / config fragments
+	// Primary: "ci" or "path filter" (combined via multi-primary logic below)
+	// Co-signals: filter/conformance/config context
+	{
+		primary:   "ci path filter",
+		coSignals: []string{"conformance", "ci", "filter", "config", "pipeline"},
+	},
+	{
+		primary:   "ci config",
+		coSignals: []string{"filter", "conformance", "pipeline", "fragment", "plug-and-play"},
+	},
+	// Class 4: language-level test patterns
+	// Primary: "test pattern" (the compound is the artifact — "pattern" alone is too generic)
+	// Co-signals: language/library/idiom context
+	{
+		primary:   "test pattern",
+		coSignals: []string{"go", "rust", "python", "java", "typescript", "flock", "lock", "contention", "idiomatic", "idiom"},
+	},
+	// Class 5: migration recipes / runbooks
+	// Primary: "migration" or "migrate" + artifact signal
+	// Co-signals: recipe/runbook/bridge/symlink/procedure context
+	{
+		primary:   "migration recipe",
+		coSignals: []string{"step", "procedure", "runbook", "bridge", "symlink", "upgrade"},
+	},
+	{
+		primary:   "migrate",
+		coSignals: []string{"recipe", "runbook", "bridge", "symlink", "procedure", "step-by-step"},
+	},
+}
+
+// IsHighReuseArtifact reports whether an inventory entry belongs to the §4 high-reuse
+// distilled-artifact class (exchange-matching-measurement-review.md §4).
+//
+// Classification is content-type gated AND keyword-with-co-signal gated. Both gates
+// must pass. This two-gate design makes it substantially harder for an agent to game
+// the classifier:
+//
+//   - Gate 1: content_type must be "code", "analysis", or "summary" — the types
+//     that carry reusable engineering artifacts. Session-ephemera types ("review",
+//     "data", "other") are excluded even if they contain a matching keyword.
+//
+//   - Gate 2: description must contain a §4 primary keyword AND at least one
+//     co-occurring structural signal from the same class. A bare keyword mention
+//     (e.g. "analysis of the project readme") fails the co-signal gate.
+//
+// This is intentionally conservative: false negatives (real high-reuse entries that
+// miss the classifier) are acceptable. The exchange still accepts them at the standard
+// rate. False positives (ephemera classified as high-reuse) undermine the incentive
+// mechanism and seller trust in pricing fairness.
+func IsHighReuseArtifact(entry *InventoryEntry) bool {
+	// Gate 1: content_type filter.
+	// High-reuse artifacts are code, analysis, or summary. Review, data, and other
+	// types carry session-specific content that rarely generalizes across projects.
+	switch entry.ContentType {
+	case "code", "analysis", "summary":
+		// passes gate 1 — continue to keyword check
+	default:
+		return false
+	}
+
+	lower := strings.ToLower(entry.Description)
+
+	// Gate 2: keyword + co-signal check.
+	// For each class in the table, check that:
+	//   (a) the primary keyword appears in the description, AND
+	//   (b) at least one co-signal also appears.
+	// Both conditions must hold. A bare primary keyword without a co-signal fails.
+	for _, cls := range highReuseKeywords {
+		if !strings.Contains(lower, cls.primary) {
+			continue
+		}
+		// Primary matched — check for at least one co-signal.
+		for _, sig := range cls.coSignals {
+			if strings.Contains(lower, sig) {
+				return true
+			}
+		}
 	}
 	return false
 }

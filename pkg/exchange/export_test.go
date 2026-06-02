@@ -136,6 +136,10 @@ func (e *Engine) RecordBuyerSettlementForTest(buyerKey, entryID string) {
 	e.recordBuyerSettlement(buyerKey, entryID)
 }
 
+// IsHighReuseArtifactForTest exposes IsHighReuseArtifact for white-box testing.
+// Tests can call this directly to check classifier output without running the engine.
+var IsHighReuseArtifactForTest = IsHighReuseArtifact
+
 // StagePredictionsForTest exposes stagePredictions for unit tests.
 func (e *Engine) StagePredictionsForTest(settledEntryID string) {
 	e.stagePredictions(settledEntryID)
