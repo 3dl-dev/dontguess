@@ -45,6 +45,14 @@ const (
 	// price, allowing state to correctly finalize on replay.
 	TagAssignAuctionClose = "exchange:assign-auction-close"
 
+	// TagConsume is emitted by the engine when a buyer completes a transaction,
+	// recording a consume/accept behavioral signal for a delivered candidate.
+	// Payload: {"entry_id": <string>, "buyer_key": <string>}.
+	// Antecedent: the settle(complete) message ID.
+	// This is the authoritative signal that the buyer used delivered content —
+	// stronger than a hit (which only means the matcher returned a candidate).
+	TagConsume = "exchange:consume"
+
 	SettlePhaseStrPutAccept   = "put-accept"
 	SettlePhaseStrPutReject   = "put-reject"
 	SettlePhaseStrBuyerAccept = "buyer-accept"
