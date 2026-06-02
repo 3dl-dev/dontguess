@@ -240,8 +240,13 @@ func TestSyntheticTag_PutAcceptTagged(t *testing.T) {
 	}
 	eng.State().Replay(exchange.FromStoreRecords(existing))
 
-	// Step 1: buyer sends a synthetic buy ("test") → buy-miss standing offer.
-	syntheticTask := "test"
+	// Step 1: buyer sends a synthetic buy → buy-miss standing offer.
+	// NOTE: the task must be synthetic per demand.IsSynthetic (so the buy-miss and
+	// put-accept get tagged exchange:synthetic) BUT must not be rejected by the ed1
+	// put quality-gate isTestLikeDescription (which drops bare "test"/"upgrade smoke
+	// test" puts before they reach the put-accept path). "validation-preflight-*" is
+	// synthetic-but-acceptable, so the put-accept synthetic-tag path stays reachable.
+	syntheticTask := "validation-preflight-probe-123"
 	buyMsg := h.sendMessage(h.buyer,
 		syntheticBuyPayload(t, syntheticTask),
 		[]string{exchange.TagBuy},
