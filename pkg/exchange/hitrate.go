@@ -13,11 +13,12 @@ import (
 // the engine always sets to the buy message ID — see engine.go handleBuy /
 // handleBuyMiss, both call sendOperatorMessage with antecedents=[]string{msg.ID}).
 type HitRateReport struct {
-	// TotalBuys is the number of distinct buy orders seen in the window.
+	// TotalBuys is the number of distinct non-synthetic buy orders seen in the window.
+	// Synthetic buys (whose match responses carry exchange:synthetic) are excluded.
 	TotalBuys int `json:"total_buys"`
 
-	// MatchedBuys is the number of distinct buy orders that received at least
-	// one match-result (hit or miss).
+	// MatchedBuys is the number of distinct non-synthetic buy orders that received
+	// at least one match-result (hit or miss).
 	MatchedBuys int `json:"matched_buys"`
 
 	// PendingBuys is buys with no corresponding match-result yet (still
@@ -38,8 +39,8 @@ type HitRateReport struct {
 	// is zero, HitRatePct is 0.
 	HitRatePct float64 `json:"hit_rate_pct"`
 
-	// MatchResultsTotal is the raw number of match-result messages in the
-	// window (a single buy can receive more than one). Reported for
+	// MatchResultsTotal is the raw number of non-synthetic match-result messages
+	// in the window (a single buy can receive more than one). Reported for
 	// reconciliation against `dontguess match-results --json | jq length`.
 	MatchResultsTotal int `json:"match_results_total"`
 
@@ -49,6 +50,24 @@ type HitRateReport struct {
 	// These are counted but cannot be attributed to a buy, so they do not move
 	// hit/miss totals.
 	UnjoinableMatchResults int `json:"unjoinable_match_results"`
+
+	// SyntheticExcluded is the number of match-result messages that were skipped
+	// because they were tagged exchange:synthetic (load-test / probe traffic).
+	// The corresponding buy orders are also excluded from TotalBuys and all counts.
+	SyntheticExcluded int `json:"synthetic_excluded"`
+}
+
+// isMessageSynthetic reports whether a message carries the exchange:synthetic tag.
+// Used to identify load-test / probe traffic at the metric-filter boundary.
+// Tagging is done by the engine at response-emit time (handleBuy / handleBuyMiss /
+// handlePut) when demand.IsSynthetic matches the buy task or put description.
+func isMessageSynthetic(m *Message) bool {
+	for _, t := range m.Tags {
+		if t == TagSynthetic {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyMatchResult reports whether a single exchange:match message is a HIT
@@ -117,20 +136,52 @@ func buyMsgIDFor(m *Message) string {
 // buy-miss results) it is a miss. Buys with no match-result are pending and
 // excluded from the hit-rate denominator.
 //
+// Synthetic exclusion: match-result messages tagged exchange:synthetic (produced
+// by the engine when the buy task matched demand.IsSynthetic) are skipped and
+// their corresponding buy order IDs are removed from the real-buy set. This
+// ensures load-test traffic does not move hit/miss/pending totals.
+//
 // Callers are responsible for windowing (passing only messages within --since).
 func ComputeHitRate(buys, matches []Message) HitRateReport {
-	// Set of known buy order IDs.
-	buyIDs := make(map[string]struct{}, len(buys))
-	for i := range buys {
-		buyIDs[buys[i].ID] = struct{}{}
+	// Pass 1: scan match-results to collect synthetic buy IDs.
+	// The engine tags the *response* (match/buy-miss) with exchange:synthetic
+	// when demand.IsSynthetic(task) is true. The originating buy message (sent
+	// by the buyer) carries no such tag — so we identify synthetic buys via
+	// their corresponding tagged response.
+	syntheticBuyIDs := make(map[string]struct{})
+	var syntheticExcluded int
+	for i := range matches {
+		m := &matches[i]
+		if !isMessageSynthetic(m) {
+			continue
+		}
+		syntheticExcluded++
+		buyID := buyMsgIDFor(m)
+		if buyID != "" {
+			syntheticBuyIDs[buyID] = struct{}{}
+		}
 	}
 
-	// Best outcome per buy: true once any hit is seen for it.
+	// Build the set of real (non-synthetic) buy order IDs.
+	buyIDs := make(map[string]struct{}, len(buys))
+	for i := range buys {
+		id := buys[i].ID
+		if _, isSynthetic := syntheticBuyIDs[id]; !isSynthetic {
+			buyIDs[id] = struct{}{}
+		}
+	}
+
+	// Best outcome per real buy: true once any hit is seen for it.
 	hitByBuy := make(map[string]bool)
-	var unjoinable int
+	var unjoinable, realMatchResults int
 
 	for i := range matches {
 		m := &matches[i]
+		// Skip synthetic responses — already counted in syntheticExcluded above.
+		if isMessageSynthetic(m) {
+			continue
+		}
+		realMatchResults++
 		buyID := buyMsgIDFor(m)
 		if buyID == "" {
 			unjoinable++
@@ -165,8 +216,9 @@ func ComputeHitRate(buys, matches []Message) HitRateReport {
 		PendingBuys:            len(buyIDs) - matchedBuys,
 		Hits:                   hits,
 		Misses:                 misses,
-		MatchResultsTotal:      len(matches),
+		MatchResultsTotal:      realMatchResults,
 		UnjoinableMatchResults: unjoinable,
+		SyntheticExcluded:      syntheticExcluded,
 	}
 	if matchedBuys > 0 {
 		rep.HitRatePct = round2(float64(hits) / float64(matchedBuys) * 100)

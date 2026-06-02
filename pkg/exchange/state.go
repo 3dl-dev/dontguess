@@ -53,6 +53,21 @@ const (
 	// stronger than a hit (which only means the matcher returned a candidate).
 	TagConsume = "exchange:consume"
 
+	// TagSynthetic is applied to operator-emitted responses (match, buy-miss,
+	// put-accept settle) that were triggered by synthetic load-test traffic.
+	// Synthetic traffic is identified using demand.IsSynthetic — a single
+	// canonical predicate shared with the demand backlog so both systems agree
+	// on what counts as synthetic.
+	//
+	// Patterns covered: regression-*, *timeout-178*, "test"-class tasks,
+	// zzqq/xyzzy probes, parallel-*, validation-preflight-*, and similar
+	// infrastructure probes defined in pkg/demand/demand.go:IsSynthetic.
+	//
+	// Responses tagged exchange:synthetic are excluded from all exchange metrics:
+	// the hit-rate reporter (ComputeHitRate) and the demand backlog (BuildBacklog).
+	// This prevents load traffic from inflating or deflating production stats.
+	TagSynthetic = "exchange:synthetic"
+
 	SettlePhaseStrPutAccept   = "put-accept"
 	SettlePhaseStrPutReject   = "put-reject"
 	SettlePhaseStrBuyerAccept = "buyer-accept"

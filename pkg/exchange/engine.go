@@ -17,6 +17,7 @@ import (
 	"github.com/campfire-net/campfire/cf-protocol/protocol"
 	"github.com/campfire-net/campfire/cf-protocol/store"
 
+	"github.com/campfire-net/dontguess/pkg/demand"
 	"github.com/campfire-net/dontguess/pkg/matching"
 	"github.com/campfire-net/dontguess/pkg/scrip"
 )
@@ -688,11 +689,17 @@ func (e *Engine) handleBuy(msg *Message) error {
 		semanticMatches = semanticMatches[:maxResults]
 	}
 
+	// Synthetic detection: identify load-test / probe traffic so responses can be
+	// tagged exchange:synthetic and excluded from metrics. Uses the same canonical
+	// demand.IsSynthetic predicate as the demand backlog — one predicate, both
+	// systems agree on what is synthetic (dontguess-e93).
+	synthetic := demand.IsSynthetic(payload.Task)
+
 	// Zero-match path: no inventory candidates passed filters or semantic threshold.
 	// Send a buy-miss standing offer to the buyer: if they compute the result and
 	// put it here, the exchange will auto-accept at token_cost * BuyMissOfferRate%.
 	if len(semanticMatches) == 0 {
-		return e.handleBuyMiss(msg, payload.Task, payload.Budget)
+		return e.handleBuyMiss(msg, payload.Task, payload.Budget, synthetic)
 	}
 
 	// Build match payload.
@@ -745,7 +752,11 @@ func (e *Engine) handleBuy(msg *Message) error {
 		return fmt.Errorf("encoding match payload: %w", err)
 	}
 
+	// Tag synthetic match responses so the hit-rate reporter can exclude them.
 	tags := []string{TagMatch}
+	if synthetic {
+		tags = append(tags, TagSynthetic)
+	}
 	// Antecedent is the buy message; --fulfills semantics use the antecedent.
 	antecedents := []string{msg.ID}
 
@@ -789,7 +800,11 @@ func (e *Engine) handleBuy(msg *Message) error {
 // One offer per task hash — if a non-expired offer already exists for this task
 // the engine still sends the buy-miss response (idempotent from buyer's view)
 // but does not create a duplicate offer in state.
-func (e *Engine) handleBuyMiss(msg *Message, task string, budget int64) error {
+//
+// synthetic indicates that the buy task matched demand.IsSynthetic. When true,
+// the emitted exchange:buy-miss message is tagged exchange:synthetic so the
+// hit-rate reporter can exclude it from production metrics.
+func (e *Engine) handleBuyMiss(msg *Message, task string, budget int64, synthetic bool) error {
 	taskHash := TaskDescriptionHash(task)
 	expiresAt := time.Now().Add(BuyMissOfferTTL)
 
@@ -814,7 +829,11 @@ func (e *Engine) handleBuyMiss(msg *Message, task string, budget int64) error {
 		return fmt.Errorf("encoding buy-miss payload: %w", err)
 	}
 
+	// Tag synthetic buy-miss responses so the hit-rate reporter can exclude them.
 	tags := []string{TagBuyMiss, TagMatch}
+	if synthetic {
+		tags = append(tags, TagSynthetic)
+	}
 	antecedents := []string{msg.ID}
 
 	rec, err := e.sendOperatorMessage(buyMissPayload, tags, antecedents)
@@ -825,8 +844,8 @@ func (e *Engine) handleBuyMiss(msg *Message, task string, budget int64) error {
 		e.state.Apply(rec)
 	}
 
-	e.opts.log("engine: buy-miss: order=%s task_hash=%s expires=%s",
-		msg.ID[:8], taskHash[:16], expiresAt.Format(time.RFC3339))
+	e.opts.log("engine: buy-miss: order=%s task_hash=%s expires=%s synthetic=%v",
+		msg.ID[:8], taskHash[:16], expiresAt.Format(time.RFC3339), synthetic)
 	return nil
 }
 
@@ -911,11 +930,17 @@ func (e *Engine) handlePut(msg *Message) error {
 		return fmt.Errorf("encoding buy-miss put-accept payload: %w", err)
 	}
 
+	// Tag synthetic put-accept responses so inventory metrics can exclude them.
+	// A put is synthetic when its description matches demand.IsSynthetic — the
+	// same canonical predicate used for buy traffic and the demand backlog.
 	tags := []string{
 		TagSettle,
 		TagPhasePrefix + SettlePhaseStrPutAccept,
 		TagVerdictPrefix + "accepted",
 		TagBuyMiss, // mark as buy-miss fulfillment
+	}
+	if demand.IsSynthetic(pending.Description) {
+		tags = append(tags, TagSynthetic)
 	}
 	antecedents := []string{msg.ID}
 
