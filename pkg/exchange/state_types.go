@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/campfire-net/dontguess/pkg/matching"
 )
 
 // Tag constants for exchange convention operations.
@@ -550,9 +552,9 @@ func (s *SellerStats) Reputation() int {
 		}
 	}
 
-	// +3 for each entry where 3+ distinct buyers have completed
+	// +3 for each entry where CrossAgentConvergenceThreshold+ distinct buyers have completed
 	for _, buyers := range s.EntryBuyerMap {
-		if len(buyers) >= 3 {
+		if len(buyers) >= matching.CrossAgentConvergenceThreshold {
 			score += 3
 		}
 	}

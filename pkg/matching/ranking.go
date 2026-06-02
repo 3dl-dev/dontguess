@@ -93,14 +93,27 @@ const MaxBehavioralBoost = 0.10
 // boost cannot reach from baseline.
 const MaxBehavioralDemotion = -0.10
 
+// CrossAgentConvergenceThreshold is the number of distinct buyer agent keys
+// required for an inventory entry to achieve cross-agent convergence — the
+// "ungameable trust signal" from the toolrank heritage. At this threshold (3+)
+// independent agents have each purchased the same entry without coordination,
+// which is a strong utility signal.
+//
+// This is the single source of truth for the value 3 used in:
+//   - computeBehavioralBoost (ranking.go): proportional convergence reward
+//   - computeConvergence (exchange/hitrate.go): market-level convergence count
+//   - SellerStats.Reputation / DistinctKeys (exchange/state_types.go): reputation bonus
+const CrossAgentConvergenceThreshold = 3
+
 // FalsePositiveWindowMin is the minimum number of deliveries required before the
 // false-positive demotion signal activates. This prevents a single deliver-without-
 // consume from triggering demotion — a sustained pattern is required.
 //
-// The window requires at least 3 deliveries before any ratio-based penalty is
-// computed, mirroring the convergence threshold (3 distinct buyers) in the positive
-// signal. Below this window the demotion is zero regardless of the ratio.
-const FalsePositiveWindowMin = 3
+// The window requires at least CrossAgentConvergenceThreshold deliveries before
+// any ratio-based penalty is computed, mirroring the convergence threshold in
+// the positive signal. Below this window the demotion is zero regardless of the
+// ratio.
+const FalsePositiveWindowMin = CrossAgentConvergenceThreshold
 
 // FalsePositiveRatioThreshold is the deliver-without-consume ratio above which
 // an entry is flagged as an expiry candidate by the operator-facing report.
@@ -110,6 +123,13 @@ const FalsePositiveWindowMin = 3
 // A ratio of 5.0 means 5 deliveries per consume — the entry was delivered 5 times
 // as often as it was actually used. This is a strong false-positive signal.
 const FalsePositiveRatioThreshold = 5.0
+
+// FalsePositiveDemotionRampStart is the deliver-without-consume ratio at which
+// the demotion penalty begins ramping. Below this ratio the demotion is zero —
+// a ratio of 1.0 means every delivery was consumed (ideal), and we only start
+// penalising above 2.0 (twice as many deliveries as consumes). The ramp reaches
+// its maximum at FalsePositiveRatioThreshold (5.0).
+const FalsePositiveDemotionRampStart = 2.0
 
 // RankInput carries per-entry data needed by the ranker.
 // This struct decouples the ranker from the exchange.InventoryEntry type.
@@ -484,9 +504,8 @@ func computeBehavioralBoost(s BehavioralSignals) float64 {
 	consumeContrib := consumeNorm * (MaxBehavioralBoost / 2.0)
 
 	// Convergence signal: proportional to distinct buyers up to the threshold.
-	// At >=3 buyers: full half-weight (0.05). Below 3: linear partial reward.
-	const convergenceThreshold = 3.0
-	buyerNorm := math.Min(float64(s.DistinctBuyerCount)/convergenceThreshold, 1.0)
+	// At >=CrossAgentConvergenceThreshold buyers: full half-weight (0.05). Below: linear partial reward.
+	buyerNorm := math.Min(float64(s.DistinctBuyerCount)/float64(CrossAgentConvergenceThreshold), 1.0)
 	convergenceContrib := buyerNorm * (MaxBehavioralBoost / 2.0)
 
 	total := consumeContrib + convergenceContrib
@@ -529,16 +548,16 @@ func computeFalsePositiveDemotion(s BehavioralSignals) float64 {
 
 	// No demotion when the ratio is low (entry is well-consumed relative to deliveries).
 	// A ratio of 1.0 means every delivery was consumed — ideal. We start penalising
-	// above 2.0 (twice as many deliveries as consumes), ramping to full demotion at
+	// above FalsePositiveDemotionRampStart (2.0), ramping to full demotion at
 	// FalsePositiveRatioThreshold (5.0).
-	const ratioLow = 2.0
-	if ratio <= ratioLow {
+	if ratio <= FalsePositiveDemotionRampStart {
 		return 0
 	}
 
-	// Linear ramp from 0 at ratio=ratioLow to MaxBehavioralDemotion at ratio=FalsePositiveRatioThreshold.
-	// norm in [0, 1]: 0 at ratioLow, 1 at FalsePositiveRatioThreshold.
-	norm := (ratio - ratioLow) / (FalsePositiveRatioThreshold - ratioLow)
+	// Linear ramp from 0 at ratio=FalsePositiveDemotionRampStart to MaxBehavioralDemotion
+	// at ratio=FalsePositiveRatioThreshold.
+	// norm in [0, 1]: 0 at FalsePositiveDemotionRampStart, 1 at FalsePositiveRatioThreshold.
+	norm := (ratio - FalsePositiveDemotionRampStart) / (FalsePositiveRatioThreshold - FalsePositiveDemotionRampStart)
 	if norm > 1.0 {
 		norm = 1.0
 	}

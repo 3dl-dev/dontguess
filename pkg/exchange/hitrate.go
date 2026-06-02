@@ -597,13 +597,14 @@ func tallyOutcomes(outcomeByBuy map[string]*buyOutcome) (hits, misses, unverifia
 }
 
 // computeConvergence counts inventory entries that have achieved cross-agent
-// convergence: entries where 3 or more DISTINCT buyer agent keys have completed
-// a purchase. The heritage ungameable trust signal (toolrank lineage, §4.6
+// convergence: entries where matching.CrossAgentConvergenceThreshold or more
+// DISTINCT buyer agent keys have completed a purchase. The heritage ungameable
+// trust signal (toolrank lineage, §4.6
 // docs/design/exchange-per-agent-identity-decision.md). Always 0 when
 // entryBuyerMap is nil (current default: single shared identity).
 func computeConvergence(entryBuyerMap map[string]map[string]struct{}) (crossAgentConvergence int) {
 	for _, buyers := range entryBuyerMap {
-		if len(buyers) >= 3 {
+		if len(buyers) >= matching.CrossAgentConvergenceThreshold {
 			crossAgentConvergence++
 		}
 	}

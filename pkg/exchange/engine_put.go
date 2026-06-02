@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/campfire-net/dontguess/pkg/demand"
 	"github.com/campfire-net/dontguess/pkg/scrip"
 )
 
@@ -129,7 +128,7 @@ func (e *Engine) emitPutAccept(msg *Message, offeredPrice int64, pending *Invent
 		Synthetic bool `json:"synthetic"`
 	}
 	_ = json.Unmarshal(msg.Payload, &putMetaPayload) // best-effort; error → false
-	putSynthetic := demand.IsSynthetic(pending.Description) || putMetaPayload.Synthetic
+	putSynthetic := isSyntheticRequest(pending.Description, putMetaPayload.Synthetic)
 	tags := []string{
 		TagSettle,
 		TagPhasePrefix + SettlePhaseStrPutAccept,
