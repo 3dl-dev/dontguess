@@ -48,7 +48,7 @@ func (e *Engine) handleBuy(msg *Message) error {
 
 	semanticMatches := e.mergeSemanticAndFallback(payload.Task, candidates, maxResults)
 
-	synthetic := demand.IsSynthetic(payload.Task) || payload.Synthetic
+	synthetic := isSyntheticRequest(payload.Task, payload.Synthetic)
 
 	// Zero-match path.
 	if len(semanticMatches) == 0 {
@@ -652,6 +652,18 @@ func (e *Engine) hasActiveBuyerCompressAssign(entryID, buyerKey string) bool {
 		}
 	}
 	return false
+}
+
+// isSyntheticRequest reports whether a buy/put request should be treated as
+// synthetic (load-test / infrastructure probe) traffic. text is the task
+// description or put description; declared is the explicit Synthetic flag from
+// the message payload. Either condition is sufficient.
+//
+// Used in handleBuy and handlePut so the synthetic-detection rule stays in one
+// place. Both callers must tag their emitted messages with TagSynthetic when
+// this returns true.
+func isSyntheticRequest(text string, declared bool) bool {
+	return demand.IsSynthetic(text) || declared
 }
 
 // entryForDeliver derives the inventory entry for a deliver message ID by tracing

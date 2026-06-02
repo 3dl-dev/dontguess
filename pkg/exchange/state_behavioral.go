@@ -49,12 +49,9 @@ func (s *State) AllEntryBehavioralSignals() map[string]matching.BehavioralSignal
 		}
 	}
 
-	// Remove entries that ended up with zero signals after aggregation.
-	for entryID, sig := range out {
-		if sig.ConsumeCount == 0 && sig.DistinctBuyerCount == 0 && sig.DeliverCount == 0 {
-			delete(out, entryID)
-		}
-	}
+	// Note: no zero-signal cleanup needed. Each populating loop above guards
+	// on count > 0 / len(buyers) > 0 before inserting, so every entry in out
+	// has at least one non-zero field by construction.
 
 	return out
 }
