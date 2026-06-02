@@ -179,6 +179,17 @@ func runHitRate(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("read match-results: %w", err)
 	}
 
+	// Build cross-agent convergence map from full exchange history (dontguess-412).
+	// Replay all messages (unfiltered by --since) into a fresh State to accumulate
+	// EntryBuyerMap across the full history — convergence is a cumulative property,
+	// not a windowed one. AfterTimestamp=0 fetches all messages in log order.
+	convergenceMap, err := buildConvergenceMapFromClient(client, cfID, cfg.OperatorKeyHex)
+	if err != nil {
+		// Non-fatal: log and continue with zero convergence rather than failing.
+		fmt.Fprintf(os.Stderr, "warning: could not build convergence map: %v\n", err)
+		convergenceMap = nil
+	}
+
 	// Build quality-weighted options (M-rebaseline, dontguess-af8).
 	// MinSimilarity references the M1 floor constant — does NOT hardcode 0.16.
 	// Embedder is a TF-IDF instance primed with the full corpus for recompute.
@@ -186,11 +197,32 @@ func runHitRate(_ *cobra.Command, _ []string) error {
 		MinSimilarity: matching.DefaultMinSimilarity(),
 		Embedder:      buildRecomputeEmbedder(buys, matches),
 		BuyTasks:      buildBuyTaskMap(buys),
+		EntryBuyerMap: convergenceMap,
 	}
 
 	rep := exchange.ComputeHitRate(buys, matches, opts)
 	printHitRate(rep, hitRateSince, jsonOutput)
 	return nil
+}
+
+// buildConvergenceMapFromClient reads all exchange messages (full history, no
+// time filter), replays them into a fresh State, and returns the merged
+// EntryBuyerMap via BuildConvergenceMap. This is unfiltered by --since because
+// cross-agent convergence is a cumulative property of the inventory lifecycle,
+// not a windowed metric. The operator key is required to construct the State.
+func buildConvergenceMapFromClient(client *protocol.Client, cfID, operatorKeyHex string) (map[string]map[string]struct{}, error) {
+	result, err := client.Read(protocol.ReadRequest{
+		CampfireID:     cfID,
+		AfterTimestamp: 0,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read all messages: %w", err)
+	}
+	msgs := exchange.FromSDKMessages(result.Messages)
+	st := exchange.NewState()
+	st.OperatorKey = operatorKeyHex
+	st.Replay(msgs)
+	return exchange.BuildConvergenceMap(st), nil
 }
 
 func printHitRate(rep exchange.HitRateReport, since time.Duration, asJSON bool) {
@@ -221,4 +253,6 @@ func printHitRate(rep exchange.HitRateReport, since time.Duration, asJSON bool) 
 	fmt.Printf("  synthetic excluded:     %d\n", rep.SyntheticExcluded)
 	fmt.Printf("  match-results read: %d\n", rep.MatchResultsTotal)
 	fmt.Printf("  unjoinable:         %d  (match-result with no buy in window)\n", rep.UnjoinableMatchResults)
+	fmt.Println()
+	fmt.Printf("  cross-agent convergence: %d  (inventory entries bought by 3+ distinct agent keys)\n", rep.CrossAgentConvergence)
 }

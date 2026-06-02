@@ -38,6 +38,19 @@ type HitRateOptions struct {
 	// entry's description. When the buy task is absent for a given buy ID, that
 	// match falls back to UnverifiableHits.
 	BuyTasks map[string]string
+
+	// EntryBuyerMap is the merged cross-seller map of distinct buyer keys per
+	// inventory entry. Key: entryID, Value: set of buyer keys that have completed
+	// a purchase of that entry. Used to compute CrossAgentConvergence.
+	//
+	// Build this from exchange State using BuildConvergenceMap(state) before
+	// calling ComputeHitRate. When nil, CrossAgentConvergence is always 0.
+	//
+	// The heritage trust signal: an entry where len(buyers) >= 3 has been
+	// independently validated by 3+ distinct agents — the ungameable convergence
+	// signal from the toolrank lineage (docs/heritage/). §4.6 of
+	// docs/design/exchange-per-agent-identity-decision.md.
+	EntryBuyerMap map[string]map[string]struct{}
 }
 
 // HitRateReport is the result of reconciling buy orders against match-results.
@@ -120,6 +133,19 @@ type HitRateReport struct {
 	// because they were tagged exchange:synthetic (load-test / probe traffic).
 	// The corresponding buy orders are also excluded from TotalBuys and all counts.
 	SyntheticExcluded int `json:"synthetic_excluded"`
+
+	// CrossAgentConvergence is the number of inventory entries that have achieved
+	// cross-agent convergence: entries where 3 or more DISTINCT buyer agent keys
+	// have completed a purchase. This is the heritage "ungameable trust signal" from
+	// the toolrank lineage — an entry that 3+ independent agents bought and used is
+	// reliably valuable. The count is 0 when all buys arrive from a single shared
+	// identity (current default), and rises as agents adopt distinct identities via
+	// per-agent AGENT_CF_HOME (dontguess-a99/04f). See §4.6 of
+	// docs/design/exchange-per-agent-identity-decision.md.
+	//
+	// Sourced from opts.EntryBuyerMap (populated by BuildConvergenceMap). When
+	// opts.EntryBuyerMap is nil, CrossAgentConvergence is always 0.
+	CrossAgentConvergence int `json:"cross_agent_convergence"`
 }
 
 // isMessageSynthetic reports whether a message carries the exchange:synthetic tag.
@@ -440,6 +466,17 @@ func ComputeHitRate(buys, matches []Message, opts ...HitRateOptions) HitRateRepo
 		hitRatePct = round2(float64(hits) / float64(verifiedAnswered) * 100)
 	}
 
+	// Count entries that have achieved cross-agent convergence: 3+ distinct buyer keys.
+	// The heritage ungameable trust signal (toolrank lineage, §4.6
+	// docs/design/exchange-per-agent-identity-decision.md). Always 0 when
+	// opts.EntryBuyerMap is nil (current default: single shared identity).
+	var crossAgentConvergence int
+	for _, buyers := range o.EntryBuyerMap {
+		if len(buyers) >= 3 {
+			crossAgentConvergence++
+		}
+	}
+
 	rep := HitRateReport{
 		TotalBuys:              len(buyIDs),
 		MatchedBuys:            matchedBuys,
@@ -453,6 +490,7 @@ func ComputeHitRate(buys, matches []Message, opts ...HitRateOptions) HitRateRepo
 		MatchResultsTotal:      realMatchResults,
 		UnjoinableMatchResults: unjoinable,
 		SyntheticExcluded:      syntheticExcluded,
+		CrossAgentConvergence:  crossAgentConvergence,
 	}
 	return rep
 }
@@ -460,6 +498,36 @@ func ComputeHitRate(buys, matches []Message, opts ...HitRateOptions) HitRateRepo
 // round2 rounds to two decimal places.
 func round2(f float64) float64 {
 	return float64(int64(f*100+0.5)) / 100
+}
+
+// BuildConvergenceMap builds the merged cross-seller EntryBuyerMap from exchange
+// State for use in HitRateOptions.EntryBuyerMap. The result maps each inventory
+// entry ID to the set of distinct buyer keys that have completed a purchase of
+// that entry. Entries with no buyers are omitted.
+//
+// Call this on a State that has been replayed from the full exchange message log
+// before calling ComputeHitRate with the result as opts.EntryBuyerMap.
+//
+// The returned map is a copy — mutations do not affect State.
+func BuildConvergenceMap(s *State) map[string]map[string]struct{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make(map[string]map[string]struct{})
+	for _, stats := range s.sellers {
+		for entryID, buyers := range stats.EntryBuyerMap {
+			if len(buyers) == 0 {
+				continue
+			}
+			if _, exists := out[entryID]; !exists {
+				out[entryID] = make(map[string]struct{}, len(buyers))
+			}
+			for buyerKey := range buyers {
+				out[entryID][buyerKey] = struct{}{}
+			}
+		}
+	}
+	return out
 }
 
 // ConsumeCountByEntry tallies the number of exchange:consume signals per
