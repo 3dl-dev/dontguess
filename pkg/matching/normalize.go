@@ -36,6 +36,11 @@ import (
 // Callers: Index.Search() calls NormalizeQuery before Rank() so all
 // buy-path queries benefit automatically. Callers that need to pre-normalize
 // before adding to a campfire buy message may call it directly.
+//
+// WARNING: NormalizeQuery is NOT idempotent. Calling it twice on the same
+// string appends the expansion terms a second time, inflating their TF-IDF
+// weight and distorting similarity scores. Do not apply it more than once to
+// the same query text; Index.Search() already normalizes internally.
 func NormalizeQuery(text string) string {
 	if text == "" {
 		return text

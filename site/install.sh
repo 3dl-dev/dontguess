@@ -98,7 +98,7 @@ main() {
   # --- wrapper script ---
   cat > "${INSTALL_DIR}/dontguess" <<'ENDWRAPPER'
 #!/bin/sh
-# dontguess — turnkey wrapper (v0.5.0)
+# dontguess — turnkey wrapper (v0.6.0)
 # Hardened: DG_HOME pin, flock start, cmdline PID verify, health-probe readiness
 # Health-probe skip: only the invocation that starts the operator runs the probe.
 # CF_HOME identity pin: exchange routing uses --cf-home $DG_HOME.

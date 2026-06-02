@@ -119,7 +119,7 @@ non-trivial operational surface.
 
 ## 3. Residual errors at TF-IDF M1a (floor=0.16)
 
-3 of the 5 residual errors at floor=0.16 remain errors for the dense embedder too:
+3 of the 20 TF-IDF errors at M1a (floor=0.16) remain errors for the dense embedder too:
 
 | Pair | TF-IDF error | Dense error | Improvable by dense? |
 |------|-------------|-------------|----------------------|
