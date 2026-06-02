@@ -403,6 +403,140 @@ func TestComputeHitRate_HistoricalRecompute(t *testing.T) {
 	}
 }
 
+// TestHitRate_CrossAgentConvergence is the ground-source acceptance test for
+// dontguess-412. It exercises the full path: real State seeded with distinct
+// buyer keys → BuildConvergenceMap → ComputeHitRate with opts.EntryBuyerMap →
+// CrossAgentConvergence field in the report.
+//
+// Scenario:
+//   - entry-alpha: 3 DISTINCT buyer keys → converged → counted
+//   - entry-beta:  2 buyer keys (one duplicate key) → not converged → not counted
+//
+// The test verifies CrossAgentConvergence == 1.
+//
+// No mocks: uses real State and BuildConvergenceMap — the same path the CLI uses.
+// The buy/match messages are minimal fixtures; their content does not affect the
+// convergence count (which is derived from EntryBuyerMap, not from match messages).
+func TestHitRate_CrossAgentConvergence(t *testing.T) {
+	// Seed a fresh State with two inventory entries and their buyer histories.
+	st := NewState()
+	st.OperatorKey = "operator-key-hex"
+
+	// Directly populate sellers[sellerKey].EntryBuyerMap without going through
+	// the full engine settle pipeline. This is white-box seeding (same package).
+	// The mu lock protects concurrent access but tests are sequential here.
+	const sellerKey = "seller-alpha-key-hex"
+	st.sellers[sellerKey] = &SellerStats{
+		RepeatBuyerMap: make(map[string]int),
+		EntryBuyerMap: map[string]map[string]struct{}{
+			// entry-alpha: 3 DISTINCT buyer keys → converged.
+			"entry-alpha": {
+				"buyer-agent-001": {},
+				"buyer-agent-002": {},
+				"buyer-agent-003": {},
+			},
+			// entry-beta: only 2 buyer keys → NOT converged.
+			"entry-beta": {
+				"buyer-agent-001": {},
+				"buyer-agent-002": {},
+			},
+		},
+	}
+
+	// BuildConvergenceMap merges across all sellers into a flat entryID → buyers map.
+	convergenceMap := BuildConvergenceMap(st)
+
+	// Verify the map is correctly built.
+	if len(convergenceMap["entry-alpha"]) != 3 {
+		t.Fatalf("entry-alpha: want 3 buyers in convergenceMap, got %d", len(convergenceMap["entry-alpha"]))
+	}
+	if len(convergenceMap["entry-beta"]) != 2 {
+		t.Fatalf("entry-beta: want 2 buyers in convergenceMap, got %d", len(convergenceMap["entry-beta"]))
+	}
+
+	// Pass the convergence map via HitRateOptions (the real ComputeHitRate path).
+	// Buys and matches are empty — CrossAgentConvergence is independent of
+	// the buy/match message history (it's an inventory-level signal).
+	opts := HitRateOptions{
+		EntryBuyerMap: convergenceMap,
+	}
+	rep := ComputeHitRate(nil, nil, opts)
+
+	// Only entry-alpha has 3+ distinct buyers → CrossAgentConvergence == 1.
+	if rep.CrossAgentConvergence != 1 {
+		t.Errorf("CrossAgentConvergence = %d, want 1 (only entry-alpha has 3+ distinct buyer keys)",
+			rep.CrossAgentConvergence)
+	}
+
+	// Confirm that hit-rate fields are zero (no buy/match messages passed).
+	if rep.TotalBuys != 0 || rep.Hits != 0 || rep.Misses != 0 {
+		t.Errorf("unexpected non-zero hit-rate fields: total=%d hits=%d misses=%d",
+			rep.TotalBuys, rep.Hits, rep.Misses)
+	}
+}
+
+// TestHitRate_CrossAgentConvergence_ZeroWhenNilMap verifies backward
+// compatibility: when opts.EntryBuyerMap is nil (e.g. no state replay
+// performed), CrossAgentConvergence is always 0 and no panic occurs.
+func TestHitRate_CrossAgentConvergence_ZeroWhenNilMap(t *testing.T) {
+	rep := ComputeHitRate(nil, nil)
+	if rep.CrossAgentConvergence != 0 {
+		t.Errorf("CrossAgentConvergence = %d, want 0 when opts.EntryBuyerMap is nil",
+			rep.CrossAgentConvergence)
+	}
+}
+
+// TestBuildConvergenceMap_MultiSeller verifies that BuildConvergenceMap correctly
+// merges EntryBuyerMap across multiple sellers. When seller-A and seller-B both
+// have buyers for the same entry (possible in derivative/compression scenarios),
+// the merged map reflects all distinct buyers.
+func TestBuildConvergenceMap_MultiSeller(t *testing.T) {
+	st := NewState()
+	st.OperatorKey = "op-key"
+
+	// Two sellers both selling "shared-entry" (derivative scenario).
+	st.sellers["seller-A"] = &SellerStats{
+		RepeatBuyerMap: make(map[string]int),
+		EntryBuyerMap: map[string]map[string]struct{}{
+			"shared-entry": {
+				"buyer-001": {},
+				"buyer-002": {},
+			},
+		},
+	}
+	st.sellers["seller-B"] = &SellerStats{
+		RepeatBuyerMap: make(map[string]int),
+		EntryBuyerMap: map[string]map[string]struct{}{
+			"shared-entry": {
+				"buyer-002": {}, // duplicate — already counted above
+				"buyer-003": {},
+			},
+			// Solo entry for seller-B only.
+			"solo-entry": {
+				"buyer-001": {},
+			},
+		},
+	}
+
+	merged := BuildConvergenceMap(st)
+
+	// shared-entry has 3 unique buyers (001, 002, 003) across the two sellers.
+	if len(merged["shared-entry"]) != 3 {
+		t.Errorf("shared-entry: want 3 unique buyers, got %d", len(merged["shared-entry"]))
+	}
+	// solo-entry has 1 buyer.
+	if len(merged["solo-entry"]) != 1 {
+		t.Errorf("solo-entry: want 1 buyer, got %d", len(merged["solo-entry"]))
+	}
+
+	// CrossAgentConvergence: shared-entry has 3 → count 1. solo-entry has 1 → not counted.
+	opts := HitRateOptions{EntryBuyerMap: merged}
+	rep := ComputeHitRate(nil, nil, opts)
+	if rep.CrossAgentConvergence != 1 {
+		t.Errorf("CrossAgentConvergence = %d, want 1 (only shared-entry is converged)", rep.CrossAgentConvergence)
+	}
+}
+
 // buyMsgIDFor prefers the antecedent and falls back to payload buy_msg_id.
 func TestBuyMsgIDFor(t *testing.T) {
 	withAnt := hitMatch("m-1", "buy-1")
