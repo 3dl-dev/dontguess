@@ -252,6 +252,70 @@ func TestHighReuseClassifier_NegativeCases_Ephemera(t *testing.T) {
 			contentType: "summary",
 			reason:      "long but 'protocol' co-signal is far from 'readme' — incidental, outside adjacency window",
 		},
+		// --- dontguess-ce8: FILLER-PADDED keyword-stuff (defeats the raw-token length floor) ---
+		// These keep the primary+co-signal trigger cluster intact and adjacent ("test pattern go"),
+		// then pad to ≥5 RAW tokens with content-free filler: stopwords, single-char tokens, and
+		// punctuation-glued garbage that the tokenizer's '. _ / -' word-set inflates into tokens.
+		// The a0e length floor counted these filler tokens, so they cleared ≥5 and classified TRUE.
+		// They MUST be FALSE: the content-bearing floor counts only substantive context tokens
+		// (≥4 chars, non-stopword, non-glue, outside the trigger cluster) and requires ≥2 of them —
+		// a distilled artifact is described with real domain nouns, not padded with junk.
+		{
+			name:        "filler_foo_bar_baz_test_pattern_go",
+			description: "foo bar baz test pattern go",
+			contentType: "code",
+			reason:      "6 raw tokens but the 3 pad tokens are 3-char nonsense stubs — zero content-bearing context outside 'test pattern go'",
+		},
+		{
+			name:        "filler_single_char_test_pattern_go",
+			description: "a a a test pattern go",
+			contentType: "code",
+			reason:      "6 raw tokens but the pad is single-char tokens — single chars are not content-bearing context",
+		},
+		{
+			name:        "filler_stopwords_my_new_for",
+			description: "my new test pattern for go",
+			contentType: "code",
+			reason:      "6 raw tokens but pad is stopwords/short stubs ('my','new','for') — no content-bearing context outside the trigger cluster",
+		},
+		{
+			name:        "filler_stopwords_the_best_in",
+			description: "the best test pattern in go",
+			contentType: "code",
+			reason:      "6 raw tokens but pad is stopwords + one 4-char word ('best') — only 1 content-bearing context token, below the ≥2 floor",
+		},
+		{
+			name:        "filler_slash_glue_xyzw",
+			description: "x/y/z/w test pattern in go",
+			contentType: "code",
+			reason:      "5 raw tokens but 'x/y/z/w' is punctuation-glued single chars (filler) and 'in' is a stopword — zero content-bearing context",
+		},
+		{
+			name:        "filler_hyphen_glue_abc",
+			description: "--a --b --c test pattern go",
+			contentType: "code",
+			reason:      "6 raw tokens but '--a','--b','--c' are punctuation-glued single chars (filler) — zero content-bearing context",
+		},
+		// Extra filler variants devised for ce8 (different filler sets — proves the fix targets the
+		// SHAPE of keyword-stuffing, not these specific strings):
+		{
+			name:        "filler_dotted_glue_checklist",
+			description: "a.b.c.d schema correctness checklist",
+			contentType: "analysis",
+			reason:      "'a.b.c.d' is dot-glued single chars (filler); only 'schema'(co-signal, in cluster) remains — zero substantive context outside the trigger cluster",
+		},
+		{
+			name:        "filler_three_char_stubs_migration",
+			description: "xyz abc qrs migration recipe runbook",
+			contentType: "analysis",
+			reason:      "6 raw tokens but 'xyz','abc','qrs' are 3-char stubs (<4 chars) — zero content-bearing context outside 'migration recipe runbook'",
+		},
+		{
+			name:        "filler_stopword_pad_ci_config",
+			description: "the a an of to ci config filter",
+			contentType: "code",
+			reason:      "8 raw tokens but every pad token is a stopword — zero content-bearing context outside 'ci config filter'",
+		},
 	}
 
 	for _, tc := range cases {
