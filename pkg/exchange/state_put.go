@@ -145,16 +145,94 @@ var highReuseKeywords = []highReuseClass{
 	},
 }
 
-// minHighReuseWords is the minimum number of description tokens an entry must have
-// to qualify as a §4 high-reuse artifact. Genuine distilled artifacts are *described*
-// (a noun phrase naming the thing, plus its context) — every §4 exemplar and every
-// positive case in put_reuse_class_test.go is ≥5 tokens. Crafted keyword-stuffs that
-// game the classifier ("test pattern go idiom", "checklist schema validation",
-// "readme setup guide") are ≤4 tokens: a bare concatenation of the classifier's own
-// trigger words with no surrounding content. Requiring ≥5 tokens is a structural
-// floor, not a blocklist — it rejects the *shape* of a keyword-stuff (all trigger,
-// no description) regardless of which specific words are used.
+// minHighReuseWords is the minimum number of *raw* description tokens an entry must
+// have to qualify as a §4 high-reuse artifact. Genuine distilled artifacts are
+// *described* (a noun phrase naming the thing, plus its context) — every §4 exemplar
+// and every positive case in put_reuse_class_test.go is ≥5 tokens. This is a cheap
+// first cut; the real gameability defense is the content-bearing context floor below
+// (see minHighReuseContextWords), which alone catches the filler-padding bypass.
 const minHighReuseWords = 5
+
+// minHighReuseContextWords is the minimum number of *content-bearing context* tokens
+// an entry must carry OUTSIDE the matched primary+co-signal trigger cluster.
+//
+// WHY: the raw-token floor (minHighReuseWords) counts ANY token, including filler —
+// stopwords ("the", "my", "for"), single-character tokens ("a"), and punctuation-glued
+// garbage ("x/y/z/w", "--a", "a.b.c") that the tokenizer's '. _ / -' word-set inflates
+// into tokens. An attacker keeps the trigger cluster intact and adjacent ("test pattern
+// go") and pads with filler to clear the raw floor, e.g. "foo bar baz test pattern go".
+// The raw floor cannot see that the pad is contentless.
+//
+// FIX: count only content-bearing context tokens (see isContentBearingToken) that are
+// NOT part of the matched trigger cluster, and require at least this many. A distilled
+// artifact names real domain nouns around the trigger ("flock contention test pattern
+// for Go", "legion.tools v1.2 schema correctness checklist" — ≥2 substantive context
+// words each). A keyword-stuff has only the bait plus junk.
+//
+// This attacks the SHAPE of keyword-stuffing, not a blocklist: any filler set (single
+// chars, stopwords, 3-char nonsense stubs, slash/dot/hyphen-glued garbage) fails to
+// produce content-bearing context. The residual cost it imposes on an attacker is that
+// they must supply ≥2 genuine descriptive nouns — i.e. actually describe an artifact —
+// which is the behavior we want to incentivize, not suppress.
+const minHighReuseContextWords = 2
+
+// minContentTokenLen is the minimum character length for a token to count as
+// content-bearing context. Genuine descriptive domain nouns observed across every §4
+// exemplar are ≥4 chars ("flock", "schema", "contention", "legion.tools", "convention",
+// "gateevaluator", "pipeline", "bootstrap"). 1–3 char tokens used as padding ("foo",
+// "bar", "baz", "xyz", "abc", "qrs") carry no description. Note: short tokens that ARE
+// the classifier's own keywords ("cf", "ci", "go") live inside the trigger cluster and
+// are excluded from the context count anyway, so this floor does not penalize them.
+const minContentTokenLen = 4
+
+// highReuseStopwords are common English function words that never constitute the
+// descriptive context of a distilled artifact. They are excluded from the
+// content-bearing context count so padding with stopwords cannot satisfy the floor.
+var highReuseStopwords = map[string]struct{}{
+	"the": {}, "a": {}, "an": {}, "and": {}, "or": {}, "of": {}, "to": {}, "in": {},
+	"on": {}, "for": {}, "with": {}, "at": {}, "by": {}, "as": {}, "is": {}, "are": {},
+	"my": {}, "our": {}, "this": {}, "that": {}, "it": {}, "its": {}, "from": {},
+	"into": {}, "new": {}, "all": {}, "any": {}, "some": {}, "be": {}, "was": {},
+}
+
+// isContentBearingToken reports whether a token is a substantive descriptive word —
+// the kind that names an artifact's domain context — as opposed to filler an attacker
+// uses to pad a keyword-stuff to the raw-token floor.
+//
+// A token is filler (NOT content-bearing) if any of the following hold:
+//   - it is shorter than minContentTokenLen characters (single chars and 3-char stubs);
+//   - it is a stopword (highReuseStopwords);
+//   - it is punctuation-glue garbage: after splitting on the tokenizer's structural
+//     punctuation ('.', '_', '/', '-'), every resulting alphanumeric run is a single
+//     character. This catches "x/y/z/w", "--a", "a.b.c", "a_b_c" — strings that exist
+//     only to inflate the token count, while preserving genuine glued identifiers like
+//     "cf-protocol", "legion.tools", "migrate-store", "cf_no_pins" whose runs are multi-char.
+func isContentBearingToken(tok string) bool {
+	if len(tok) < minContentTokenLen {
+		return false
+	}
+	if _, ok := highReuseStopwords[tok]; ok {
+		return false
+	}
+	// Punctuation-glue detection: split on structural punctuation and check whether
+	// every alphanumeric run is a single char (pure glue garbage).
+	runs := strings.FieldsFunc(tok, func(r rune) bool {
+		return r == '.' || r == '_' || r == '/' || r == '-'
+	})
+	if len(runs) > 1 {
+		allSingle := true
+		for _, run := range runs {
+			if len(run) > 1 {
+				allSingle = false
+				break
+			}
+		}
+		if allSingle {
+			return false
+		}
+	}
+	return true
+}
 
 // highReuseCoSignalWindow is the maximum token distance permitted between a matched
 // primary keyword and its co-signal. In every genuine §4 exemplar the co-signal is
@@ -210,9 +288,17 @@ func tokenizeDescription(desc string) []string {
 //     genuine §4 exemplar. This blocks both the bare keyword-stuff (caught by the
 //     length floor) and the "pad to the floor then drop a far-away trigger word" variant.
 //
-// Gates 2 and 4 attack the *structure* of a keyword-stuff (all-trigger / incidental
-// co-signal) rather than enumerating bad strings, so they generalize to crafted inputs
-// not seen at design time.
+//   - Gate 5 (content-bearing context floor): at least minHighReuseContextWords
+//     content-bearing tokens (see isContentBearingToken) must appear OUTSIDE the matched
+//     trigger cluster (primary tokens + the matched co-signal). The raw-token floor
+//     (Gate 2) counts filler — stopwords, single chars, punctuation-glue garbage —
+//     so an attacker can keep the trigger cluster adjacent (defeating Gate 4) and pad
+//     with junk to clear Gate 2, e.g. "foo bar baz test pattern go". Gate 5 ignores
+//     filler and requires genuine descriptive context around the bait.
+//
+// Gates 2, 4, and 5 attack the *structure* of a keyword-stuff (all-trigger / incidental
+// co-signal / filler padding) rather than enumerating bad strings, so they generalize
+// to crafted inputs not seen at design time.
 //
 // This is intentionally conservative: false negatives (real high-reuse entries that
 // miss the classifier) are acceptable — the exchange still accepts them at the standard
@@ -261,10 +347,38 @@ func IsHighReuseArtifact(entry *InventoryEntry) bool {
 				if i >= pStart && i <= pEnd {
 					continue // skip the primary tokens themselves
 				}
+				matchedCoSignal := false
 				for _, sig := range cls.coSignals {
 					if tokens[i] == sig {
-						return true
+						matchedCoSignal = true
+						break
 					}
+				}
+				if !matchedCoSignal {
+					continue
+				}
+				// Gate 5 (content-bearing context floor): the trigger cluster
+				// (primary tokens + this matched co-signal) is the classifier's own
+				// bait. Genuine artifacts surround that bait with substantive domain
+				// nouns; keyword-stuffs surround it with filler padded to clear the
+				// raw-token floor. Count content-bearing context tokens OUTSIDE the
+				// trigger cluster and require at least minHighReuseContextWords. This
+				// rejects the filler-padding bypass (single chars, stopwords, 3-char
+				// stubs, punctuation-glue garbage) regardless of the specific pad.
+				context := 0
+				for j, tok := range tokens {
+					if j >= pStart && j <= pEnd { // skip primary tokens
+						continue
+					}
+					if j == i { // skip the matched co-signal
+						continue
+					}
+					if isContentBearingToken(tok) {
+						context++
+					}
+				}
+				if context >= minHighReuseContextWords {
+					return true
 				}
 			}
 		}
