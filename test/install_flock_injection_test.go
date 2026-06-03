@@ -107,20 +107,20 @@ func newInstallerScene(t *testing.T) *installerScene {
 	opStub := "#!/bin/sh\n" +
 		"{ echo \"OP_INVOKED cf_home=$CF_HOME\"; echo \"argv=$*\"; } >> " + shellQuote(opLog) + "\n" +
 		"exit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "dontguess-operator"), []byte(opStub), 0755); err != nil {
+	if err := writeExecFile(t, filepath.Join(binDir, "dontguess-operator"), []byte(opStub)); err != nil {
 		t.Fatalf("writing operator stub: %v", err)
 	}
 
 	// cf stub: exits 0 for any call (buys/health-probe/final cf op). Harmless.
 	cfStub := "#!/bin/sh\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "cf"), []byte(cfStub), 0755); err != nil {
+	if err := writeExecFile(t, filepath.Join(binDir, "cf"), []byte(cfStub)); err != nil {
 		t.Fatalf("writing cf stub: %v", err)
 	}
 
 	// Extract and install the REAL wrapper.
 	wrapperSrc := extractWrapperFromInstaller(t)
 	wrapperPath := filepath.Join(binDir, "dontguess")
-	if err := os.WriteFile(wrapperPath, []byte(wrapperSrc), 0755); err != nil {
+	if err := writeExecFile(t, wrapperPath, []byte(wrapperSrc)); err != nil {
 		t.Fatalf("writing extracted wrapper: %v", err)
 	}
 
