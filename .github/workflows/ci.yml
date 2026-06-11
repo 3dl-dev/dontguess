@@ -29,6 +29,18 @@ jobs:
           curl -fsSL "https://github.com/campfire-net/campfire/releases/download/${CF_VER}/cf_linux_amd64.tar.gz" | tar xz -C /tmp
           sudo install -m 755 /tmp/cf_linux_amd64/cf /usr/local/bin/cf
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dense embedder deps
+        # Required by the dense-embedder regression tests (dontguess-553):
+        # cmd/embed/main.py imports numpy, onnxruntime, tokenizers and
+        # self-installs the all-MiniLM-L6-v2 ONNX model on first run. These
+        # tests run the real embedder (no mocks) per the ground-source rule.
+        run: pip install --upgrade numpy onnxruntime tokenizers
+
       - name: Run tests
         env:
           GOPRIVATE: github.com/campfire-net/campfire

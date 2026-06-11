@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/campfire-net/campfire/cf-protocol/protocol"
+	"github.com/campfire-net/campfire/cf-protocol/store"
+	"github.com/campfire-net/campfire/pkg/provenance"
 	"github.com/campfire-net/dontguess/pkg/exchange"
 	"github.com/campfire-net/dontguess/pkg/matching"
 	"github.com/campfire-net/dontguess/pkg/scrip"
-	"github.com/campfire-net/campfire/cf-protocol/protocol"
-	"github.com/campfire-net/campfire/pkg/provenance"
-	"github.com/campfire-net/campfire/cf-protocol/store"
 	"github.com/spf13/cobra"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -149,7 +149,15 @@ func runServe(_ *cobra.Command, _ []string) error {
 		embedScript = "/home/baron/projects/dontguess/cmd/embed/main.py"
 	}
 	if _, err := os.Stat(embedScript); err == nil {
-		embedder = matching.NewDenseEmbedder(embedScript)
+		dense := matching.NewDenseEmbedder(embedScript)
+		// Surface embed failures (missing onnxruntime, model download error,
+		// python3 not on PATH) instead of silently swallowing them. A silent
+		// index-time failure leaves entries with nil embeddings, routing every
+		// buy to the flat-0.5 reputation fallback (dontguess-553).
+		dense.OnError = func(err error) {
+			logger.Printf("  embedder ERROR: %v", err)
+		}
+		embedder = dense
 		logger.Printf("  embedder:  dense (all-MiniLM-L6-v2) via %s", embedScript)
 	} else {
 		logger.Printf("  embedder:  tf-idf (set DONTGUESS_EMBED_SCRIPT for dense)")
@@ -332,12 +340,13 @@ func serveOperatorSocket(ctx context.Context, ln net.Listener, eng *exchange.Eng
 // the JSON response, and closes the connection.
 //
 // Security (dontguess-481):
-//   (b) A 5-second read deadline prevents a stalled client from holding the
-//       goroutine indefinitely.
-//   (c) The connection reader is wrapped in an io.LimitReader (1 MiB) before
-//       being passed to json.NewDecoder, bounding memory allocation from
-//       oversized payloads. All legitimate requests are small JSON objects
-//       well under this ceiling.
+//
+//	(b) A 5-second read deadline prevents a stalled client from holding the
+//	    goroutine indefinitely.
+//	(c) The connection reader is wrapped in an io.LimitReader (1 MiB) before
+//	    being passed to json.NewDecoder, bounding memory allocation from
+//	    oversized payloads. All legitimate requests are small JSON objects
+//	    well under this ceiling.
 func handleOperatorConn(conn net.Conn, eng *exchange.Engine) {
 	defer conn.Close()
 
@@ -473,4 +482,3 @@ func buildLogDest(dgHome string) (io.Writer, error) {
 	}
 	return io.MultiWriter(os.Stderr, roller), nil
 }
-
