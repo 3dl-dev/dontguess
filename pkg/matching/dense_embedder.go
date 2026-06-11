@@ -17,6 +17,14 @@ type DenseEmbedder struct {
 	// ScriptPath is the path to cmd/embed/main.py.
 	// If empty, "cmd/embed/main.py" is used (relative to working dir).
 	ScriptPath string
+
+	// OnError, if non-nil, is invoked whenever an embed shell-out fails. This
+	// surfaces failures that would otherwise be silently swallowed (Embed returns
+	// a nil vector on error). An invisible index-time embed failure is exactly
+	// what masked dontguess-553 for weeks: entries got nil embeddings with no log,
+	// so every buy fell back to the flat-0.5 reputation path. Wire this to the
+	// operator logger in production; leave nil in tests for quiet behavior.
+	OnError func(error)
 }
 
 // NewDenseEmbedder returns an embedder backed by the Python ONNX service.
@@ -27,10 +35,22 @@ func NewDenseEmbedder(scriptPath string) *DenseEmbedder {
 	return &DenseEmbedder{ScriptPath: scriptPath}
 }
 
+// reportError invokes the OnError hook if configured. Safe to call with nil hook.
+func (e *DenseEmbedder) reportError(err error) {
+	if e.OnError != nil {
+		e.OnError(err)
+	}
+}
+
 // Embed returns a 384-dim normalized vector for the given text.
 func (e *DenseEmbedder) Embed(text string) []float64 {
 	result, err := e.embedTexts([]string{text})
-	if err != nil || len(result) == 0 {
+	if err != nil {
+		e.reportError(fmt.Errorf("dense embed (single): %w", err))
+		return nil
+	}
+	if len(result) == 0 {
+		e.reportError(fmt.Errorf("dense embed (single): empty result for %q", truncForLog(text)))
 		return nil
 	}
 	return result[0]
@@ -40,9 +60,19 @@ func (e *DenseEmbedder) Embed(text string) []float64 {
 func (e *DenseEmbedder) EmbedBatch(texts []string) [][]float64 {
 	result, err := e.embedTexts(texts)
 	if err != nil {
+		e.reportError(fmt.Errorf("dense embed (batch of %d): %w", len(texts), err))
 		return nil
 	}
 	return result
+}
+
+// truncForLog shortens a text for safe inclusion in a log line.
+func truncForLog(s string) string {
+	const max = 80
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
 }
 
 // Similarity returns cosine similarity between two embeddings.
