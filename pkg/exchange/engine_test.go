@@ -1933,7 +1933,8 @@ func TestEngine_HandleBuy_DebtorPriorityReducesResults(t *testing.T) {
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel2()
-	go func() { _ = eng.Start(ctx2) }()
+	done2 := make(chan struct{})
+	go func() { defer close(done2); _ = eng.Start(ctx2) }()
 
 	h.sendMessage(debtorBuyer,
 		buyPayloadWithResults("Go HTTP handler implementation", 50000, 4),
@@ -1943,6 +1944,12 @@ func TestEngine_HandleBuy_DebtorPriorityReducesResults(t *testing.T) {
 
 	matchMsgs2 := waitForMatchCount(t, eng, preCount2, 2*time.Second)
 	cancel2()
+	// Wait for the ctx2 Start() goroutine to fully exit before the test
+	// function returns — otherwise it can log/write to the store after the
+	// test has completed, causing "Log in goroutine after Test... has
+	// completed" panics under -race -count=N stress (same rationale as
+	// done1 above).
+	<-done2
 
 	if len(matchMsgs2) <= preCount2 {
 		t.Fatal("debtor: no match message emitted")
