@@ -270,14 +270,15 @@ type Engine struct {
 	// Engine-private; no lock needed (engine event loop is single-threaded).
 	buyerRecentEntries map[string][]buyerSessionEntry
 
-	// localMu guards localMsgByID and localSeen. Ordinarily replayAllLocal
-	// (startup, inside Start/AutoAcceptPut/RejectPut) and pollLocalStore (the
-	// run() poll loop) execute one at a time on a single Engine — but callers
-	// that invoke Start twice on the same Engine without waiting for the
-	// first call's goroutine to exit (only valid if a caller cancels and
-	// fully drains the first Start before starting a second) would otherwise
-	// race on these plain maps/counters. localMu makes that safe rather than
-	// relying on single-invocation discipline holding everywhere.
+	// localMu guards localMsgByID, localSeen, and localDispatched. These are
+	// mutated by three code paths that legitimately run concurrently on one
+	// Engine: replayAllLocal (startup, via Start), pollLocalStore (the run()
+	// poll-loop goroutine), and rebuildAndDispatchGapLocal (the auto-accept /
+	// operator-socket goroutines, via AutoAcceptPut/RejectPut). localMu makes
+	// the cursor claims atomic so each appended record is folded and dispatched
+	// exactly once no matter how those paths interleave; the actual state.Apply
+	// / dispatch work runs outside the lock (State has its own lock, and
+	// dispatch handlers re-enter localMu via appendLocalRecord).
 	localMu sync.Mutex
 	// localMsgByID indexes every message the engine has ingested from
 	// LocalStore (dontguess-275), by ID. LocalStore (pkg/store) has no
@@ -286,13 +287,30 @@ type Engine struct {
 	// replayAllLocal (startup) and pollLocalStore (ongoing); only relevant
 	// when EngineOptions.LocalStore is configured. Guarded by localMu.
 	localMsgByID map[string]*Message
-	// localSeen is the count of LocalStore records already ingested (via
-	// replayAllLocal or pollLocalStore). LocalStore is single-writer,
-	// strictly append-order (pkg/store package doc), so a length-based
-	// cursor is sufficient to find "new since last poll" without a sequencer
-	// or orphan buffer (that is M2, dontguess-50d). Only relevant when
-	// EngineOptions.LocalStore is configured. Guarded by localMu.
+	// localSeen is the FOLD cursor: the count of LocalStore records already
+	// folded into State (via a full state.Replay in replayAllLocal /
+	// rebuildAndDispatchGapLocal, or an incremental state.Apply in
+	// pollLocalStore). LocalStore is single-writer, strictly append-order
+	// (pkg/store package doc), so a length-based cursor is sufficient to find
+	// "new since last fold" without a sequencer or orphan buffer (that is M2,
+	// dontguess-50d). Only relevant when EngineOptions.LocalStore is configured.
+	// Guarded by localMu.
 	localSeen int
+	// localDispatched is the DISPATCH cursor: the count of LocalStore records
+	// already passed through dispatch() (handleBuy/handlePut/... ), or otherwise
+	// definitively handled (operator-emitted messages, which are applied to
+	// state directly by their emitter and must never be re-dispatched). It is
+	// deliberately SEPARATE from localSeen (the fold cursor): a full state
+	// rebuild folds records into State without dispatching them, so
+	// [localDispatched:localSeen] can be a non-empty gap of folded-but-never-
+	// dispatched records. Conflating the two (advancing the dispatch cursor
+	// during a rebuild that did not itself dispatch) is exactly the defect that
+	// silently dropped buy orders — they landed in State.ActiveOrders, were
+	// counted as "seen", and were never matched (dontguess-b84). The invariant:
+	// every record folded into State is dispatched exactly once, and no record
+	// is dispatched twice. Guarded by localMu; always localDispatched <=
+	// localSeen. Only relevant when EngineOptions.LocalStore is configured.
+	localDispatched int
 }
 
 // buyerSessionEntry records a single entry settled by a buyer, used for
@@ -366,6 +384,21 @@ func (e *Engine) Start(ctx context.Context) error {
 	}
 	if err := e.replayAll(); err != nil {
 		return fmt.Errorf("exchange engine replay: %w", err)
+	}
+	// Local mode: seed the dispatch cursor to the fold cursor. The startup
+	// replayAll (replayAllLocal) folded the entire log into State without
+	// dispatching; dispatchPendingOrders below dispatches the pending buys, and
+	// the puts/settles/matches already in the log need no live dispatch (their
+	// effect is fully captured by the fold) — exactly how the campfire path
+	// treats a startup replay + dispatchPendingOrders. Records appended AFTER
+	// startup are what the poll loop dispatches, from this cursor forward.
+	// Seeding here (before dispatchPendingOrders, whose handlers may append
+	// operator messages via appendLocalRecord) keeps the fold and dispatch
+	// cursors aligned so those appends increment both correctly (dontguess-b84).
+	if e.opts.LocalStore != nil {
+		e.localMu.Lock()
+		e.localDispatched = e.localSeen
+		e.localMu.Unlock()
 	}
 	// Dispatch pending unmatched orders that were already in the log at startup.
 	if err := e.dispatchPendingOrders(); err != nil {
@@ -460,6 +493,21 @@ func (e *Engine) replayAll() error {
 	e.opts.log("engine: replayed %d messages, indexed %d entries",
 		len(msgs), e.matchIndex.Len())
 	return nil
+}
+
+// refreshBeforeOperatorOp brings engine State current immediately before an
+// operator-driven put-accept / put-reject decision (AutoAcceptPut / RejectPut),
+// so GetPendingPut observes the latest appended records.
+//
+// In campfire mode it re-reads the campfire (replayAll). In local mode it uses
+// rebuildAndDispatchGapLocal, which — unlike a bare replayAll — also dispatches
+// any buy that was appended since the last poll instead of folding it into
+// State and advancing the fold cursor past it undispatched (dontguess-b84).
+func (e *Engine) refreshBeforeOperatorOp() error {
+	if e.opts.LocalStore != nil {
+		return e.rebuildAndDispatchGapLocal()
+	}
+	return e.replayAll()
 }
 
 // replayAllLocal loads every record currently in LocalStore (pkg/store) and
@@ -571,35 +619,145 @@ func (e *Engine) runLocal(ctx context.Context) error {
 	}
 }
 
-// pollLocalStore re-reads the full LocalStore log and applies+dispatches any
-// records beyond localSeen (i.e. appended since replayAllLocal or the
-// previous poll). LocalStore is single-writer and strictly append-order
-// (pkg/store package doc), so a length-based cursor is sufficient — no
-// sequencer or orphan-antecedent buffer is needed here (that machinery is M2,
-// dontguess-50d, for out-of-order multi-relay nostr ingest).
+// pollLocalStore re-reads the full LocalStore log, folds any records appended
+// since the last fold into State, and dispatches any records not yet
+// dispatched. LocalStore is single-writer and strictly append-order (pkg/store
+// package doc), so length-based cursors are sufficient — no sequencer or
+// orphan-antecedent buffer is needed here (that machinery is M2, dontguess-50d,
+// for out-of-order multi-relay nostr ingest).
+//
+// The fold cursor (localSeen) and dispatch cursor (localDispatched) are
+// tracked separately. A concurrent state rebuild (rebuildAndDispatchGapLocal,
+// driven by the auto-accept goroutine) folds records into State and advances
+// localSeen WITHOUT advancing localDispatched, leaving a [localDispatched:
+// localSeen] gap of folded-but-undispatched records. Dispatching off the
+// dispatch cursor — not the fold cursor — is what guarantees those records
+// (e.g. a buy appended just before an auto-accept tick) are still matched
+// rather than silently dropped (dontguess-b84). Both cursors are claimed under
+// localMu before dispatch runs outside the lock, so each record is dispatched
+// exactly once even when this poll races the auto-accept rebuild.
 func (e *Engine) pollLocalStore() error {
 	msgs, err := e.opts.LocalStore.Replay()
 	if err != nil {
 		return fmt.Errorf("polling local store: %w", err)
 	}
+	e.foldAndDispatchLocalSnapshot(msgs)
+	return nil
+}
 
+// foldAndDispatchLocalSnapshot folds any newly-appended records in the given
+// LocalStore snapshot into State and dispatches any not-yet-dispatched records.
+// It is split out of pollLocalStore so the snapshot passed to fold/dispatch is
+// an explicit argument — the snapshot is captured by Replay() OUTSIDE localMu,
+// so two callers (this poll loop and a concurrent rebuildAndDispatchGapLocal)
+// can hold snapshots of DIFFERENT lengths and then serialize on localMu.
+//
+// Both cursors are claimed under localMu and advanced MONOTONICALLY: a stale
+// (shorter) snapshot whose length is at or below an already-claimed cursor
+// claims nothing and can never regress it. This is the invariant that makes a
+// record dispatched EXACTLY ONCE across all concurrent callers. Without it, a
+// poll holding an old snapshot (len 5) that reaches localMu after a rebuild
+// advanced localDispatched to 7 would write localDispatched = 5, reopening the
+// [5:7] gap and re-dispatching records 5,6 on the next poll — double-firing
+// non-idempotent dispatch side effects (e.g. emitConsumeSignal's durable
+// TagConsume append, which feeds the pricing loops). See claimDispatchGap.
+func (e *Engine) foldAndDispatchLocalSnapshot(msgs []Message) {
 	e.localMu.Lock()
-	if len(msgs) <= e.localSeen {
-		e.localMu.Unlock()
-		return nil
+	total := len(msgs)
+	// Claim the fold gap: records appended since the last fold. A prior rebuild
+	// may already have folded some of these via a full state.Replay, so we only
+	// incrementally Apply from localSeen forward — never double-folding. Guarded
+	// so a stale snapshot cannot regress the fold cursor either.
+	foldStart := e.localSeen
+	if total > e.localSeen {
+		e.indexLocalMessages(msgs[e.localSeen:total])
+		e.localSeen = total
 	}
-	newMsgs := msgs[e.localSeen:]
-	e.indexLocalMessages(newMsgs)
-	e.localSeen = len(msgs)
+	// Claim the dispatch gap: every record not yet dispatched, advancing the
+	// dispatch cursor monotonically. Claimed consistently with THIS snapshot —
+	// the slice dispatched below is msgs[dispatchStart:total] for the same total.
+	dispatchStart := e.claimDispatchGap(total)
 	e.localMu.Unlock()
 
-	for i := range newMsgs {
-		msg := &newMsgs[i]
-		e.state.Apply(msg)
+	// Fold newly-appended records into State (outside localMu; State has its own
+	// lock). Records in [dispatchStart:foldStart] were already folded by a prior
+	// rebuild and must not be re-Applied.
+	for i := foldStart; i < total; i++ {
+		e.state.Apply(&msgs[i])
+	}
+	// Dispatch every claimed-undispatched record (outside localMu — dispatch
+	// handlers may append operator messages, which acquire localMu).
+	for i := dispatchStart; i < total; i++ {
+		msg := &msgs[i]
 		if err := e.dispatch(msg); err != nil {
 			e.opts.log("engine: dispatch error (msg=%s): %v", msg.ID, err)
 		}
 	}
+}
+
+// claimDispatchGap advances the dispatch cursor (localDispatched) to total and
+// returns the start index of the undispatched gap [start:total). The caller
+// MUST hold localMu and MUST dispatch exactly msgs[start:total] over the SAME
+// snapshot whose length is total.
+//
+// The advance is MONOTONIC: if total is at or below the already-claimed cursor
+// (a stale/shorter snapshot, e.g. a poll whose Replay() ran before a concurrent
+// rebuild advanced the cursor), the cursor is left untouched and start is
+// returned >= total — an empty gap — so nothing is claimed and nothing is
+// re-dispatched. This is the single point of truth for the dispatch cursor's
+// monotonic, dispatch-exactly-once discipline shared by pollLocalStore
+// (foldAndDispatchLocalSnapshot) and rebuildAndDispatchGapLocal (dontguess-b84).
+func (e *Engine) claimDispatchGap(total int) int {
+	start := e.localDispatched
+	if total > e.localDispatched {
+		e.localDispatched = total
+	}
+	return start
+}
+
+// rebuildAndDispatchGapLocal rebuilds State from the full LocalStore log (a
+// pure fold via state.Replay) and then dispatches every record that has been
+// folded but not yet dispatched — the [localDispatched:localSeen] gap. It is
+// the local-mode state refresh used by the operator-driven put-accept /
+// put-reject paths (AutoAcceptPut / RejectPut), replacing a plain replayAll()
+// that folded externally-appended buys into State and advanced the fold cursor
+// past them WITHOUT ever dispatching them — so the poll loop, keyed on the same
+// cursor, never matched them (dontguess-b84).
+//
+// Dispatching the gap here (before the operator's own put-accept/reject message
+// is appended) also restores the localDispatched == localSeen invariant that
+// appendLocalRecord relies on. The gap is claimed under localMu before dispatch
+// runs outside the lock, so a record is dispatched exactly once even when this
+// races the poll loop.
+func (e *Engine) rebuildAndDispatchGapLocal() error {
+	msgs, err := e.opts.LocalStore.Replay()
+	if err != nil {
+		return fmt.Errorf("reading local store for replay: %w", err)
+	}
+	total := len(msgs)
+
+	e.localMu.Lock()
+	e.indexLocalMessages(msgs)
+	e.localSeen = total
+	// Claim the dispatch gap monotonically (same discipline as the poll loop):
+	// a rebuild holding a stale snapshot must not regress a dispatch cursor a
+	// concurrent poll already advanced, or the gap reopens and records
+	// re-dispatch. See claimDispatchGap (dontguess-b84 residual fix).
+	dispatchStart := e.claimDispatchGap(total)
+	e.localMu.Unlock()
+
+	e.state.Replay(msgs)
+	e.rebuildMatchIndex()
+
+	for i := dispatchStart; i < total; i++ {
+		msg := &msgs[i]
+		if err := e.dispatch(msg); err != nil {
+			e.opts.log("engine: dispatch error (msg=%s): %v", msg.ID, err)
+		}
+	}
+
+	e.opts.log("engine: rebuilt %d messages from local store, dispatched gap [%d:%d], indexed %d entries",
+		total, dispatchStart, total, e.matchIndex.Len())
 	return nil
 }
 
@@ -765,13 +923,42 @@ func (e *Engine) appendLocalRecord(msg *Message) error {
 		Timestamp:   msg.Timestamp,
 		Instance:    msg.Instance,
 	}
+	// Hold localMu across BOTH the store Append and the cursor increments so the
+	// two are ATOMIC with respect to the concurrent fold path (pollLocalStore /
+	// rebuildAndDispatchGapLocal, via foldAndDispatchLocalSnapshot). Without this,
+	// the record becomes observable to a concurrent LocalStore.Replay() snapshot
+	// the instant Append returns, while foldStart (= localSeen) would not yet cover
+	// it — so that fold's loop would state.Apply() an operator record its emitter
+	// (e.g. emitConsumeSignal) ALSO Applies, a transient in-memory double of a
+	// behavioral signal that feeds the pricing loops (dontguess-90d). Serializing
+	// on localMu forces any fold to run either fully-BEFORE this Append (its
+	// snapshot excludes the record; cursors unchanged) or fully-AFTER the increment
+	// (its snapshot includes the record but foldStart already covers it → skipped),
+	// so the record is applied to State exactly once, by its emitter.
+	//
+	// This holds localMu across Append's fsync; that contention is an accepted
+	// tradeoff for correctness (dontguess-90d). No deadlock: LocalStore.Append is
+	// plain fsynced file I/O in pkg/store (guarded by the store's own mutex) and
+	// never re-enters any path that takes localMu. Cursors are advanced only on a
+	// successful Append — on error we return with localMu released and no cursor,
+	// map, or partial state mutated.
+	e.localMu.Lock()
+	defer e.localMu.Unlock()
 	if err := e.opts.LocalStore.Append(rec); err != nil {
 		return err
 	}
-	e.localMu.Lock()
 	e.localMsgByID[msg.ID] = msg
+	// Operator-emitted messages are applied to State directly by their emitter
+	// and must never be re-dispatched, so advance BOTH cursors. This is correct
+	// because every appendLocalRecord call site holds the invariant
+	// localDispatched == localSeen at append time (the gap is always dispatched
+	// before an operator message is appended): startup seeds them equal before
+	// dispatchPendingOrders; pollLocalStore and rebuildAndDispatchGapLocal both
+	// advance localDispatched to the log length before running the dispatch loop
+	// whose handlers may append. Incrementing both keeps the new tail record
+	// marked folded+handled without re-dispatch (dontguess-b84).
 	e.localSeen++
-	e.localMu.Unlock()
+	e.localDispatched++
 	return nil
 }
 
