@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,10 +63,22 @@ type testHarness struct {
 	// existing assertions against h.st.ListMessages for operator-emitted
 	// messages keep working unmodified.
 	localStore *dgstore.Store
+
+	// finished guards the engine Logger against the "Log in goroutine after test
+	// has completed" panic. It is flipped true by a cleanup registered FIRST in
+	// newTestHarness (so, being LIFO, it runs LAST — after every other cleanup,
+	// including startEngine's cancel+wait). The real fix is the explicit
+	// wait-for-exit at each engine start site; this is defense-in-depth so a
+	// straggler goroutine that still logs after the test body can never panic
+	// the whole suite. See the Logger in newEngineWithOpts.
+	finished *atomic.Bool
 }
 
 func newTestHarness(t *testing.T) *testHarness {
 	t.Helper()
+	// Registered first → runs last (LIFO). See testHarness.finished.
+	finished := &atomic.Bool{}
+	t.Cleanup(func() { finished.Store(true) })
 	cfHome := t.TempDir()
 	transportDir := t.TempDir()
 	convDir := conventionDir(t)
@@ -114,6 +127,7 @@ func newTestHarness(t *testing.T) *testHarness {
 		buyer:          newTestAgent(t),
 		st:             st,
 		localStore:     localStore,
+		finished:       finished,
 	}
 }
 
@@ -204,6 +218,13 @@ func (h *testHarness) newEngineWithOpts(override func(*exchange.EngineOptions)) 
 		LocalStore:   h.localStore,
 		ReadSkipSync: true,
 		Logger: func(format string, args ...any) {
+			// Defense-in-depth: once the test has finished (all cleanups run), a
+			// straggler engine goroutine must not call t.Logf — that panics the
+			// suite. The wait-for-exit at each start site is the real fix; this
+			// is belt-and-suspenders. See testHarness.finished.
+			if h.finished.Load() {
+				return
+			}
 			h.t.Logf("[engine] "+format, args...)
 		},
 	}
@@ -390,7 +411,9 @@ func TestEngine_BuyEmitsMatchResponse(t *testing.T) {
 
 	// Start the engine in a goroutine; it will process the buy and emit a match.
 	// We poll the store for a match message to appear.
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		_ = eng.Start(ctx)
 	}()
 
@@ -407,6 +430,7 @@ func TestEngine_BuyEmitsMatchResponse(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	cancel() // stop the engine
+	<-done   // wait for engine goroutine to fully exit before assertions / return
 
 	if len(matchMsgs) <= preMatchCount {
 		t.Fatal("no match message emitted by engine")
@@ -572,7 +596,8 @@ func TestState_ExpiredEntryExcludedFromFindCandidates(t *testing.T) {
 	defer cancel()
 
 	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
-	go func() { _ = eng.Start(ctx) }()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
@@ -584,6 +609,7 @@ func TestState_ExpiredEntryExcludedFromFindCandidates(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel()
+	<-done // wait for engine goroutine to fully exit before assertions / return
 
 	// If the engine emitted no match at all, the expired entry is absent — pass.
 	if len(matchMsgs) <= len(preMsgs) {
@@ -719,7 +745,8 @@ func TestState_SettleDeliverMarksMatchDelivered(t *testing.T) {
 	defer cancel()
 
 	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
-	go func() { _ = eng.Start(ctx) }()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
@@ -731,6 +758,7 @@ func TestState_SettleDeliverMarksMatchDelivered(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel()
+	<-done // wait for engine goroutine to fully exit before assertions / return
 
 	if len(matchMsgs) <= len(preMsgs) {
 		t.Fatal("no match message emitted by engine")
@@ -870,7 +898,8 @@ func TestEngine_SemanticMatchConfidenceUsedInMatchPayload(t *testing.T) {
 	defer cancel()
 
 	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
-	go func() { _ = eng.Start(ctx) }()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
@@ -882,6 +911,7 @@ func TestEngine_SemanticMatchConfidenceUsedInMatchPayload(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel()
+	<-done // wait for engine goroutine to fully exit before assertions / return
 
 	if len(matchMsgs) <= len(preMsgs) {
 		t.Fatal("no match message emitted")
@@ -956,7 +986,8 @@ func TestEngine_IsPartialMatchForwardedToWirePayload(t *testing.T) {
 	defer cancel()
 
 	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
-	go func() { _ = eng.Start(ctx) }()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
@@ -968,6 +999,7 @@ func TestEngine_IsPartialMatchForwardedToWirePayload(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel()
+	<-done // wait for engine goroutine to fully exit before assertions / return
 
 	if len(matchMsgs) <= len(preMsgs) {
 		t.Fatal("no match message emitted")
@@ -1042,7 +1074,8 @@ func runFullFlowToDeliver(t *testing.T, h *testHarness, eng *exchange.Engine, en
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
-	go func() { _ = eng.Start(ctx) }()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Start(ctx) }()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		ms, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
@@ -1052,6 +1085,7 @@ func runFullFlowToDeliver(t *testing.T, h *testHarness, eng *exchange.Engine, en
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel()
+	<-done // wait for engine goroutine to fully exit before assertions / return
 
 	allMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(allMsgs) <= len(preMsgs) {
@@ -1709,7 +1743,8 @@ func TestEngine_RestartNoDuplicateMatchForAlreadyMatchedOrder(t *testing.T) {
 	// Step 3: run engine 1 until a match appears.
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel1()
-	go func() { _ = eng1.Start(ctx1) }()
+	done1 := make(chan struct{})
+	go func() { defer close(done1); _ = eng1.Start(ctx1) }()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1722,6 +1757,7 @@ func TestEngine_RestartNoDuplicateMatchForAlreadyMatchedOrder(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel1()
+	<-done1 // eng1 must be fully stopped before eng2 starts (shared store) and before return
 
 	afterRun1, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
@@ -1737,11 +1773,13 @@ func TestEngine_RestartNoDuplicateMatchForAlreadyMatchedOrder(t *testing.T) {
 	eng2 := h.newEngine()
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel2()
-	go func() { _ = eng2.Start(ctx2) }()
+	done2 := make(chan struct{})
+	go func() { defer close(done2); _ = eng2.Start(ctx2) }()
 
 	// Allow enough time for at least one poll cycle.
 	time.Sleep(700 * time.Millisecond)
 	cancel2()
+	<-done2 // eng2 must be fully stopped before the test returns
 
 	// Step 6: assert exactly one match total — no double-dispatch.
 	afterRun2, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
@@ -2012,7 +2050,8 @@ func TestEngine_HandleBuy_MaximumDebtorAlwaysGetsOne(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	go func() { _ = eng.Start(ctx) }()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Start(ctx) }()
 
 	h.sendMessage(debtorBuyer,
 		buyPayloadWithResults("Kubernetes deployment YAML", 50000, 5),
@@ -2030,6 +2069,7 @@ func TestEngine_HandleBuy_MaximumDebtorAlwaysGetsOne(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel()
+	<-done // wait for engine goroutine to fully exit before assertions / return
 
 	if len(matchMsgs) <= preCount {
 		t.Fatal("maximum debtor: no match message emitted (debtor should still be served, not blocked)")
