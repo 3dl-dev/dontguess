@@ -201,13 +201,14 @@ func readExchangeViews(dgHome string, cutoff time.Time) (ExchangeCounts, int64, 
 	// every call — the max timestamp observed across ALL queried messages,
 	// unfiltered by cutoff, used by the caller for last_activity tracking.
 	// This dual-purpose windowing isn't something readFilter supports, so the
-	// loop stays local; f's Tags/Kinds->legacyTags() is the only piece reused
-	// from the ReqFilter abstraction.
+	// loop stays local; f's Tags/Kinds->legacyTags() and ExcludeTags are the
+	// only pieces reused from the ReqFilter abstraction.
 	var globalMaxTS int64
 	countFilter := func(f ReqFilter) int {
 		req := protocol.ReadRequest{
-			CampfireID: cfID,
-			Tags:       f.legacyTags(),
+			CampfireID:  cfID,
+			Tags:        f.legacyTags(),
+			ExcludeTags: f.ExcludeTags,
 		}
 		result, err := client.Read(req)
 		if err != nil {
@@ -252,9 +253,10 @@ func readExchangeViewsWithClient(client *protocol.Client, st store.Store, cfID s
 	// see protocol.ReadRequest.SkipSync doc). Test-only entry point.
 	countFilter := func(f ReqFilter) (int, int64) {
 		req := protocol.ReadRequest{
-			CampfireID: cfID,
-			Tags:       f.legacyTags(),
-			SkipSync:   true,
+			CampfireID:  cfID,
+			Tags:        f.legacyTags(),
+			ExcludeTags: f.ExcludeTags,
+			SkipSync:    true,
 		}
 		result, err := client.Read(req)
 		if err != nil {

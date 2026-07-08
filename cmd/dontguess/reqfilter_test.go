@@ -286,3 +286,152 @@ func TestReadFilter_KindOnlyMatchesThatOp(t *testing.T) {
 		t.Errorf("buysFilter returned %+v, want exactly [buy-1]", got)
 	}
 }
+
+// --------------------------------------------------------------------------
+// buyMissFilter / consumesFilter parity — assert against the ACTUAL tags
+// pkg/exchange stamps (cross-checked against engine_put.go's emitPutAccept
+// and engine_buy.go's buy-miss standing offer emission), not just the
+// abstract legacyTags() shape. dontguess-40e.
+// --------------------------------------------------------------------------
+
+// TestReadFilter_BuyMissExcludesPutAcceptFulfillment reproduces the exact tag
+// collision described in buyMissFilter's doc: emitPutAccept
+// (pkg/exchange/engine_put.go) stamps a buy-miss fulfillment's
+// settle(put-accept) message with TagBuyMiss *alongside* TagSettle +
+// phase:put-accept, to link the fulfillment back to the offer it filled. A
+// bare exchange:buy-miss tag query (no ExcludeTags) would return both the
+// still-open standing offer and every fulfillment message for offers that
+// have already been filled — corrupting demand.BuildBacklog, which parses
+// each hit as a BuyMissPayload with a "task" field the fulfillment payload
+// doesn't have. buyMissFilter's ExcludeTags{TagSettle} must keep the
+// fulfillment message out.
+func TestReadFilter_BuyMissExcludesPutAcceptFulfillment(t *testing.T) {
+	t.Parallel()
+
+	cfHome := t.TempDir()
+	transportDir := t.TempDir()
+	convDir := conventionDirForOpTest(t)
+
+	cfg, initClient, err := exchange.Init(exchange.InitOptions{
+		ConfigDir:         cfHome,
+		Transport:         protocol.FilesystemTransport{Dir: transportDir},
+		BeaconDir:         t.TempDir(),
+		ConventionDir:     convDir,
+		SkipConfigCascade: true,
+	})
+	if err != nil {
+		t.Fatalf("exchange.Init: %v", err)
+	}
+	t.Cleanup(func() { initClient.Close() })
+
+	st, err := store.Open(store.StorePath(cfHome))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	cfID := cfg.ExchangeCampfireID
+
+	insert := func(id string, tags []string) {
+		t.Helper()
+		rec := store.MessageRecord{
+			ID:          id,
+			CampfireID:  cfID,
+			Sender:      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			Payload:     []byte(`{}`),
+			Tags:        tags,
+			Antecedents: []string{},
+			Timestamp:   store.NowNano(),
+			Signature:   []byte{},
+		}
+		if _, err := st.AddMessage(rec); err != nil {
+			t.Fatalf("AddMessage %s: %v", id, err)
+		}
+	}
+
+	// The still-open standing offer — exact tag shape from
+	// pkg/exchange/engine_buy.go's buy-miss emission: [TagBuyMiss, TagMatch].
+	insert("buy-miss-standing", []string{exchange.TagBuyMiss, exchange.TagMatch})
+
+	// The fulfillment — exact tag shape from emitPutAccept
+	// (pkg/exchange/engine_put.go): [TagSettle, phase:put-accept,
+	// verdict:accepted, TagBuyMiss].
+	insert("buy-miss-fulfilled", []string{
+		exchange.TagSettle,
+		exchange.TagPhasePrefix + exchange.SettlePhaseStrPutAccept,
+		exchange.TagVerdictPrefix + "accepted",
+		exchange.TagBuyMiss,
+	})
+
+	readClient := protocol.New(st, nil)
+
+	got, err := readFilter(readClient, cfID, buyMissFilter(0))
+	if err != nil {
+		t.Fatalf("readFilter: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "buy-miss-standing" {
+		t.Errorf("buyMissFilter returned %+v, want exactly [buy-miss-standing]", got)
+	}
+}
+
+// TestReadFilter_ConsumesFilterMatchesActualTag confirms consumesFilter's
+// legacyTags() shape (exchange:consume) matches what the exchange actually
+// emits and that unrelated kinds (e.g. a plain match) are not swept in by
+// the "x" passthrough query.
+func TestReadFilter_ConsumesFilterMatchesActualTag(t *testing.T) {
+	t.Parallel()
+
+	cfHome := t.TempDir()
+	transportDir := t.TempDir()
+	convDir := conventionDirForOpTest(t)
+
+	cfg, initClient, err := exchange.Init(exchange.InitOptions{
+		ConfigDir:         cfHome,
+		Transport:         protocol.FilesystemTransport{Dir: transportDir},
+		BeaconDir:         t.TempDir(),
+		ConventionDir:     convDir,
+		SkipConfigCascade: true,
+	})
+	if err != nil {
+		t.Fatalf("exchange.Init: %v", err)
+	}
+	t.Cleanup(func() { initClient.Close() })
+
+	st, err := store.Open(store.StorePath(cfHome))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	cfID := cfg.ExchangeCampfireID
+
+	insert := func(id string, tags []string) {
+		t.Helper()
+		rec := store.MessageRecord{
+			ID:          id,
+			CampfireID:  cfID,
+			Sender:      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			Payload:     []byte(`{}`),
+			Tags:        tags,
+			Antecedents: []string{},
+			Timestamp:   store.NowNano(),
+			Signature:   []byte{},
+		}
+		if _, err := st.AddMessage(rec); err != nil {
+			t.Fatalf("AddMessage %s: %v", id, err)
+		}
+	}
+
+	insert("consume-1", []string{exchange.TagConsume})
+	insert("match-1", []string{exchange.TagMatch})
+
+	readClient := protocol.New(st, nil)
+
+	got, err := readFilter(readClient, cfID, consumesFilter(0))
+	if err != nil {
+		t.Fatalf("readFilter: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "consume-1" {
+		t.Errorf("consumesFilter returned %+v, want exactly [consume-1]", got)
+	}
+}
