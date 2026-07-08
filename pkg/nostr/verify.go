@@ -41,6 +41,13 @@ var operatorSettlePhases = map[string]struct{}{
 	exchange.SettlePhaseStrPutReject: {},
 	exchange.SettlePhaseStrPreview:   {},
 	exchange.SettlePhaseStrDeliver:   {},
+	// D5 (docs/design/relay-transport.md §2.4a): settle(failed) is
+	// operator-authored — emitSettleFailed (engine_settle.go) builds
+	// [TagSettle, TagPhasePrefix+"failed"] via sendOperatorMessage — but was
+	// missing here, so a non-operator could forge a relay-delivered failure
+	// notice a client might trust. Adding it completes the operator-authored
+	// phase map (the audit found this the sole gap).
+	exchange.SettlePhaseStrFailed: {},
 }
 
 // operatorAssignOps is the set of assign(3405) sub-ops that ONLY the exchange
@@ -187,6 +194,31 @@ func VerifyOperatorAuthorship(ev *Event, operatorKey string) error {
 			ErrForgedOperatorEvent, ev.Kind, eventOp(ev), eventPhase(ev), err)
 	}
 	return nil
+}
+
+// VerifyEventSignature is the UNIVERSAL per-event signature floor the relay
+// Intake calls as the UNCONDITIONAL FIRST step on EVERY received wire event, for
+// ALL kinds, BEFORE FromNostrEvent, VerifyOperatorAuthorship, or Sequencer.Ingest
+// (docs/design/relay-transport.md §2.4a D1). It recomputes the NIP-01 id from the
+// wire fields and checks the BIP-340 Schnorr signature against ev.PubKey via the
+// existing identity.VerifyEvent.
+//
+// This is the fix for the CRITICAL that VerifyOperatorAuthorship returns nil for
+// every NON-operator kind (requiresOperatorAuthor false), so put(3401)/buy(3402)/
+// buyer settle phases/worker assign sub-ops previously rode in with
+// msg.Sender = ev.PubKey attacker-controlled and cryptographically UNBOUND. Run
+// first, this makes msg.Sender == ev.PubKey a cryptographically-bound fact for
+// every kind — the buyer-phase settle auth (msg.Sender == expectedBuyer) is sound
+// only because this floor proved msg.Sender. An invalid/absent signature is a LOUD
+// dropped_unsigned drop at the Intake boundary.
+//
+// Q3 RULING (operator 2026-07-08): CLIENT-SIDE RE-VERIFY ONLY — zero dependence on
+// any relay write policy; a reader behind a dumb relay is fully defended.
+func VerifyEventSignature(ev *Event) error {
+	if ev == nil {
+		return fmt.Errorf("nostr: VerifyEventSignature: nil event")
+	}
+	return identity.VerifyEvent(toIdentityEvent(ev))
 }
 
 // toIdentityEvent maps a wire nostr.Event to the structurally-identical

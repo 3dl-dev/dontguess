@@ -133,6 +133,69 @@ func TestVerifyOperatorAuthorship_RejectsForgedOperatorKind(t *testing.T) {
 	}
 }
 
+// TestVerifyOperatorAuthorship_SettleFailedIsOperatorOnly is the D5 regression:
+// settle(failed) is operator-authored (emitSettleFailed builds it via
+// sendOperatorMessage) but was MISSING from operatorSettlePhases, so a non-operator
+// could forge a relay-delivered failure notice a client might trust. It must now
+// be gated: attacker-signed settle(failed) -> ErrForgedOperatorEvent, and a
+// genuine operator-signed settle(failed) passes.
+func TestVerifyOperatorAuthorship_SettleFailedIsOperatorOnly(t *testing.T) {
+	op, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate operator: %v", err)
+	}
+	attacker, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate attacker: %v", err)
+	}
+	opHex := op.PubKeyHex()
+
+	// Attacker validly self-signs a settle(failed) — valid signature, wrong author.
+	forged := signEvent(t, attacker, KindSettle, [][]string{phaseTag(exchange.SettlePhaseStrFailed)}, "forged-failed")
+	if verr := identity.VerifyEvent(toIdentityEvent(forged)); verr != nil {
+		t.Fatalf("attacker settle(failed) should be self-consistently signed: %v", verr)
+	}
+	err = VerifyOperatorAuthorship(forged, opHex)
+	if err == nil {
+		t.Fatal("forged operator settle(failed) was ACCEPTED — D5 gap still open")
+	}
+	if !errors.Is(err, ErrForgedOperatorEvent) {
+		t.Fatalf("forged settle(failed) rejected with wrong error type: %v", err)
+	}
+
+	// The genuine operator-signed settle(failed) still passes.
+	genuine := signEvent(t, op, KindSettle, [][]string{phaseTag(exchange.SettlePhaseStrFailed)}, "genuine-failed")
+	if err := VerifyOperatorAuthorship(genuine, opHex); err != nil {
+		t.Fatalf("operator-signed settle(failed) rejected: %v", err)
+	}
+}
+
+// TestVerifyEventSignature_UniversalFloor covers the D1 universal signature floor:
+// a validly-signed event of ANY kind passes; a tampered (bad-sig) event of ANY
+// kind — including the non-operator put/buy kinds VerifyOperatorAuthorship does
+// not govern — fails. This is the primitive the Intake runs FIRST for every kind.
+func TestVerifyEventSignature_UniversalFloor(t *testing.T) {
+	signer, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate signer: %v", err)
+	}
+	for _, kind := range []int{KindPut, KindBuy, KindMatch, KindSettle, KindAssign, KindScrip} {
+		ev := signEvent(t, signer, kind, nil, "body")
+		if err := VerifyEventSignature(ev); err != nil {
+			t.Fatalf("validly-signed kind %d rejected by floor: %v", kind, err)
+		}
+		// Tamper the content after signing: id no longer matches, sig no longer verifies.
+		bad := signEvent(t, signer, kind, nil, "body")
+		bad.Content += "-tampered"
+		if err := VerifyEventSignature(bad); err == nil {
+			t.Fatalf("tampered kind %d event passed the signature floor", kind)
+		}
+	}
+	if err := VerifyEventSignature(nil); err == nil {
+		t.Fatal("nil event should be rejected by the floor")
+	}
+}
+
 // TestVerifyOperatorAuthorship_RejectsSpoofedPubkey covers the subtler forgery:
 // an attacker sets the operator's pubkey in the author field but cannot produce a
 // signature that verifies for it. The signature/id-integrity check (step 2) must
