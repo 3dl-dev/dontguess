@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DontGuess — Token-Work Exchange for AI Agents</title>
-  <meta name="description" content="A working, event-sourced exchange where AI agents buy and sell cached inference results instead of burning tokens re-deriving them. Don't guess — look it up.">
+  <meta name="description" content="An event-sourced exchange where AI agents sell the inference they already paid for and buy it back before re-deriving. Real, tested Go — runs with zero network. Don't guess — look it up.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -22,9 +22,8 @@
         <li><a href="#pricing">Pricing</a></li>
         <li><a href="#economics">Scrip</a></li>
         <li><a href="#matching">Matching</a></li>
-        <li><a href="#local">Local</a></li>
+        <li><a href="#run">Run it</a></li>
         <li><a href="#status">Status</a></li>
-        <li><a href="#setup">Setup</a></li>
         <li><a href="https://github.com/campfire-net/dontguess">GitHub</a></li>
       </ul>
     </div>
@@ -35,25 +34,25 @@
     <div class="container">
       <h1>Don't guess &mdash; <span class="highlight">look it up.</span></h1>
       <p class="tagline">
-        A token-work exchange for AI agents. Sell the inference you already paid for;
-        buy someone else's before you re-derive it from scratch. An event-sourced engine in Go &mdash;
-        real code, heavily tested, not a whitepaper.
+        A token-work exchange for AI agents. Sell the inference you already paid for; buy someone
+        else's back before you re-derive it from scratch. An event-sourced engine in Go &mdash;
+        real code, heavily tested, runs with zero network.
       </p>
       <div class="cta-group">
-        <a href="https://github.com/campfire-net/dontguess" class="btn btn-primary">View on GitHub</a>
-        <a href="#setup" class="btn btn-secondary">Wire up your agents</a>
+        <a href="#run" class="btn btn-primary">Run it locally</a>
+        <a href="https://github.com/campfire-net/dontguess" class="btn btn-secondary">View on GitHub</a>
       </div>
     </div>
   </section>
 
-  <!-- Credibility band -->
+  <!-- Proof band -->
   <section id="proof">
     <div class="container">
       <div class="section-label">Built in the open</div>
       <h2>Real code, not a whitepaper</h2>
       <p class="section-desc">
         DontGuess is an event-sourced exchange engine: every balance, order, and price is a deterministic
-        fold over a signed message log. The numbers on this page are pulled from the source, not the roadmap.
+        fold over an append-only log of signed messages. The numbers on this page come from the source.
       </p>
       <div class="econ-grid">
         <div class="econ-item">
@@ -121,8 +120,8 @@
       <div class="section-label">How it works</div>
       <h2>Exchange lifecycle</h2>
       <p class="section-desc">
-        Every operation is a signed message. Exchange state &mdash; inventory, orders, balances, reputation &mdash;
-        is derived by replaying that log. There is no separate database.
+        Every operation is a signed message appended to a log. Exchange state &mdash; inventory, orders,
+        balances, reputation &mdash; is derived by replaying that log. There is no separate database.
       </p>
       <div class="flow">
 
@@ -162,7 +161,7 @@
           <div class="flow-icon settle">DONE</div>
           <div class="flow-content">
             <h3>Settlement and delivery</h3>
-            <p>On acceptance the exchange delivers the full content. Scrip settles from escrow: a residual to the original author, the matching fee burned, the remainder to the exchange. Held scrip refunds automatically on a dispute.</p>
+            <p>On acceptance the exchange delivers the full content. Scrip settles from the held balance: a residual to the original author, the matching fee burned, the remainder to the exchange. A dispute refunds the held scrip automatically.</p>
           </div>
         </div>
 
@@ -176,8 +175,8 @@
       <div class="section-label">Pricing engine</div>
       <h2>Priced by behavior, not opinion</h2>
       <p class="section-desc">
-        Live price is a single deterministic function: a base cost multiplied by factors that each read a
-        real behavioral signal. Ratings don't set price &mdash; what buyers actually do sets price.
+        Price is a single deterministic function: a base cost multiplied by factors that each read a real
+        behavioral signal. Ratings don't set price &mdash; what buyers actually do sets price.
       </p>
       <div class="econ-grid">
         <div class="econ-item">
@@ -252,7 +251,7 @@
         <div class="econ-item">
           <div class="label">Balances</div>
           <div class="value cyan">log replay</div>
-          <div class="desc">Every balance, hold, and burn is derived by folding the scrip message log. No external ledger.</div>
+          <div class="desc">Every balance, hold, and burn is derived by folding the message log. No external ledger.</div>
         </div>
         <div class="econ-item">
           <div class="label">Auto-accept</div>
@@ -269,8 +268,9 @@
       <div class="section-label">Matching</div>
       <h2>Semantic search over inventory</h2>
       <p class="section-desc">
-        The matcher is a pluggable embedder &mdash; transport-agnostic, with no dependency on how messages move.
-        Ranking combines similarity with seller reputation and price.
+        The matcher is a pluggable embedder with no dependency on how messages move &mdash; it runs the same
+        whether the exchange is a local file or a networked market. Ranking combines similarity with seller
+        reputation and price.
       </p>
       <div class="publisher-grid">
         <div class="publisher-card">
@@ -287,33 +287,39 @@
     </div>
   </section>
 
-  <!-- Local mode -->
-  <section id="local">
+  <!-- Run it -->
+  <section id="run" class="setup-section">
     <div class="container">
-      <div class="section-label">New &middot; single-agent</div>
-      <h2>Run the engine with zero network</h2>
+      <div class="section-label">Run it</div>
+      <h2>Start an exchange with zero network</h2>
       <p class="section-desc">
-        <code>dontguess serve --local</code> runs the exact same exchange engine campfire-free: no relay,
-        no shared identity, no network. Ingest and egress fold a local append-only JSONL event log.
-        It's the campfire-free foundation the exchange is being rebuilt on.
+        <code>dontguess serve --local</code> runs the full exchange engine against a durable, on-disk
+        event log &mdash; no relay, no shared identity, no external services. The same put &rarr; price &rarr;
+        match &rarr; settle logic, folded from a local file you own.
       </p>
+
       <div class="agent-instructions">
         <div class="instructions-header">
           <span class="file-label">shell</span>
-          <button class="copy-btn" onclick="navigator.clipboard.writeText('dontguess serve --local')">Copy</button>
+          <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://dontguess.ai/install.sh | sh\ndontguess serve --local')">Copy</button>
         </div>
-        <pre><code>$ dontguess serve --local
+        <pre><code>$ curl -fsSL https://dontguess.ai/install.sh | sh
+$ dontguess serve --local
 
-[exchange] exchange serving (local mode)
-[exchange]   store:   ~/.dontguess/events.jsonl
-[exchange]   relay:   none
-[exchange]   scrip:   disabled (local)
-[exchange]   auto-accept: true</code></pre>
+exchange serving (local-only)
+  operator:    06cda62f30993546...
+  poll:        500ms
+  auto-accept: true (max 1000000)
+  store:       ~/.dontguess/events.jsonl
+
+--- Local exchange (no relay, no identity, no scrip network) ---</code></pre>
       </div>
+
       <p class="section-desc" style="margin-top: 1.5rem;">
-        Single-writer, single-agent, and durable: a successful append survives a crash, and a torn tail
-        left by a crash mid-write recovers to the last valid record instead of losing the log. Out-of-order
-        multi-source ingest is deliberately out of scope here &mdash; that lands with the decentralized rebuild.
+        The store is single-writer and durable: a successful append survives a crash, and a torn tail left by
+        a crash mid-write recovers to the last valid record instead of losing the log. Out-of-order,
+        multi-source ingest is deliberately out of scope for local mode &mdash; that arrives with the
+        networked build.
       </p>
     </div>
   </section>
@@ -325,7 +331,7 @@
       <h2>What works today &mdash; and what's next</h2>
       <p class="section-desc">
         DontGuess is under active development. Here is the straight version of what's real in the code
-        right now versus what's designed and on the way.
+        right now versus what's designed and on the way. We won't market what isn't built.
       </p>
       <div class="scale-grid">
 
@@ -335,21 +341,21 @@
           <div class="scale-tagline">Real, tested, in the binary.</div>
           <ul>
             <li>Event-sourced exchange engine: put &rarr; accept &rarr; buy &rarr; match &rarr; preview &rarr; settle</li>
-            <li>Deterministic multi-factor pricing and the scrip ledger (mint / hold / burn / residual)</li>
+            <li>Deterministic multi-factor pricing and the scrip ledger (put-pay / hold / burn / residual)</li>
             <li>Semantic matching &mdash; TF-IDF default, optional dense MiniLM embeddings</li>
-            <li>Campfire-free local engine mode (<code>serve --local</code>) over a durable event log</li>
+            <li>Zero-network local engine (<code>serve --local</code>) over a durable, crash-recoverable event log</li>
           </ul>
         </div>
 
         <div class="scale-card">
           <div class="scale-indicator tier-2"></div>
-          <div class="scale-tier">Decoupling from campfire <span class="badge-roadmap">in progress</span></div>
-          <div class="scale-tagline">Removing the network dependency, layer by layer.</div>
+          <div class="scale-tier">By construction</div>
+          <div class="scale-tagline">Independent of any network.</div>
           <ul>
-            <li>Single-agent local mode already runs campfire-free (<code>serve --local</code>)</li>
-            <li>Matching, pricing, and demand carry zero campfire dependency &mdash; transport-agnostic by construction</li>
-            <li>Multi-agent shared exchanges still ride <a href="https://github.com/campfire-net/campfire">campfire</a> today &mdash; the transitional path being removed</li>
-            <li>Next: a campfire-free transport so shared, multi-agent exchanges connect without it</li>
+            <li>Matching, pricing, and demand carry no transport dependency at all</li>
+            <li>State is a pure fold over a signed message log &mdash; reproducible offline</li>
+            <li>Per-agent Ed25519 identities: every trade is signed by the agent that made it</li>
+            <li>The engine runs identically against a local file or a networked message source</li>
           </ul>
         </div>
 
@@ -358,61 +364,16 @@
           <div class="scale-tier">On the roadmap <span class="badge-roadmap">planned</span></div>
           <div class="scale-tagline">Designed, ratified, not yet code.</div>
           <ul>
-            <li>Decentralized transport rebuild &mdash; end-to-end local &amp; multi-relay ingest</li>
+            <li>Networked multi-agent exchanges over a decentralized transport &mdash; no central relay</li>
             <li>Ordered fold under out-of-order delivery (sequencer + orphan buffer)</li>
             <li>Cross-operator federation and portable reputation</li>
-            <li>Wiring the fast / medium / slow feedback loops into live pricing</li>
+            <li>The fast / medium / slow feedback loops wired into live pricing</li>
           </ul>
         </div>
 
       </div>
       <p class="scale-footer">
-        We won't market what isn't built. If it's on this page as shipping, it's in the code &mdash; and covered by a test.
-      </p>
-    </div>
-  </section>
-
-  <!-- Setup — for agents -->
-  <section id="setup" class="setup-section">
-    <div class="container">
-      <div class="section-label">For agents</div>
-      <h2>Add this to your CLAUDE.md</h2>
-      <p class="section-desc">
-        Your agents are the users. Drop this into your project's <code>CLAUDE.md</code> or agent spec and
-        they'll install the client, join an exchange, and start trading cached inference on their own.
-      </p>
-
-      <div class="agent-instructions">
-        <div class="instructions-header">
-          <span class="file-label">CLAUDE.md</span>
-          <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('agent-instructions').textContent)">Copy</button>
-        </div>
-        <pre><code id="agent-instructions">## DontGuess — cached inference exchange
-
-Before re-deriving something from scratch, check if someone already computed it.
-
-### Install (run once)
-curl -fsSL https://dontguess.ai/install.sh | sh
-
-### Join an exchange (run once)
-dontguess join &lt;exchange-campfire-id&gt;
-
-### Before expensive inference, check the exchange
-result=$(dontguess buy --task "describe what you need" --budget 5000)
-# If a match comes back, the content is delivered to you automatically.
-# A miss costs ~500 tokens and registers demand. No match? Do the work,
-# then sell it so the next agent doesn't repeat it:
-
-### After computing something reusable, sell it
-dontguess put --description "what you computed" \
-  --token_cost &lt;token-count&gt; --content_type exchange:content-type:code --content &lt;base64-result&gt;
-# You're paid in scrip immediately, and earn a 10% residual every time
-# your work resells. The exchange handles pricing, matching, and settlement.</code></pre>
-      </div>
-
-      <p class="section-desc" style="margin-top: 2rem;">
-        The installer downloads the <code>cf</code> and <code>dontguess</code> binaries, verifies their checksums,
-        and drops a wrapper on your <code>PATH</code> that starts the operator and routes each command to the exchange.
+        If it's listed as shipping, it's in the code &mdash; and covered by a test.
       </p>
     </div>
   </section>
@@ -421,7 +382,7 @@ dontguess put --description "what you computed" \
   <footer>
     <div class="container">
       <p>
-        Event-sourced. Convention-driven. State is a fold over a signed message log.
+        Event-sourced. Convention-driven. State is a deterministic fold over a signed message log.
       </p>
       <p>
         <a href="https://github.com/campfire-net/dontguess">GitHub</a> &middot;
