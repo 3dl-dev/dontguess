@@ -1,9 +1,9 @@
 package relay
 
 // watchdog.go is the RECONNECTION / GAP-RECOVERY leg of the single-relay
-// transport — docs/design/relay-transport.md §2.5 (build outcome 7). It closes
-// the three failure paths a dumb, memoryless relay opens once the Intake (§2.4)
-// and Outbox (§2.3) are live:
+// transport — docs/design/relay-transport.md §2.5 / §2.5a (build outcome 7). It
+// closes the three failure paths a dumb, memoryless relay opens once the Intake
+// (§2.4) and Outbox (§2.3) are live:
 //
 //	1. Live disconnect. A dropped subscription loses the relay's memory of the
 //	   REQ. On reconnect the watchdog re-issues REQ since=(watermark − slack);
@@ -11,18 +11,25 @@ package relay
 //	   never depends on `slack` being exact (§2.5, ADV-9). Loud: intake_disconnected.
 //
 //	2. Orphan-age gap. An ingested event referencing an unreleased antecedent
-//	   sits in the Sequencer's bounded orphan buffer. The watchdog issues ONE
-//	   targeted REQ ["ids", <antecedent>]; if the refetch comes back empty the
-//	   antecedent is provably unrecoverable (relay-pruned) and the watchdog
-//	   QUARANTINES that chain with a loud alert — every OTHER chain keeps
-//	   draining. The orphan-buffer overflow itself fails loud in the Sequencer
-//	   (ErrOrphanBufferOverflow), surfaced by the Intake, not swallowed.
+//	   sits in the Sequencer's occupancy-bounded orphan buffer (LRU eviction,
+//	   §2.5a). The watchdog does gap RECOVERY only — NOT ingest admission: for
+//	   each distinct missing antecedent it issues ONE targeted REQ
+//	   ["ids", <antecedent>], RATE-LIMITED by a token bucket (ADV-6: each distinct
+//	   antecedent costs one relay REQ). If the refetch delivers the antecedent the
+//	   Intake releases the chain; if it comes back empty the antecedent is
+//	   currently unrecoverable and the watchdog ALARMS loud — but it holds NO
+//	   quarantine set and makes NO admission decision. The ratified design
+//	   (§2.5a) REMOVED the ingest-gating per-antecedent quarantine: it was a
+//	   re-parent black hole + a false-quarantine censorship primitive. A truly
+//	   stuck orphan is bounded by the Sequencer's LRU occupancy eviction and
+//	   reconciled by path 3; the watchdog never permanently gives up on any id.
 //
 //	3. Structural drift. A periodic low-cadence full-resync audit (REQ since=0)
 //	   diffs the relay id-set against the local id-set: a local-only OPERATOR
 //	   event the relay lacks is re-published via the Outbox catch-up; a relay
 //	   event the local store lacks and still cannot fetch is a loud resync_mismatch.
-//	   This is the backstop for the ADV-9 unreferenced-far-past-root cache-warm gap.
+//	   This is the backstop for the ADV-9 unreferenced-far-past-root cache-warm gap
+//	   and for re-delivering an LRU-evicted orphan once its antecedent is nearer.
 //
 // Every degradation is LOUD (LOCKED-5): each row bumps a DISTINCT WatchdogMetrics
 // counter and calls the alarm sink. No recovery path returns a silent nil.
@@ -39,7 +46,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/campfire-net/dontguess/pkg/nostr"
 	"github.com/campfire-net/dontguess/pkg/store"
@@ -66,6 +75,67 @@ func defaultAlarm(class string, err error, ev *nostr.Event) {
 // absorbs any overlap (§2.5). 5 minutes is intentionally generous: a redundant
 // refetch is free, a missed event is a cache gap.
 const DefaultReconnectSlack int64 = 300
+
+// DefaultRefetchBurst / DefaultRefetchPerSec configure the targeted-refetch
+// token bucket (§2.5a, ADV-6). Each distinct missing antecedent the watchdog
+// refetches costs one token; when the bucket is empty the refetch is DEFERRED to
+// a later pass (metered orphan_refetch_throttled) rather than issued, capping the
+// relay-REQ amplification a burst of orphans can force. The defaults allow a
+// burst of DefaultRefetchBurst distinct antecedents, refilling at
+// DefaultRefetchPerSec — generous for honest reorder, bounded against a flood.
+const (
+	DefaultRefetchBurst  = 32.0
+	DefaultRefetchPerSec = 4.0
+)
+
+// tokenBucket is a minimal, clock-injectable token-bucket rate limiter for the
+// targeted-refetch REQs. It is NOT internally locked — the Watchdog guards it
+// with w.mu — so tests can drive it deterministically via an injected clock.
+type tokenBucket struct {
+	capacity     float64
+	tokens       float64
+	refillPerSec float64
+	last         time.Time
+	now          func() time.Time
+}
+
+func newTokenBucket(capacity, refillPerSec float64, now func() time.Time) *tokenBucket {
+	if now == nil {
+		now = time.Now
+	}
+	if capacity < 1 {
+		capacity = 1
+	}
+	if refillPerSec < 0 {
+		refillPerSec = 0
+	}
+	return &tokenBucket{
+		capacity:     capacity,
+		tokens:       capacity,
+		refillPerSec: refillPerSec,
+		last:         now(),
+		now:          now,
+	}
+}
+
+// tryTake refills by the elapsed wall-time since the last call, then consumes one
+// token if available. Returns false (throttled) when the bucket is empty. Caller
+// must hold the guarding lock.
+func (b *tokenBucket) tryTake() bool {
+	t := b.now()
+	if t.After(b.last) {
+		b.tokens += t.Sub(b.last).Seconds() * b.refillPerSec
+		if b.tokens > b.capacity {
+			b.tokens = b.capacity
+		}
+		b.last = t
+	}
+	if b.tokens >= 1 {
+		b.tokens--
+		return true
+	}
+	return false
+}
 
 // Subscriber issues ONE REQ with the given filter, feeds every EVENT the relay
 // returns through the Intake (§2.4 auth pipeline — that is where dedup + causal
@@ -127,9 +197,33 @@ func WithWatchdogLogf(logf func(format string, args ...interface{})) WatchdogOpt
 	}
 }
 
-// Watchdog runs the §2.5 reconnection / gap-recovery logic for one exchange
-// domain. Its methods are safe for concurrent use; the only mutable state is the
-// quarantine set, guarded by mu.
+// WithRefetchRate overrides the targeted-refetch token-bucket rate (§2.5a):
+// `burst` distinct antecedents may be refetched back-to-back, refilling at
+// `perSec` per second. Values are clamped to sane floors by newTokenBucket.
+func WithRefetchRate(burst, perSec float64) WatchdogOption {
+	return func(w *Watchdog) {
+		w.refetch = newTokenBucket(burst, perSec, w.now)
+	}
+}
+
+// WithClock injects the clock the refetch rate limiter reads (default time.Now).
+// It exists for deterministic tests of the rate limit. Applying it rebuilds the
+// bucket so the injected clock is the one the bucket samples.
+func WithClock(now func() time.Time) WatchdogOption {
+	return func(w *Watchdog) {
+		if now == nil {
+			return
+		}
+		w.now = now
+		burst, rate := w.refetch.capacity, w.refetch.refillPerSec
+		w.refetch = newTokenBucket(burst, rate, now)
+	}
+}
+
+// Watchdog runs the §2.5 / §2.5a reconnection / gap-recovery logic for one
+// exchange domain. Its methods are safe for concurrent use; the only mutable
+// state is the refetch token bucket, guarded by mu. It holds NO quarantine set —
+// the ratified §2.5a design removed ingest-gating quarantine entirely.
 type Watchdog struct {
 	sub     Subscriber
 	orphans orphanSource
@@ -139,9 +233,10 @@ type Watchdog struct {
 	alarm   AlarmFunc
 	logf    func(format string, args ...interface{})
 	slack   int64
+	now     func() time.Time
 
-	mu          sync.Mutex
-	quarantined map[string]struct{} // missing-antecedent ids already given up on
+	mu      sync.Mutex
+	refetch *tokenBucket // targeted-refetch rate limiter (ADV-6)
 }
 
 // NewWatchdog constructs a Watchdog. sub, orphans, local, and metrics must be
@@ -154,16 +249,17 @@ func NewWatchdog(sub Subscriber, orphans orphanSource, local localReader, repub 
 		alarm = defaultAlarm
 	}
 	w := &Watchdog{
-		sub:         sub,
-		orphans:     orphans,
-		local:       local,
-		repub:       repub,
-		metrics:     metrics,
-		alarm:       alarm,
-		logf:        log2Printf,
-		slack:       DefaultReconnectSlack,
-		quarantined: make(map[string]struct{}),
+		sub:     sub,
+		orphans: orphans,
+		local:   local,
+		repub:   repub,
+		metrics: metrics,
+		alarm:   alarm,
+		logf:    log2Printf,
+		slack:   DefaultReconnectSlack,
+		now:     time.Now,
 	}
+	w.refetch = newTokenBucket(DefaultRefetchBurst, DefaultRefetchPerSec, w.now)
 	for _, opt := range opts {
 		opt(w)
 	}
@@ -200,34 +296,59 @@ func (w *Watchdog) since(watermark int64) int64 {
 	return s
 }
 
-// CheckOrphans runs the orphan-age gap recovery pass (§2.5 path 2). It samples
-// orphan_pending (a gauge), then for each distinct missing antecedent it has not
-// already quarantined it issues ONE targeted REQ ["ids", <antecedent>]. If the
-// refetch delivers the antecedent, the Intake releases the dependent chain on
-// the same pass and the orphan drains — nothing more to do. If the refetch comes
-// back empty (or the antecedent is still pending afterward), the chain is
-// QUARANTINED: orphan_unrecoverable is bumped once for that chain and a loud
-// alert fires, while every other chain keeps draining. A quarantined antecedent
-// is remembered so the watchdog does not refetch it again on later passes.
+// CheckOrphans runs the orphan-age gap RECOVERY pass (§2.5 / §2.5a path 2). It
+// samples orphan_pending (a gauge), then for each distinct missing antecedent —
+// in deterministic id order, so the refetch budget is spent fairly under a flood
+// — it issues ONE targeted REQ ["ids", <antecedent>], RATE-LIMITED by the token
+// bucket (ADV-6: each distinct antecedent costs one token / one relay REQ). When
+// the bucket is empty the refetch is DEFERRED (metered orphan_refetch_throttled)
+// to a later pass, capping relay-REQ amplification under an orphan flood.
 //
-// It returns the number of chains quarantined on this pass (0 = fully recovered
-// or nothing pending). A per-antecedent Query error is alarmed and skipped (the
-// chain is retried next pass), never fatal to the other chains.
-func (w *Watchdog) CheckOrphans(ctx context.Context) (quarantined int, err error) {
+// If a refetch delivers the antecedent, the Intake releases the dependent chain
+// on the same pass and the orphan drains. If it comes back empty the antecedent
+// is currently unrecoverable: the watchdog ALARMS loud (orphan_unrecoverable) but
+// makes NO ingest-admission decision and holds NO quarantine set — the ratified
+// §2.5a design removed ingest-gating quarantine (re-parent black hole + censorship
+// primitive). A truly stuck orphan is bounded by the Sequencer's LRU occupancy
+// eviction and reconciled by the resync audit; the watchdog never permanently
+// gives up on an id.
+//
+// It returns the number of targeted refetch REQs actually issued this pass
+// (throttled attempts are not counted). A per-antecedent Query error is alarmed
+// and skipped (retried next pass), never fatal to the other antecedents.
+func (w *Watchdog) CheckOrphans(ctx context.Context) (refetched int, err error) {
 	w.metrics.OrphanPending.Store(int64(w.orphans.PendingCount()))
 
 	pending := w.orphans.PendingAntecedents()
-	for ante, dependents := range pending {
-		if w.isQuarantined(ante) {
+	// Deterministic order: under a flood the finite refetch budget must be spent
+	// the same way every run (no map-iteration nondeterminism deciding which
+	// antecedents get a REQ this pass).
+	antes := make([]string, 0, len(pending))
+	for ante := range pending {
+		antes = append(antes, ante)
+	}
+	sort.Strings(antes)
+
+	for _, ante := range antes {
+		dependents := pending[ante]
+		if !w.takeRefetchToken() {
+			// Budget exhausted this pass — defer, loud. The antecedent stays
+			// pending and is retried once the bucket refills (or the orphan is
+			// LRU-evicted / reconciled by the resync audit).
+			w.metrics.OrphanRefetchThrottled.Add(1)
+			w.alarm("orphan_refetch_throttled",
+				fmt.Errorf("refetch of antecedent %s deferred: rate limit exhausted (%d dependent event(s) still stalled)",
+					shortID(ante), len(dependents)), nil)
 			continue
 		}
 
 		w.metrics.OrphanRefetch.Add(1)
+		refetched++
 		delivered, qerr := w.sub.Query(ctx, Filter{IDs: []string{ante}})
 		if qerr != nil {
-			// A transport error on THIS refetch is loud but not fatal: leave the
-			// chain pending (not quarantined) so a later pass retries it once the
-			// relay is reachable again.
+			// A transport error on THIS refetch is loud but not fatal: the
+			// antecedent stays pending so a later pass retries it once the relay
+			// is reachable again.
 			w.alarm("orphan_refetch_failed", fmt.Errorf("targeted REQ ids=[%s] failed: %w", shortID(ante), qerr), nil)
 			continue
 		}
@@ -236,8 +357,8 @@ func (w *Watchdog) CheckOrphans(ctx context.Context) (quarantined int, err error
 		// event carrying that id. (It may deliver other events; what matters is
 		// whether the missing antecedent itself arrived.) After feeding the
 		// delivery through the Intake, re-check the live orphan view: if the
-		// antecedent is still an outstanding key, the chain is unrecoverable.
-		if delivered := containsID(delivered, ante); delivered {
+		// antecedent is still outstanding, it is currently unrecoverable.
+		if containsID(delivered, ante) {
 			// Antecedent arrived; the Intake released + persisted the chain. Done.
 			continue
 		}
@@ -246,18 +367,24 @@ func (w *Watchdog) CheckOrphans(ctx context.Context) (quarantined int, err error
 			continue
 		}
 
-		// Provably unrecoverable: per-chain quarantine, loud.
-		w.markQuarantined(ante)
+		// Currently unrecoverable: LOUD recovery diagnostic — NO quarantine, NO
+		// admission decision. Bounded by the Sequencer's LRU eviction + resync.
 		w.metrics.OrphanUnrecoverable.Add(1)
-		quarantined++
 		w.alarm("orphan_unrecoverable",
-			fmt.Errorf("antecedent %s unrecoverable after targeted refetch (empty); quarantining %d dependent event(s)",
+			fmt.Errorf("antecedent %s unrecoverable after targeted refetch (empty); %d dependent event(s) stalled (no quarantine — bounded by LRU eviction + resync)",
 				shortID(ante), len(dependents)), nil)
-		w.logf("relay/watchdog: QUARANTINE chain on missing antecedent %s (%d dependents stalled)", shortID(ante), len(dependents))
+		w.logf("relay/watchdog: antecedent %s still missing after refetch (%d dependents stalled); no quarantine", shortID(ante), len(dependents))
 	}
 	// Re-sample the gauge after any recovery so it reflects the post-pass buffer.
 	w.metrics.OrphanPending.Store(int64(w.orphans.PendingCount()))
-	return quarantined, nil
+	return refetched, nil
+}
+
+// takeRefetchToken consumes one targeted-refetch token under the guarding lock.
+func (w *Watchdog) takeRefetchToken() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.refetch.tryTake()
 }
 
 // ResyncAudit runs the periodic full-resync structural-drift pass (§2.5 path 3),
@@ -337,19 +464,6 @@ func (w *Watchdog) ResyncAudit(ctx context.Context) (mismatches int, err error) 
 			fmt.Errorf("relay holds event %s the local store lacks and could not reconcile (orphaned or rejected on ingest)", shortID(id)), nil)
 	}
 	return mismatches, nil
-}
-
-func (w *Watchdog) isQuarantined(ante string) bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	_, ok := w.quarantined[ante]
-	return ok
-}
-
-func (w *Watchdog) markQuarantined(ante string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.quarantined[ante] = struct{}{}
 }
 
 // containsID reports whether id is in ids.

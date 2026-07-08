@@ -18,6 +18,17 @@ const domainPrefix = "exchange:domain:"
 // (seconds).
 const nanosPerSecond = int64(1_000_000_000)
 
+// MaxAntecedents caps the number of causal antecedents (e-tags) a single
+// ingested event may carry. It bounds DAG fan-in and, with it, the orphan-
+// recovery REFETCH AMPLIFICATION a single event can force: the gap-recovery
+// watchdog issues one relay REQ per distinct missing antecedent, so an event
+// with thousands of e-tags would be a refetch-amplification lever. 64 is a
+// generous ceiling for legitimate causal fan-in (the engine only ever reads
+// Antecedents[0]; multi-antecedent events are rare merge points). An event that
+// exceeds it is rejected LOUD at the adapter boundary (docs/design/relay-
+// transport.md §2.5a (C)), never silently truncated.
+const MaxAntecedents = 64
+
 // ToNostrEvent converts an exchange message into a nostr Event.
 //
 // Mapping (docs/design/nostr-first-rebuild-decision.md §Nostr Architecture):
@@ -221,6 +232,15 @@ func FromNostrEvent(ev *Event) (*proto.Message, error) {
 
 	if sharedKind && !opFound {
 		return nil, fmt.Errorf("nostr: FromNostrEvent: kind %d requires an %q discriminator tag", ev.Kind, tagOp)
+	}
+
+	// Cap causal fan-in: an event carrying more than MaxAntecedents e-tags is
+	// rejected LOUD (§2.5a (C)). This bounds the DAG fan-in and the per-event
+	// orphan-refetch amplification (one relay REQ per distinct missing
+	// antecedent). Checked here, at the adapter boundary, so an over-fanned
+	// event never reaches the Sequencer or the store.
+	if len(msg.Antecedents) > MaxAntecedents {
+		return nil, fmt.Errorf("nostr: FromNostrEvent: event %s carries %d antecedents (e-tags), exceeding MaxAntecedents=%d", ev.ID, len(msg.Antecedents), MaxAntecedents)
 	}
 
 	return msg, nil

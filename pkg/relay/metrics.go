@@ -31,7 +31,18 @@ type IntakeMetrics struct {
 	Persisted atomic.Int64
 	// OrphanOverflow counts Drain returning ErrOrphanBufferOverflow: too many
 	// buffered pending-antecedent events. Loud — the operator investigates. (§3)
+	// With the LIVE LRU occupancy bound (Sequencer.IngestLive, §2.5a) this can no
+	// longer fire on the live path — occupancy is capped before Drain — but the
+	// counter stays as a defense-in-depth signal on the shared Drain residual.
 	OrphanOverflow atomic.Int64
+	// OrphanEvicted counts orphans the LIVE ingest path evicted (LRU by ingest
+	// order) to keep TOTAL buffer occupancy within bound (§2.5a). An eviction is
+	// a LOUD cache-warm delay, never money loss: the evicted event is still
+	// served by the relay and re-delivered by the resync audit / re-subscription.
+	// A rising rate means the buffer is under sustained orphan pressure (a
+	// chained-flood attack or a badly-lagging antecedent) and the operator should
+	// investigate the source. (§2.5a)
+	OrphanEvicted atomic.Int64
 }
 
 // WatchdogMetrics holds the reconnection / gap-recovery counters
@@ -49,15 +60,25 @@ type WatchdogMetrics struct {
 	// A recoverable causal gap — the targeted e-tag refetch may still fill it. (§3
 	// orphan_pending)
 	OrphanPending atomic.Int64
-	// OrphanUnrecoverable counts orphan CHAINS quarantined because a targeted
-	// REQ ["ids", <antecedent>] came back empty — the antecedent is provably
-	// unrecoverable (relay-pruned). Incremented once per quarantined chain; the
-	// chain's dependents stall (correct), every other chain keeps draining. (§3
+	// OrphanUnrecoverable counts targeted refetches that came back EMPTY — the
+	// missing antecedent was not served by the relay on this pass (currently
+	// unrecoverable, e.g. relay-pruned). The watchdog holds NO quarantine set
+	// (§2.5a): it makes no ingest-admission decision, so this is a loud RECOVERY
+	// diagnostic, not a censorship primitive. A stuck orphan is bounded by the
+	// Sequencer's LRU occupancy eviction and reconciled by the resync audit — the
+	// watchdog does not permanently give up on any antecedent. (§3
 	// orphan_unrecoverable)
 	OrphanUnrecoverable atomic.Int64
-	// OrphanRefetch counts targeted e-tag refetch REQs the watchdog issued for a
-	// pending antecedent (whether or not they recovered it). Diagnostic.
+	// OrphanRefetch counts targeted e-tag refetch REQs the watchdog actually
+	// issued for a pending antecedent (whether or not they recovered it). Each
+	// distinct antecedent costs one relay REQ (ADV-6). Diagnostic.
 	OrphanRefetch atomic.Int64
+	// OrphanRefetchThrottled counts refetch attempts the token-bucket rate limit
+	// DEFERRED this pass (no relay REQ issued): the missing antecedent stays
+	// pending and is retried on a later pass once the bucket refills. Loud — a
+	// rising rate means orphan pressure is outrunning the refetch budget (a
+	// chained-flood attack or a lagging relay). (§2.5a, ADV-6)
+	OrphanRefetchThrottled atomic.Int64
 	// ResyncMismatch counts events the periodic since=0 audit found on the relay
 	// but absent from the local store AND still unfetchable after the audit fed
 	// them through the Intake (an orphan or a rejected event) — a loud

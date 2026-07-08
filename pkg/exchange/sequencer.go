@@ -2,6 +2,7 @@ package exchange
 
 import (
 	"container/heap"
+	"container/list"
 	"errors"
 	"fmt"
 	"sort"
@@ -105,6 +106,17 @@ type Sequencer struct {
 	// missingCount is decremented in O(1) amortized total work, and any
 	// waiter that reaches zero is no longer a true orphan.
 	missingWaiters map[string][]string
+
+	// order is the insertion-order index over the buffered set: front == the
+	// OLDEST buffered orphan, back == the most recently admitted. It backs the
+	// LRU (by ingest order) eviction the LIVE ingest path (IngestLive) uses to
+	// bound TOTAL buffer occupancy. Every buffered event has exactly one element
+	// here (added on admit, removed on release in Drain or on eviction), so
+	// order.Len() == len(buffered) at all times.
+	order *list.List
+	// orderElem maps a buffered event id to its element in `order`, so release
+	// and eviction remove the right element in O(1).
+	orderElem map[string]*list.Element
 }
 
 // NewSequencer returns a Sequencer with the given orphan-buffer bound. A
@@ -119,6 +131,8 @@ func NewSequencer(maxOrphans int) *Sequencer {
 		buffered:       make(map[string]*Message),
 		missingCount:   make(map[string]int),
 		missingWaiters: make(map[string][]string),
+		order:          list.New(),
+		orderElem:      make(map[string]*list.Element),
 	}
 }
 
@@ -172,33 +186,117 @@ func (s *Sequencer) Ingest(m Message) error {
 		return nil // duplicate still waiting in the buffer
 	}
 
-	// Deduplicated set of antecedents that have never been ingested at all —
-	// the true gaps. O(k) in the number of antecedents on this one event
-	// (small, bounded per-event), never proportional to buffer size.
-	var missing []string
-	if len(m.Antecedents) > 0 {
-		seen := make(map[string]struct{}, len(m.Antecedents))
-		for _, a := range m.Antecedents {
-			if a == "" {
-				continue
-			}
-			if _, dup := seen[a]; dup {
-				continue
-			}
-			seen[a] = struct{}{}
-			if !s.isKnownLocked(a) {
-				missing = append(missing, a)
-			}
-		}
-	}
+	missing := s.missingAntecedentsLocked(m)
 
 	if len(missing) > 0 && s.trueOrphans+1 > s.maxOrphans {
 		return fmt.Errorf("%w: ingesting %s would bring true orphans to %d, exceeding bound %d",
 			ErrOrphanBufferOverflow, shortKey(m.ID), s.trueOrphans+1, s.maxOrphans)
 	}
 
+	s.insertBufferedLocked(m, missing)
+	return nil
+}
+
+// IngestLive is the LIVE (relay Intake) ingest path. Unlike Ingest — the
+// trusted-operator BATCH path that buffers a whole replay set before a single
+// Drain and REJECTS a new event loud once the true-orphan bound is reached —
+// IngestLive makes NO trust decision about which orphan is "bad" and NEVER
+// rejects a new well-formed event for buffer fullness. Instead it bounds TOTAL
+// buffer OCCUPANCY (len(buffered)) at maxOrphans and, when admitting the new
+// event would exceed the bound, EVICTS the OLDEST buffered orphan(s) by
+// insertion order (LRU by ingest order) to make room, then admits the new one.
+// The evicted ids are returned so the caller can meter the eviction (loud, not
+// silent) — an evicted event is never a hard drop of state.
+//
+// Why occupancy, not true-orphan count (the attempt-1..3 lesson, §2.5a): every
+// bound that names a subset of "bad" orphans is gameable. The head-only true-
+// orphan bound (Ingest) is bypassed by a CHAINED flood e0<-e1<-..<-eN where only
+// the head references a never-arriving antecedent: each later link's antecedent
+// is already BUFFERED when it arrives, so trueOrphans stays 1 while the buffer
+// grows without bound. Bounding raw occupancy and evicting the oldest closes
+// that hole with no trust decision at all: a flood evicts its own stale head
+// first, and a brand-new well-formed event is ALWAYS admitted (no wedge — that
+// was attempt-3's ADV-5 fill-then-reject failure).
+//
+// DETERMINISM / SAFETY (§2.5a): eviction removes only ORPHANS (events still in
+// the buffer, i.e. not yet causally released), NEVER folded state — the fold of
+// a causally-closed set is byte-identical whether or not eviction ran, because
+// eviction only ever touches events that were never released. An evicted legit
+// orphan is not lost: the relay still serves it (history) and the resync
+// audit / re-subscription re-delivers it, re-buffering when its antecedent is
+// nearer. MONEY ops (match/settle/scrip) are operator-authored and the
+// operator's OWN local log is authoritative — evicting a FOREIGN orphan is at
+// worst a cache-warm delay, never money loss or fold divergence.
+//
+// IngestLive keeps Ingest's O(1)-amortized bookkeeping and Drain's O(N log N)
+// cascade intact. It dedups by event id exactly as Ingest does. maxOrphans >= 1
+// always (NewSequencer clamps a non-positive value to DefaultMaxOrphans), so
+// there is always room for one event after eviction.
+func (s *Sequencer) IngestLive(m Message) (evicted []string, err error) {
+	if m.ID == "" {
+		return nil, fmt.Errorf("sequencer: refusing to ingest event with empty ID")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.emitted[m.ID]; ok {
+		return nil, nil // duplicate of an already-released event
+	}
+	if _, ok := s.buffered[m.ID]; ok {
+		return nil, nil // duplicate still waiting in the buffer
+	}
+
+	missing := s.missingAntecedentsLocked(m)
+
+	// Occupancy bound: make room for exactly one more by evicting the OLDEST
+	// buffered orphan(s). NEVER reject the new event. maxOrphans >= 1 so this
+	// loop terminates with room for the admit.
+	for len(s.buffered)+1 > s.maxOrphans {
+		ev := s.evictOldestLocked()
+		if ev == "" {
+			break // buffer already empty (defensive; unreachable while bound>=1)
+		}
+		evicted = append(evicted, ev)
+	}
+
+	s.insertBufferedLocked(m, missing)
+	return evicted, nil
+}
+
+// missingAntecedentsLocked returns the deduplicated set of m's antecedents that
+// have never been ingested at all (neither emitted nor currently buffered) —
+// the true gaps. O(k) in the number of antecedents on this one event (small,
+// bounded per-event), never proportional to buffer size. Caller must hold s.mu.
+func (s *Sequencer) missingAntecedentsLocked(m Message) []string {
+	if len(m.Antecedents) == 0 {
+		return nil
+	}
+	var missing []string
+	seen := make(map[string]struct{}, len(m.Antecedents))
+	for _, a := range m.Antecedents {
+		if a == "" {
+			continue
+		}
+		if _, dup := seen[a]; dup {
+			continue
+		}
+		seen[a] = struct{}{}
+		if !s.isKnownLocked(a) {
+			missing = append(missing, a)
+		}
+	}
+	return missing
+}
+
+// insertBufferedLocked admits m into the buffer with its precomputed missing-
+// antecedent set: it copies m in, records its insertion-order position (for LRU
+// eviction), updates the true-orphan bookkeeping, and resolves any earlier-
+// buffered event that was waiting on m.ID. Caller must hold s.mu and must have
+// already deduped m and enforced whatever admission policy applies. `missing`
+// must be the result of missingAntecedentsLocked(m).
+func (s *Sequencer) insertBufferedLocked(m Message, missing []string) {
 	cp := m
 	s.buffered[m.ID] = &cp
+	s.orderElem[m.ID] = s.order.PushBack(m.ID)
 	if len(missing) > 0 {
 		s.missingCount[m.ID] = len(missing)
 		s.trueOrphans++
@@ -209,7 +307,47 @@ func (s *Sequencer) Ingest(m Message) error {
 	// This event's own id is now known; resolve any earlier-buffered event
 	// that was counting m.ID as one of its missing antecedents.
 	s.resolveArrivalLocked(m.ID)
-	return nil
+}
+
+// removeOrderLocked drops id from the insertion-order index. It is called both
+// when an event is RELEASED (Drain) and when it is EVICTED (LRU), keeping
+// order.Len() == len(buffered). A no-op if id has no order element (e.g. a
+// batch-path event already cleaned up). Caller must hold s.mu.
+func (s *Sequencer) removeOrderLocked(id string) {
+	if el, ok := s.orderElem[id]; ok {
+		s.order.Remove(el)
+		delete(s.orderElem, id)
+	}
+}
+
+// evictOldestLocked removes the OLDEST buffered orphan (front of the insertion-
+// order list) and returns its id, or "" if the buffer is empty. It removes only
+// buffered (never-released) state: the buffered entry, its order element, and
+// its true-orphan bookkeeping. Any missingWaiters entries that still name the
+// evicted id are left in place and harmlessly skipped by resolveArrivalLocked
+// (it guards on the missingCount entry existing). Caller must hold s.mu.
+//
+// Note: evicting event X may orphan a still-buffered dependent Y that referenced
+// X but did not count X as missing (X was buffered/known when Y arrived). Y then
+// silently becomes a true orphan the trueOrphans counter no longer reflects.
+// That drift is harmless in the LIVE path, whose admission bound is raw
+// OCCUPANCY (len(buffered)), not trueOrphans; the batch Ingest path (which does
+// consult trueOrphans) never evicts. Y is bounded by occupancy like any other
+// orphan and re-released when X is re-delivered by the resync audit.
+func (s *Sequencer) evictOldestLocked() string {
+	front := s.order.Front()
+	if front == nil {
+		return ""
+	}
+	id := front.Value.(string)
+	s.order.Remove(front)
+	delete(s.orderElem, id)
+	delete(s.buffered, id)
+	if _, ok := s.missingCount[id]; ok {
+		delete(s.missingCount, id)
+		s.trueOrphans--
+	}
+	return id
 }
 
 // isKnownLocked reports whether id has been ingested in any form — released
@@ -337,6 +475,7 @@ func (s *Sequencer) Drain() ([]Sequenced, error) {
 		m := heap.Pop(h).(*Message)
 		s.emitted[m.ID] = struct{}{}
 		delete(s.buffered, m.ID)
+		s.removeOrderLocked(m.ID)
 		delete(pending, m.ID)
 		out = append(out, Sequenced{Seq: s.nextSeq, Msg: *m})
 		s.nextSeq++
@@ -415,11 +554,14 @@ func (s *Sequencer) PendingCount() int {
 // buffered event ids that depend on each. An empty map means nothing is
 // orphaned. It is a read-only diagnostic — it releases nothing and mutates no
 // state — for the reconnection / gap-recovery watchdog
-// (docs/design/relay-transport.md §2.5): the watchdog issues one targeted
-// REQ ["ids", <antecedent>] per returned key and, if the antecedent stays
-// unrecoverable, quarantines the dependent chain(s) loudly. The mapping is keyed
-// by missing-antecedent so a single quarantine decision covers every orphan
-// stalled behind the same pruned event.
+// (docs/design/relay-transport.md §2.5 / §2.5a): the watchdog issues one
+// rate-limited targeted REQ ["ids", <antecedent>] per returned key to RECOVER
+// the gap. It makes NO ingest-admission decision and holds NO quarantine set —
+// the orphan buffer's LRU occupancy bound (IngestLive) is what keeps the buffer
+// finite; the watchdog only tries to fetch the missing antecedent. The mapping
+// is keyed by missing-antecedent so a single refetch REQ covers every orphan
+// stalled behind the same missing event (ADV-6: one relay REQ per distinct
+// antecedent).
 func (s *Sequencer) PendingAntecedents() map[string][]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -9,7 +9,7 @@ package relay
 //	0. VerifyEventSignature(ev)        universal Schnorr+id re-derive, ALL kinds → dropped_unsigned
 //	1. FromNostrEvent(ev) -> msg       reserved 30401 / (c22) smuggled x-tags     → dropped_smuggled
 //	2. VerifyOperatorAuthorship(ev,K)  operator-only kind author == operator      → dropped_forged
-//	3. Sequencer.Ingest(msg)           dedup by event id
+//	3. Sequencer.IngestLive(msg)       dedup by id; LRU-evict oldest orphan if full (§2.5a)
 //	4. Sequencer.Drain()               release causally-ready in canonical Seq order
 //	5. LocalStore.BatchAppend(...)     Origin="relay"; orphans NEVER persist
 //
@@ -122,12 +122,24 @@ func (in *Intake) HandleEvent(ev *nostr.Event) error {
 		return fmt.Errorf("intake: drop forged operator event: %w", err)
 	}
 
-	// STEP 3 — SEQUENCER INGEST (dedup by event id). msg.ID is a non-empty
-	// content hash (STEP 0 recomputed and matched it), so the empty-id guard
-	// cannot trip here; handle its error loudly regardless (never silent).
-	if err := in.seq.Ingest(*msg); err != nil {
+	// STEP 3 — SEQUENCER LIVE INGEST (dedup by event id). The LIVE path bounds
+	// TOTAL buffer OCCUPANCY and, when full, EVICTS the oldest orphan (LRU by
+	// ingest order) rather than REJECTING the new well-formed event (§2.5a): a
+	// new event is never wedged out by a chained-orphan flood. msg.ID is a
+	// non-empty content hash (STEP 0 recomputed and matched it), so the empty-id
+	// guard cannot trip here; handle its error loudly regardless (never silent).
+	evicted, err := in.seq.IngestLive(*msg)
+	if err != nil {
 		in.alarm("ingest_rejected", err, ev)
 		return fmt.Errorf("intake: sequencer rejected event: %w", err)
+	}
+	// Evictions are a LOUD cache-warm delay (never a silent drop, LOCKED-5): the
+	// evicted orphan is still served by the relay and re-delivered by the resync
+	// audit / re-subscription. Meter + alarm every eviction so sustained orphan
+	// pressure (a chained-flood attack) is visible to the operator.
+	if len(evicted) > 0 {
+		in.metrics.OrphanEvicted.Add(int64(len(evicted)))
+		in.alarm("orphan_evicted", fmt.Errorf("live ingest of %s evicted %d oldest orphan(s) to bound buffer occupancy", ev.ID, len(evicted)), ev)
 	}
 
 	// STEP 4 — DRAIN to canonical Seq order. On overflow the sequencer still

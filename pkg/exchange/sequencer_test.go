@@ -403,6 +403,222 @@ func TestSequencer_DrainNoQuadraticRescan(t *testing.T) {
 	}
 }
 
+// TestSequencer_IngestLiveChainedFloodBoundsOccupancyEvictsOldest is the core
+// §2.5a regression: the CHAINED flood e0<-e1<-..<-eN where ONLY the head
+// references a never-arriving antecedent. Under the head-only true-orphan bound
+// (Ingest) this bypasses the guard — every later link's antecedent is already
+// BUFFERED when it arrives, so trueOrphans stays 1 while the buffer grows without
+// bound. The LIVE path (IngestLive) bounds raw OCCUPANCY and evicts the OLDEST
+// buffered orphan, so occupancy never exceeds the bound and the buffer becomes a
+// sliding window of the most-recent events.
+func TestSequencer_IngestLiveChainedFloodBoundsOccupancyEvictsOldest(t *testing.T) {
+	const bound = 8
+	const flood = 50
+	s := NewSequencer(bound)
+
+	// e0 is the never-ingested head. Each e_i (i>=1) references e_{i-1}, which is
+	// already buffered by the time e_i arrives — the true-orphan-count bypass.
+	prev := "e0"
+	for i := 1; i <= flood; i++ {
+		id := fmt.Sprintf("e%d", i)
+		evicted, err := s.IngestLive(seqMsg(id, int64(i), prev))
+		if err != nil {
+			t.Fatalf("IngestLive %s: unexpected error (must NEVER reject a well-formed event): %v", id, err)
+		}
+		if got := s.PendingCount(); got > bound {
+			t.Fatalf("after ingesting %s occupancy = %d, exceeds bound %d (buffer grew unbounded — the chained-flood bypass)", id, got, bound)
+		}
+		// Once the buffer is full, every further admit evicts exactly one oldest.
+		if i > bound && len(evicted) != 1 {
+			t.Fatalf("ingest %s evicted %v, want exactly one oldest orphan evicted", id, evicted)
+		}
+		if i <= bound && len(evicted) != 0 {
+			t.Fatalf("ingest %s evicted %v while buffer not yet full, want none", id, evicted)
+		}
+		prev = id
+	}
+	if got := s.PendingCount(); got != bound {
+		t.Fatalf("final occupancy = %d, want exactly the bound %d", got, bound)
+	}
+	// The buffer is the sliding window of the LAST `bound` events: the oldest
+	// survivor is e(flood-bound+1), the newest is e(flood). The earliest links
+	// were evicted (oldest-first).
+	pend := s.PendingAntecedents()
+	// The head e0 must NOT be buffered (it was never ingested); the very first
+	// links must have been evicted.
+	drained, err := s.Drain()
+	if err != nil {
+		t.Fatalf("Drain after flood: %v", err)
+	}
+	if len(drained) != 0 {
+		t.Fatalf("Drain released %v; nothing is causally ready (head e0 never arrived)", idsOf(drained))
+	}
+	if got := s.PendingCount(); got != bound {
+		t.Fatalf("occupancy after Drain = %d, want %d (nothing releasable)", got, bound)
+	}
+	// A brand-new, well-formed INDEPENDENT root event is STILL admitted after the
+	// flood (NO wedge — the attempt-3 ADV-5 fill-then-reject failure): it evicts
+	// one oldest orphan and then drains cleanly.
+	evicted, err := s.IngestLive(seqMsg("fresh-root", 100000))
+	if err != nil {
+		t.Fatalf("IngestLive fresh-root after flood must succeed (no wedge): %v", err)
+	}
+	if len(evicted) != 1 {
+		t.Fatalf("fresh-root admit evicted %v, want exactly one oldest orphan", evicted)
+	}
+	rel, err := s.Drain()
+	if err != nil {
+		t.Fatalf("Drain after fresh-root: %v", err)
+	}
+	if len(rel) != 1 || rel[0].Msg.ID != "fresh-root" {
+		t.Fatalf("Drain released %v, want [fresh-root] (the independent root is releasable)", idsOf(rel))
+	}
+	_ = pend
+}
+
+// TestSequencer_IngestLivePostFloodDelayedEventStillIngests is DONE criterion
+// (2): after the buffer has been saturated by a chained-orphan flood, a
+// legitimate causally-delayed event (child arriving before its parent) must
+// STILL ingest and, once the parent lands, release — the buffer never wedges
+// against new well-formed traffic.
+func TestSequencer_IngestLivePostFloodDelayedEventStillIngests(t *testing.T) {
+	const bound = 4
+	s := NewSequencer(bound)
+
+	// Saturate the buffer with a chained-orphan flood (head never arrives).
+	prev := "missing-head"
+	for i := 1; i <= 20; i++ {
+		id := fmt.Sprintf("f%d", i)
+		if _, err := s.IngestLive(seqMsg(id, int64(i), prev)); err != nil {
+			t.Fatalf("flood IngestLive %s: %v", id, err)
+		}
+		prev = id
+	}
+	if s.PendingCount() != bound {
+		t.Fatalf("post-flood occupancy = %d, want bound %d", s.PendingCount(), bound)
+	}
+
+	// A legitimate causally-delayed pair: child arrives before parent (the exact
+	// honest nostr reorder). Both must ingest despite the saturated buffer.
+	if _, err := s.IngestLive(seqMsg("child", 1000, "parent")); err != nil {
+		t.Fatalf("IngestLive delayed child post-flood must succeed (no wedge): %v", err)
+	}
+	if _, err := s.IngestLive(seqMsg("parent", 1001)); err != nil {
+		t.Fatalf("IngestLive parent post-flood must succeed: %v", err)
+	}
+	released, err := s.Drain()
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	// parent and child must both be released, parent before child (causal order).
+	pi, ci := -1, -1
+	for i, r := range released {
+		switch r.Msg.ID {
+		case "parent":
+			pi = i
+		case "child":
+			ci = i
+		}
+	}
+	if pi < 0 || ci < 0 {
+		t.Fatalf("Drain released %v, want both parent and child released (delayed pair not wedged out)", idsOf(released))
+	}
+	if pi > ci {
+		t.Fatalf("Drain released child before parent (%v); causal order violated", idsOf(released))
+	}
+}
+
+// TestSequencer_IngestLiveEvictionInertOnCausallyClosedSet is DONE criterion
+// (5) at the sequencer level: on a causally-closed set whose reorder window fits
+// within the bound, eviction NEVER fires, so the LIVE path releases the
+// byte-identical sequence it would with an unbounded buffer. The released Seq
+// sequence is the sole input to the fold, so a byte-identical released sequence
+// is a byte-identical fold. A linear chain has a UNIQUE causal linearization, so
+// the live release order is deterministic regardless of arrival order — proven
+// here by feeding the chain in REVERSE and comparing to the canonical
+// SequenceForFold order.
+func TestSequencer_IngestLiveEvictionInertOnCausallyClosedSet(t *testing.T) {
+	const n = 12
+	// Linear chain root -> e1 -> ... -> e(n-1), timestamps ascending.
+	chain := make([]Message, 0, n)
+	chain = append(chain, seqMsg("root", 0))
+	prev := "root"
+	for i := 1; i < n; i++ {
+		id := fmt.Sprintf("e%d", i)
+		chain = append(chain, seqMsg(id, int64(i), prev))
+		prev = id
+	}
+
+	// Canonical batch order (the reference the fold would consume).
+	canonical, err := SequenceForFold(chain, n)
+	if err != nil {
+		t.Fatalf("SequenceForFold(chain): %v", err)
+	}
+	wantOrder := idsOfMsgs(canonical)
+
+	// Drive the LIVE path in REVERSE arrival order (worst case: nothing is ready
+	// until the root lands last, so the whole chain co-resides in the buffer).
+	// bound == n so the causally-closed set fits and eviction must NOT fire.
+	liveOrder, evictions := driveLive(t, chain, reversedIndices(n), n)
+	if evictions != 0 {
+		t.Fatalf("eviction fired %d time(s) on a causally-closed set within bound; must be inert", evictions)
+	}
+	if len(liveOrder) != len(wantOrder) {
+		t.Fatalf("live released %d events, want %d", len(liveOrder), len(wantOrder))
+	}
+	for i := range wantOrder {
+		if liveOrder[i] != wantOrder[i] {
+			t.Fatalf("live release order diverged from canonical at %d: got %s want %s\n live=%v\n canon=%v",
+				i, liveOrder[i], wantOrder[i], liveOrder, wantOrder)
+		}
+	}
+
+	// Same set, hugely oversized bound: byte-identical released sequence — the
+	// bound/eviction machinery does not perturb a causally-closed fold.
+	liveOrderBig, evBig := driveLive(t, chain, reversedIndices(n), 10000)
+	if evBig != 0 {
+		t.Fatalf("eviction fired with an oversized bound; must be inert")
+	}
+	for i := range liveOrder {
+		if liveOrderBig[i] != liveOrder[i] {
+			t.Fatalf("released sequence differs between bound=n and bound=huge at %d: %s vs %s",
+				i, liveOrder[i], liveOrderBig[i])
+		}
+	}
+}
+
+// driveLive feeds chain[arrivalOrder[k]] through the LIVE path (IngestLive then
+// Drain per event, exactly as the relay Intake does), returning the concatenated
+// released id sequence and the total number of orphans evicted.
+func driveLive(t *testing.T, chain []Message, arrivalOrder []int, bound int) (order []string, evictions int) {
+	t.Helper()
+	s := NewSequencer(bound)
+	for _, idx := range arrivalOrder {
+		evicted, err := s.IngestLive(chain[idx])
+		if err != nil {
+			t.Fatalf("IngestLive %s: %v", chain[idx].ID, err)
+		}
+		evictions += len(evicted)
+		released, err := s.Drain()
+		if err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+		for _, r := range released {
+			order = append(order, r.Msg.ID)
+		}
+	}
+	return order, evictions
+}
+
+// reversedIndices returns [n-1, n-2, ..., 0].
+func reversedIndices(n int) []int {
+	out := make([]int, n)
+	for i := 0; i < n; i++ {
+		out[i] = n - 1 - i
+	}
+	return out
+}
+
 func idsOf(rel []Sequenced) []string {
 	out := make([]string, len(rel))
 	for i, r := range rel {

@@ -247,6 +247,82 @@ with `BatchAppend`'s single fsync).
   catch-up); any relay event the local lacks and cannot fetch → loud `resync_mismatch`. This is
   the backstop for ADV-9's unreferenced-far-past-root miss (a cache-warm gap, not a money bug).
 
+### 2.5a Orphan-buffer adversarial lifecycle (LRU, quarantine-free)
+
+Amends §2.5 path 2. The §2.5 wording ("bounded orphan buffer fails loud on overflow" +
+"per-chain quarantine") was demolished across **four** design-adversary passes. This subsection
+is the **ratified** orphan-buffer lifecycle; it CORRECTS and SUPERSEDES §2.5 path 2's quarantine
+language.
+
+**Why the first three attempts each opened a new hole.** Every attempt tried to name *which*
+orphan is "bad" and act on that judgment — and every such judgment is gameable:
+
+1. **Wrong-set bound** (bound the whole buffer, fail loud on overflow). A single foreign flood
+   trips the bound and wedges the *operator's own* legitimate ingest — a DoS lever handed to any
+   peer.
+2. **Head-only true-orphan bound** (`trueOrphans+1 > maxOrphans` at ingest — what is on `main`).
+   Bypassed by the **CHAINED flood** `e0<-e1<-…<-eN` where only the head `e0` references a
+   never-arriving antecedent: each later link's antecedent is already *buffered* when it arrives,
+   so `trueOrphans` stays 1 while the buffer grows **unbounded**. This is the hole this item
+   closes.
+3. **Quarantine + ingest-reject** (quarantine a stalled antecedent; reject new events referencing
+   it). The adversary demolished it three ways: (a) a **re-parent black hole** — an event is
+   simultaneously ingest-dropped *and* refetch-recoverable, so it can never converge; (b)
+   **false-quarantine CENSORSHIP** — a legit future antecedent gets quarantined, permanently
+   silencing a valid chain (a censorship primitive any peer can trigger by publishing a child
+   first); (c) **quarantine-set fill** — the quarantine set itself is unbounded state under a
+   flood of distinct antecedents (ADV-5, the fill-then-reject wedge).
+
+**CORE PRINCIPLE (ratified): make NO trust decision about which orphan is "bad."** Every such
+decision is the exploit. Instead:
+
+- **Bound total buffer OCCUPANCY** (`len(buffered)`), not any "true-orphan" subset, and
+- **evict the OLDEST buffered orphan (LRU by ingest order)** when admitting a new event would
+  exceed the bound, and
+- **NEVER reject a new well-formed event** for buffer fullness (that was attempt-3's ADV-5 wedge).
+
+**(A) `pkg/exchange/sequencer.go` — `IngestLive`.** The relay Intake calls `IngestLive` (not the
+batch `Ingest`). It bounds occupancy at `maxOrphans`: when admitting would exceed the bound it
+evicts the oldest buffered orphan(s) by insertion order (an O(1) `container/list` FIFO threaded
+through the buffered set — front = oldest, removed on release in `Drain` or on eviction), then
+admits the new event. The chained flood now evicts its own stale head first; occupancy is a hard
+sliding window. The `Drain` Kahn cascade stays O(N log N). The **batch** `SequenceForFold` path
+(trusted operator log replay) keeps the original buffer-all-then-`Drain` + true-orphan-reject
+semantics — it is not per-insert occupancy-bounded, because a long causally-in-order replay batch
+legitimately co-resides in the buffer and must not evict itself.
+
+**DETERMINISM / SAFETY.** Eviction removes only ORPHANS (events not yet causally released), never
+folded state. The fold of a causally-closed set is **byte-identical** whether or not eviction ran,
+because eviction only ever touches events that were never released — for a causally-closed set
+whose reorder window fits the bound, eviction is provably *inert* (peak occupancy ≤ bound ⇒ no
+eviction fires). An evicted legit orphan is not lost: the relay still serves it (history) and the
+resync audit / re-subscription re-delivers it, re-buffering when its antecedent is nearer. MONEY
+ops (match/settle/scrip) are operator-authored and the operator's OWN local log is authoritative —
+evicting a FOREIGN orphan is at worst a cache-warm delay, NEVER money loss or fold divergence.
+Every eviction is metered + alarmed LOUD (`orphan_evicted`), never a silent drop (LOCKED-5).
+
+**(B) `pkg/relay/watchdog.go` — quarantine REMOVED; recovery-only + rate limit.** The watchdog
+does gap RECOVERY only, never ingest admission. It holds NO quarantine set (the re-parent black
+hole + censorship primitive are gone). For each distinct missing antecedent it issues ONE targeted
+`REQ ["ids", <antecedent>]`, RATE-LIMITED by a token bucket (**ADV-6**: each distinct antecedent
+costs one relay REQ; a burst of distinct antecedents cannot amplify into unbounded REQ traffic).
+When the bucket is empty the refetch is DEFERRED (`orphan_refetch_throttled`) to a later pass. A
+refetch that comes back empty is a LOUD diagnostic (`orphan_unrecoverable`) — but no state change:
+a truly stuck orphan is bounded by the (A) LRU occupancy eviction and reconciled by the since=0
+resync audit, both gated on the LOCAL authoritative `PendingAntecedents`, never the untrusted
+relay's delivered-id claim.
+
+**(C) `pkg/nostr/adapter.go` — `MaxAntecedents = 64`.** `FromNostrEvent` caps causal fan-in
+(e-tags) per event at 64 and rejects LOUD beyond it, at the adapter boundary before the Sequencer
+or store see the event. This bounds DAG fan-in and the per-event orphan-refetch amplification (one
+relay REQ per distinct missing antecedent).
+
+**Adversarial acceptance (tests).** (1) chained flood `e0<-e1<-…<-eN`: occupancy never exceeds
+`maxOrphans`, oldest evicted, NEW legit events still admitted (no wedge); (2) post-flood a
+causally-delayed event still ingests and releases; (3) e-tag cap enforced; (4) refetch
+rate-limited by the token bucket, recovering over time (no permanent give-up); (5) fold of a
+causally-closed set byte-identical (eviction inert); (6) batch `SequenceForFold` unaffected.
+
 ### 2.6 The `pollLocalStore` → sequencer seam (the scope-note, resolved)
 
 UNCHANGED. The scope-note is discharged by the F2 ruling: the sequencer is upstream of the store,
