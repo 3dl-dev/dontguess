@@ -196,6 +196,14 @@ func (s *State) applySettleDeliver(msg *Message) {
 	// Record deliver→match so applySettleComplete can derive entry_id from the
 	// antecedent chain without trusting buyer-supplied payload fields.
 	s.deliverToMatch[msg.ID] = matchMsgID
+	// Record the operator-authored deliver Timestamp keyed by match. This is the
+	// operator-trusted, replay-deterministic reference time checkDeadlineMiss
+	// uses to decide whether the exchange missed its guarantee deadline —
+	// NEVER the buyer-authored settle(complete) Timestamp (relay-transport.md §4
+	// ADV-10). This handler is operator-only (guarded above), so msg.Timestamp is
+	// operator-set and persisted, making the deadline-miss verdict both
+	// counterparty-unforgeable and identical across replays.
+	s.deliverTimeByMatch[matchMsgID] = msg.Timestamp
 
 	// Track deliver count per entry for the false-positive demotion signal
 	// (dontguess-046). Derive entry_id from the antecedent chain to avoid

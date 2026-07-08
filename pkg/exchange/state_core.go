@@ -23,6 +23,7 @@ func NewState() *State {
 		buyerAcceptToMatch: make(map[string]string),
 		deliveredOrders:    make(map[string]struct{}),
 		deliverToMatch:     make(map[string]string),
+		deliverTimeByMatch: make(map[string]int64),
 		completedEntries:      make(map[string]string),
 		completedSettlements:  make(map[string]struct{}),
 		previewsByEntry:       make(map[string]map[string]string),
@@ -77,6 +78,7 @@ func (s *State) Replay(msgs []Message) {
 	s.buyerAcceptToMatch = make(map[string]string)
 	s.deliveredOrders = make(map[string]struct{})
 	s.deliverToMatch = make(map[string]string)
+	s.deliverTimeByMatch = make(map[string]int64)
 	s.completedEntries = make(map[string]string)
 	s.completedSettlements = make(map[string]struct{})
 	s.previewsByEntry = make(map[string]map[string]string)

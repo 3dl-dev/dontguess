@@ -179,7 +179,24 @@ func (e *Engine) checkDeadlineMiss(ctx context.Context, msg *Message, matchMsgID
 	if !hasGuarantee {
 		return false, nil
 	}
-	if !time.Now().After(deadline) {
+	// TRUST + DETERMINISM (relay-transport.md §4 ADV-10 + §Sequencer): the
+	// deadline-miss verdict must be derived from an OPERATOR-TRUSTED,
+	// replay-deterministic reference time — NEVER wall-clock time.Now() (which
+	// makes the refund-vs-settle outcome depend on when replay happens) and
+	// NEVER the buyer-authored settle(complete) msg.Timestamp (which a buyer
+	// could set to any value to force or dodge the full refund). The operator's
+	// own settle(deliver) Timestamp is the authoritative "when did the exchange
+	// deliver" signal: deliver is operator-authored and persisted, so it is both
+	// counterparty-unforgeable and identical on every replay. The guarantee is
+	// missed iff the operator delivered after the deadline.
+	deliverTS, haveDeliver := e.state.DeliverTimeForMatch(matchMsgID)
+	if !haveDeliver || deliverTS == 0 {
+		// No operator-trusted delivery time is available — we cannot make a
+		// sound deadline verdict, so do NOT auto-refund (fail closed toward the
+		// normal settlement path rather than a manipulable/nondeterministic one).
+		return false, nil
+	}
+	if !time.Unix(0, deliverTS).UTC().After(deadline) {
 		return false, nil
 	}
 	if err := e.handleDeadlineMissRefund(ctx, msg, matchMsgID, reservationID, insuredAmount); err != nil {

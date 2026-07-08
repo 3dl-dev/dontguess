@@ -671,6 +671,20 @@ func (s *State) GuaranteeForMatch(matchMsgID string) (deadline time.Time, insure
 	return time.Unix(0, g[0]).UTC(), g[1], true
 }
 
+// DeliverTimeForMatch returns the Timestamp (nanoseconds since epoch) of the
+// operator-authored settle(deliver) message for the given match, and whether a
+// deliver has been recorded. This is the operator-trusted, replay-deterministic
+// reference time the guarantee deadline-miss verdict compares against — the
+// deliver phase is operator-authored, so its Timestamp cannot be forged by a
+// buyer and is byte-identical across replays (relay-transport.md §4 ADV-10).
+// Thread-safe.
+func (s *State) DeliverTimeForMatch(matchMsgID string) (int64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ts, ok := s.deliverTimeByMatch[matchMsgID]
+	return ts, ok
+}
+
 // ClearMatchGuarantee removes the guarantee record for matchMsgID so that a
 // duplicate settle(complete) cannot re-enter the refund path. Called by the
 // engine after a successful deadline-miss refund. Thread-safe.

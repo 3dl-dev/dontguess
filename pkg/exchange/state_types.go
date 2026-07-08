@@ -798,6 +798,17 @@ type State struct {
 	// without trusting the buyer-supplied payload.EntryID.
 	deliverToMatch map[string]string
 
+	// deliverTimeByMatch maps a match message ID to the Timestamp (nanoseconds
+	// since epoch) of the OPERATOR-AUTHORED settle(deliver) message for that
+	// match. This is the operator-trusted, replay-deterministic reference time
+	// the guarantee deadline-miss verdict is derived from (relay-transport.md §4
+	// ADV-10 + §Sequencer): the deliver phase is operator-authored (only the
+	// operator emits it — see applySettleDeliver's operator-sender guard), so its
+	// Timestamp is both operator-set and persisted, unlike the buyer-authored
+	// settle(complete) Timestamp which a counterparty controls and must NEVER
+	// drive a fold decision. Key: match message ID.
+	deliverTimeByMatch map[string]int64
+
 	// completedEntries tracks entry IDs and their buyers who have completed.
 	// Key: entryID -> buyerKey.
 	completedEntries map[string]string
