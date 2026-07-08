@@ -46,6 +46,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -237,7 +238,17 @@ type Watchdog struct {
 
 	mu      sync.Mutex
 	refetch *tokenBucket // targeted-refetch rate limiter (ADV-6)
+	rng     *rand.Rand   // fairness tiebreak among equal-impact antecedents (guarded by mu)
 }
+
+// MaxUnrecoverableAlarmsPerPass bounds how many distinct orphan_unrecoverable
+// alarms a single CheckOrphans pass emits to the alarm sink. Beyond this cap the
+// remainder are COALESCED into one summary alarm, so a flood of distinct
+// never-arriving antecedents cannot storm the alarm sink (the wave-9 LOW
+// fairness finding). The per-antecedent METRIC (OrphanUnrecoverable) is still
+// incremented for every unrecoverable antecedent — only the alarm volume is
+// coalesced.
+const MaxUnrecoverableAlarmsPerPass = 8
 
 // NewWatchdog constructs a Watchdog. sub, orphans, local, and metrics must be
 // non-nil. repub may be nil — the resync audit then only ALARMS on relay-missing
@@ -260,10 +271,22 @@ func NewWatchdog(sub Subscriber, orphans orphanSource, local localReader, repub 
 		now:     time.Now,
 	}
 	w.refetch = newTokenBucket(DefaultRefetchBurst, DefaultRefetchPerSec, w.now)
+	w.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	for _, opt := range opts {
 		opt(w)
 	}
 	return w
+}
+
+// WithRefetchRand injects the RNG used to break ties among equal-impact
+// antecedents when spending the refetch budget. It exists for deterministic
+// tests; production seeds from the wall clock.
+func WithRefetchRand(rng *rand.Rand) WatchdogOption {
+	return func(w *Watchdog) {
+		if rng != nil {
+			w.rng = rng
+		}
+	}
 }
 
 // Reconnect re-issues the backfill subscription after a live disconnect
@@ -297,12 +320,26 @@ func (w *Watchdog) since(watermark int64) int64 {
 }
 
 // CheckOrphans runs the orphan-age gap RECOVERY pass (§2.5 / §2.5a path 2). It
-// samples orphan_pending (a gauge), then for each distinct missing antecedent —
-// in deterministic id order, so the refetch budget is spent fairly under a flood
-// — it issues ONE targeted REQ ["ids", <antecedent>], RATE-LIMITED by the token
-// bucket (ADV-6: each distinct antecedent costs one token / one relay REQ). When
-// the bucket is empty the refetch is DEFERRED (metered orphan_refetch_throttled)
-// to a later pass, capping relay-REQ amplification under an orphan flood.
+// samples orphan_pending (a gauge), then spends the finite refetch budget across
+// the distinct missing antecedents, issuing ONE targeted REQ ["ids", <antecedent>]
+// per antecedent, RATE-LIMITED by the token bucket (ADV-6: each distinct
+// antecedent costs one token / one relay REQ). When the bucket is empty the
+// refetch is DEFERRED (metered orphan_refetch_throttled) to a later pass, capping
+// relay-REQ amplification under an orphan flood.
+//
+// FAIRNESS (wave-9 LOW). The budget is spent by IMPACT — antecedents blocking the
+// MOST dependent events first — with a random tiebreak among equal-impact
+// antecedents. The previous behaviour spent the budget in ascending antecedent-id
+// order (sort.Strings), which let an attacker pin the entire budget every pass
+// with low-sorting fabricated ids ("0000…"), permanently STARVING a legit
+// antecedent's recovery and storming the alarm sink. Ranking by dependent-count
+// bounds any single fabricated antecedent to one token (refetches are coalesced
+// per distinct antecedent), and the random tiebreak means antecedent id can never
+// be the lever an attacker games to jump the queue. Per-pass alarm volume is
+// bounded: the deferred antecedents raise ONE coalesced orphan_refetch_throttled
+// alarm, and orphan_unrecoverable alarms are capped at
+// MaxUnrecoverableAlarmsPerPass with the remainder coalesced (the metrics stay
+// per-antecedent).
 //
 // If a refetch delivers the antecedent, the Intake releases the dependent chain
 // on the same pass and the orphan drains. If it comes back empty the antecedent
@@ -320,25 +357,33 @@ func (w *Watchdog) CheckOrphans(ctx context.Context) (refetched int, err error) 
 	w.metrics.OrphanPending.Store(int64(w.orphans.PendingCount()))
 
 	pending := w.orphans.PendingAntecedents()
-	// Deterministic order: under a flood the finite refetch budget must be spent
-	// the same way every run (no map-iteration nondeterminism deciding which
-	// antecedents get a REQ this pass).
 	antes := make([]string, 0, len(pending))
 	for ante := range pending {
 		antes = append(antes, ante)
 	}
-	sort.Strings(antes)
+	// Fairness order: highest dependent-count (impact) first, random tiebreak
+	// within an equal-impact tier so a low-sorting fabricated id can no longer
+	// jump the queue and starve a legit antecedent. Shuffle first, then a STABLE
+	// sort by impact keeps the random order within each tier.
+	w.mu.Lock()
+	w.rng.Shuffle(len(antes), func(i, j int) { antes[i], antes[j] = antes[j], antes[i] })
+	w.mu.Unlock()
+	sort.SliceStable(antes, func(i, j int) bool {
+		return len(pending[antes[i]]) > len(pending[antes[j]])
+	})
+
+	var throttled int        // distinct antecedents deferred this pass (coalesced alarm)
+	unrecoverableAlarms := 0 // distinct orphan_unrecoverable alarms already emitted
+	var unrecoverableExtra int
 
 	for _, ante := range antes {
 		dependents := pending[ante]
 		if !w.takeRefetchToken() {
-			// Budget exhausted this pass — defer, loud. The antecedent stays
-			// pending and is retried once the bucket refills (or the orphan is
-			// LRU-evicted / reconciled by the resync audit).
+			// Budget exhausted this pass — defer. The antecedent stays pending and
+			// is retried once the bucket refills (or the orphan is LRU-evicted /
+			// reconciled by the resync audit). Alarm is coalesced below.
 			w.metrics.OrphanRefetchThrottled.Add(1)
-			w.alarm("orphan_refetch_throttled",
-				fmt.Errorf("refetch of antecedent %s deferred: rate limit exhausted (%d dependent event(s) still stalled)",
-					shortID(ante), len(dependents)), nil)
+			throttled++
 			continue
 		}
 
@@ -369,11 +414,30 @@ func (w *Watchdog) CheckOrphans(ctx context.Context) (refetched int, err error) 
 
 		// Currently unrecoverable: LOUD recovery diagnostic — NO quarantine, NO
 		// admission decision. Bounded by the Sequencer's LRU eviction + resync.
+		// The metric is per-antecedent; the ALARM volume is capped so a flood of
+		// distinct never-arriving antecedents cannot storm the sink.
 		w.metrics.OrphanUnrecoverable.Add(1)
+		if unrecoverableAlarms < MaxUnrecoverableAlarmsPerPass {
+			w.alarm("orphan_unrecoverable",
+				fmt.Errorf("antecedent %s unrecoverable after targeted refetch (empty); %d dependent event(s) stalled (no quarantine — bounded by LRU eviction + resync)",
+					shortID(ante), len(dependents)), nil)
+			w.logf("relay/watchdog: antecedent %s still missing after refetch (%d dependents stalled); no quarantine", shortID(ante), len(dependents))
+			unrecoverableAlarms++
+		} else {
+			unrecoverableExtra++
+		}
+	}
+
+	// Coalesced loud summaries — ONE alarm per class per pass instead of one per
+	// antecedent, so a flood of distinct antecedents cannot storm the alarm sink
+	// (wave-9 LOW). The per-antecedent metrics above are unaffected.
+	if throttled > 0 {
+		w.alarm("orphan_refetch_throttled",
+			fmt.Errorf("refetch budget exhausted this pass: %d distinct antecedent(s) deferred to a later pass", throttled), nil)
+	}
+	if unrecoverableExtra > 0 {
 		w.alarm("orphan_unrecoverable",
-			fmt.Errorf("antecedent %s unrecoverable after targeted refetch (empty); %d dependent event(s) stalled (no quarantine — bounded by LRU eviction + resync)",
-				shortID(ante), len(dependents)), nil)
-		w.logf("relay/watchdog: antecedent %s still missing after refetch (%d dependents stalled); no quarantine", shortID(ante), len(dependents))
+			fmt.Errorf("+%d additional antecedent(s) unrecoverable this pass (alarms coalesced; no quarantine — bounded by LRU eviction + resync)", unrecoverableExtra), nil)
 	}
 	// Re-sample the gauge after any recovery so it reflects the post-pass buffer.
 	w.metrics.OrphanPending.Store(int64(w.orphans.PendingCount()))
