@@ -1294,3 +1294,125 @@ func TestCompleteMsgToAssignIndexClearedOnPaid(t *testing.T) {
 		t.Error("completeMsgToAssign entry should be removed after ClaimAssignPayment; memory leak detected")
 	}
 }
+
+// TestAuctionCloseOperatorOnly verifies the operator-authorship guard on
+// applyAssignAuctionClose (docs/design/relay-transport.md §2.4a D3): a
+// non-operator assign-auction-close is a NO-OP — no winner is selected and no
+// Vickrey clearing price is set — while the operator's close finalizes the
+// auction. This closes the b67d exploit where a non-operator could force the
+// winner and clearing price of an operator-only Vickrey auction.
+func TestAuctionCloseOperatorOnly(t *testing.T) {
+	s := NewState()
+	s.OperatorKey = operatorKey
+
+	now := time.Now().UTC()
+	s.Apply(ptr(makeAuctionAssignMsg("assign-oo", operatorKey, "freshness", 100, 60, now)))
+
+	bidTime := now.Add(5 * time.Second)
+	s.Apply(ptr(makeAuctionBidMsg("bid-oo-low", agentKey, "assign-oo", 70, bidTime)))  // lowest
+	s.Apply(ptr(makeAuctionBidMsg("bid-oo-mid", agentKey2, "assign-oo", 85, bidTime))) // second-lowest
+
+	rec := s.assignByID["assign-oo"]
+	if rec == nil {
+		t.Fatal("assign record not found")
+	}
+
+	// A non-operator (one of the bidders) attempts to finalize the auction.
+	s.Apply(ptr(makeAuctionCloseMsg("close-oo-bad", agentKey, "assign-oo")))
+
+	// Guard: the auction must be untouched — still open, no winner, no price.
+	if rec.Status != AssignOpen {
+		t.Errorf("non-operator auction-close must be a no-op; got status %v, want AssignOpen", rec.Status)
+	}
+	if rec.ClaimantKey != "" {
+		t.Errorf("non-operator auction-close set a winner %q; want none", rec.ClaimantKey)
+	}
+	if rec.VickreyPrice != 0 {
+		t.Errorf("non-operator auction-close set VickreyPrice=%d; want 0", rec.VickreyPrice)
+	}
+	if rec.ClaimMsgID != "" {
+		t.Errorf("non-operator auction-close set ClaimMsgID=%q; want empty", rec.ClaimMsgID)
+	}
+	if _, held := s.claimedAssigns[agentKey]; held {
+		t.Error("non-operator auction-close registered a claim slot; want none")
+	}
+
+	// The operator's close finalizes: lowest bidder wins, Vickrey price = 2nd-lowest.
+	s.Apply(ptr(makeAuctionCloseMsg("close-oo-ok", operatorKey, "assign-oo")))
+	if rec.Status != AssignClaimed {
+		t.Fatalf("operator auction-close must finalize; got status %v, want AssignClaimed", rec.Status)
+	}
+	if rec.ClaimantKey != agentKey {
+		t.Errorf("operator auction-close winner = %q; want %q (lowest bid)", rec.ClaimantKey, agentKey)
+	}
+	if rec.VickreyPrice != 85 {
+		t.Errorf("operator auction-close VickreyPrice = %d; want 85 (second-lowest bid)", rec.VickreyPrice)
+	}
+	if rec.ClaimMsgID != "close-oo-ok" {
+		t.Errorf("operator auction-close ClaimMsgID = %q; want close-oo-ok", rec.ClaimMsgID)
+	}
+}
+
+// TestAuctionCloseNoOperatorKeySet verifies that when OperatorKey is unset, the
+// guard is inert and any sender may finalize (matching the other assign handlers'
+// "OperatorKey == ''" escape hatch used in local/test contexts).
+func TestAuctionCloseNoOperatorKeySet(t *testing.T) {
+	s := NewState() // no OperatorKey
+
+	now := time.Now().UTC()
+	s.Apply(ptr(makeAuctionAssignMsg("assign-nk", operatorKey, "freshness", 100, 60, now)))
+	bidTime := now.Add(5 * time.Second)
+	s.Apply(ptr(makeAuctionBidMsg("bid-nk", agentKey, "assign-nk", 70, bidTime)))
+
+	s.Apply(ptr(makeAuctionCloseMsg("close-nk", agentKey2, "assign-nk")))
+
+	rec := s.assignByID["assign-nk"]
+	if rec.Status != AssignClaimed {
+		t.Errorf("with no OperatorKey, any sender may close; got status %v, want AssignClaimed", rec.Status)
+	}
+	if rec.ClaimantKey != agentKey {
+		t.Errorf("winner = %q; want %q", rec.ClaimantKey, agentKey)
+	}
+}
+
+// TestTagToTrustOpMapsAllAssignTags verifies that tagToTrustOp maps every one of
+// the seven assign-family tags to a non-empty trust Operation (previously the
+// entire assign family returned "" and bypassed the dispatch trust gate), and
+// that the resolved required trust level is operator for the operator sub-ops and
+// allowlisted for the worker sub-ops (docs/design/relay-transport.md §2.4a D3).
+func TestTagToTrustOpMapsAllAssignTags(t *testing.T) {
+	cases := []struct {
+		tag       string
+		wantOp    Operation
+		wantLevel TrustLevel
+	}{
+		{TagAssign, OperationAssignPost, TrustOperator},
+		{TagAssignAccept, OperationAssignAccept, TrustOperator},
+		{TagAssignReject, OperationAssignReject, TrustOperator},
+		{TagAssignExpire, OperationAssignExpire, TrustOperator},
+		{TagAssignAuctionClose, OperationAssignAuctionClose, TrustOperator},
+		{TagAssignClaim, OperationAssignClaim, TrustAllowlisted},
+		{TagAssignComplete, OperationAssignComplete, TrustAllowlisted},
+	}
+	if len(cases) != 7 {
+		t.Fatalf("expected 7 assign tags, have %d", len(cases))
+	}
+	for _, tc := range cases {
+		t.Run(tc.tag, func(t *testing.T) {
+			gotOp := tagToTrustOp(tc.tag)
+			if gotOp == "" {
+				t.Fatalf("tagToTrustOp(%q) returned empty; assign tag bypasses trust gate", tc.tag)
+			}
+			if gotOp != tc.wantOp {
+				t.Errorf("tagToTrustOp(%q) = %q; want %q", tc.tag, gotOp, tc.wantOp)
+			}
+			gotLevel, err := RequiredLevel(gotOp, "")
+			if err != nil {
+				t.Fatalf("RequiredLevel(%q) error: %v", gotOp, err)
+			}
+			if gotLevel != tc.wantLevel {
+				t.Errorf("RequiredLevel(%q) = %v; want %v", gotOp, gotLevel, tc.wantLevel)
+			}
+		})
+	}
+}

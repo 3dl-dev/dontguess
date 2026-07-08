@@ -81,6 +81,12 @@ const (
 	OperationSettle Operation = "settle"
 
 	// Extended operations not in core convention v0.1, defined here for completeness.
+	//
+	// OperationAssign is the legacy flat assign bucket (allowlisted). It is retained
+	// for config/back-compat but is NO LONGER the trust op the dispatch gate routes
+	// assign messages through — tagToTrustOp maps each of the seven assign-family
+	// tags to its own per-sub-op Operation below, so the operator-only sub-ops are
+	// not loosened to allowlisted (docs/design/relay-transport.md §2.4a D3).
 	OperationAssign              Operation = "assign"
 	OperationMint                Operation = "mint"
 	OperationBurn                Operation = "burn"
@@ -91,6 +97,19 @@ const (
 	// Read-only operations (inventory browse, price history).
 	OperationInventoryRead    Operation = "inventory-read"
 	OperationPriceHistoryRead Operation = "price-history-read"
+
+	// Per-sub-op assign operations. The assign(3405) kind is shared: the operator
+	// authors the task post, accept, reject, expire, and auction-close; workers
+	// author claim and complete. Each sub-op carries its own trust level (see
+	// defaultOperationLevels) so a fleet member cannot forge an operator-authored
+	// finalization while still being able to claim/complete work.
+	OperationAssignPost         Operation = "assign-post"
+	OperationAssignClaim        Operation = "assign-claim"
+	OperationAssignComplete     Operation = "assign-complete"
+	OperationAssignAccept       Operation = "assign-accept"
+	OperationAssignReject       Operation = "assign-reject"
+	OperationAssignExpire       Operation = "assign-expire"
+	OperationAssignAuctionClose Operation = "assign-auction-close"
 )
 
 // SettlePhase is a settlement phase within the settle operation.
@@ -105,6 +124,12 @@ const (
 	SettlePhaseDeliver     SettlePhase = "deliver"
 	SettlePhaseComplete    SettlePhase = "complete"
 	SettlePhaseDispute     SettlePhase = "dispute"
+	// SettlePhasePreview is the operator-authored preview settlement the operator
+	// emits in response to a buyer's preview-request. The convention lists it as
+	// operator-sent; the trust map previously omitted it, so a settle:preview
+	// reaching the dispatch trust gate was rejected as an unknown phase. It is
+	// operator-only (docs/design/relay-transport.md §2.4a D3).
+	SettlePhasePreview SettlePhase = "preview"
 )
 
 // defaultOperationLevels is the compiled-in default mapping.
@@ -124,6 +149,18 @@ var defaultOperationLevels = map[Operation]TrustLevel{
 	OperationConventionPromote:   TrustOperator,
 	OperationConventionSupersede: TrustOperator,
 	OperationMatch:               TrustOperator,
+
+	// Assign sub-op axis: operator sub-ops require the operator key; worker sub-ops
+	// (claim/complete) require fleet-member (allowlisted) standing. This mirrors
+	// operatorAssignOps in pkg/nostr/verify.go and is what tagToTrustOp routes the
+	// seven assign tags through (docs/design/relay-transport.md §2.4a D3).
+	OperationAssignPost:         TrustOperator,
+	OperationAssignAccept:       TrustOperator,
+	OperationAssignReject:       TrustOperator,
+	OperationAssignExpire:       TrustOperator,
+	OperationAssignAuctionClose: TrustOperator,
+	OperationAssignClaim:        TrustAllowlisted,
+	OperationAssignComplete:     TrustAllowlisted,
 }
 
 // defaultSettlePhaseLevels is the compiled-in default for settle phases.
@@ -137,6 +174,7 @@ var defaultSettlePhaseLevels = map[SettlePhase]TrustLevel{
 	SettlePhasePutAccept:   TrustOperator,
 	SettlePhasePutReject:   TrustOperator,
 	SettlePhaseDeliver:     TrustOperator,
+	SettlePhasePreview:     TrustOperator,
 }
 
 // TrustLevels configures the minimum trust level required for each exchange
@@ -246,8 +284,9 @@ func WithTrustLevelOverrides(overrides TrustLevels) TrustCheckerOption {
 
 // WithReputationFloor wires a behavioral reputation source and a minimum score.
 // Sellers whose reputation is below min are rejected for sell-side operations
-// (put). A nil source or min<=math.MinInt is treated as "no reputation gate";
-// pass a real source and a floor to enable it.
+// (put). Gating is enabled only when source is non-nil: a nil source disables the
+// reputation gate entirely (Check skips it), regardless of min. Pass a real source
+// and a floor to enable it. The operator is never subject to the floor.
 func WithReputationFloor(source func(key string) int, min int) TrustCheckerOption {
 	return func(c *TrustChecker) {
 		c.reputation = source

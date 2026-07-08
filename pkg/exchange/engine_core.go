@@ -852,6 +852,26 @@ func tagToTrustOp(op string) Operation {
 		return OperationMatch
 	case TagSettle:
 		return OperationSettle
+	// The seven assign-family sub-ops each carry their own trust level rather than
+	// collapsing into a single flat OperationAssign bucket (which would wrongly
+	// loosen the operator-only sub-ops). Operator sub-ops (post/accept/reject/
+	// expire/auction-close) require TrustOperator; worker sub-ops (claim/complete)
+	// require the fleet-member (allowlisted) level. See docs/design/relay-transport.md
+	// §2.4a D3 and defaultOperationLevels in trust.go.
+	case TagAssign:
+		return OperationAssignPost
+	case TagAssignClaim:
+		return OperationAssignClaim
+	case TagAssignComplete:
+		return OperationAssignComplete
+	case TagAssignAccept:
+		return OperationAssignAccept
+	case TagAssignReject:
+		return OperationAssignReject
+	case TagAssignExpire:
+		return OperationAssignExpire
+	case TagAssignAuctionClose:
+		return OperationAssignAuctionClose
 	default:
 		return "" // unknown operation — no trust check
 	}

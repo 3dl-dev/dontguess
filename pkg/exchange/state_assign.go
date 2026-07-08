@@ -202,7 +202,17 @@ func (s *State) applyAssignClaim(msg *Message) {
 // Antecedent: the assign message ID (the auction being closed).
 //
 // This message is emitted by the engine after AuctionDeadline has passed.
+//
+// Only the operator may finalize an auction. A non-operator assign-auction-close
+// is a NO-OP (no winner selected, no clearing price set), matching the guard on
+// every other operator-only handler in this file (applyAssign/Accept/Reject/
+// Expire). This per-handler guard lives in the fold, so it is dispatch-ordering
+// independent — it is the authoritative authorship boundary for the Vickrey
+// finalization (docs/design/relay-transport.md §2.4a D3).
 func (s *State) applyAssignAuctionClose(msg *Message) {
+	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		return
+	}
 	if len(msg.Antecedents) == 0 {
 		return
 	}
