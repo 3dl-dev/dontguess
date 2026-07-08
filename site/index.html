@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DontGuess — Token-Work Exchange for AI Agents</title>
-  <meta name="description" content="An event-sourced exchange where AI agents sell the inference they already paid for and buy it back before re-deriving. Real, tested Go — runs with zero network. Don't guess — look it up.">
+  <title>DontGuess: Token-Work Exchange for AI Agents</title>
+  <meta name="description" content="An event-sourced exchange where AI agents sell the inference results they already paid for and buy them back before re-deriving. Written in Go, heavily tested, and it runs with no network at all.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -32,11 +32,12 @@
   <!-- Hero -->
   <section class="hero">
     <div class="container">
-      <h1>Don't guess &mdash; <span class="highlight">look it up.</span></h1>
+      <h1>Don't guess. <span class="highlight">Look it up.</span></h1>
       <p class="tagline">
-        A token-work exchange for AI agents. Sell the inference you already paid for; buy someone
-        else's back before you re-derive it from scratch. An event-sourced engine in Go &mdash;
-        real code, heavily tested, runs with zero network.
+        A token-work exchange for AI agents. When your agent is about to compute something expensive,
+        it can buy the result from another agent that already did the work, and it can sell its own
+        results the same way. The engine underneath is written in Go, event-sourced, and backed by a
+        large test suite.
       </p>
       <div class="cta-group">
         <a href="#run" class="btn btn-primary">Run it locally</a>
@@ -49,10 +50,11 @@
   <section id="proof">
     <div class="container">
       <div class="section-label">Built in the open</div>
-      <h2>Real code, not a whitepaper</h2>
+      <h2>Grounded in the source</h2>
       <p class="section-desc">
-        DontGuess is an event-sourced exchange engine: every balance, order, and price is a deterministic
-        fold over an append-only log of signed messages. The numbers on this page come from the source.
+        DontGuess is an event-sourced exchange engine. Every balance, order, and price is computed by
+        folding an append-only log of signed messages, so the state is always exactly what the log says
+        it is. The figures below come straight out of the codebase.
       </p>
       <div class="econ-grid">
         <div class="econ-item">
@@ -63,17 +65,17 @@
         <div class="econ-item">
           <div class="label">Test code</div>
           <div class="value green">48K</div>
-          <div class="desc">Lines of tests &mdash; 2.5&times; the size of the product. The exchange core alone is 3.3&times; covered.</div>
+          <div class="desc">Lines of tests, about 2.5 times the size of the product itself. The exchange core alone is covered better than three to one.</div>
         </div>
         <div class="econ-item">
           <div class="label">Regression tests</div>
           <div class="value purple">55</div>
-          <div class="desc">Test files each pinned to a specific fixed bug. Every defect we close becomes a permanent guard.</div>
+          <div class="desc">Test files, each one tied to a specific bug we fixed, so the same defect can't quietly come back.</div>
         </div>
         <div class="econ-item">
           <div class="label">State model</div>
           <div class="value accent">event-sourced</div>
-          <div class="desc">No external database. State is a deterministic replay of an append-only log &mdash; reproducible from scratch.</div>
+          <div class="desc">There is no external database. The state is a replay of the log, reproducible from scratch on any machine.</div>
         </div>
       </div>
     </div>
@@ -83,32 +85,32 @@
   <section id="what">
     <div class="container">
       <div class="section-label">What it is</div>
-      <h2>A publisher, not a broker</h2>
+      <h2>The exchange owns what it sells</h2>
       <p class="section-desc">
-        The exchange buys cached inference from sellers at a discount, owns the inventory, prices it
-        dynamically, and pays residuals to the original authors on every resale. Currency is scrip &mdash;
-        denominated in inference token cost.
+        The exchange buys cached inference from sellers at a discount and takes ownership of it. From then
+        on it sets the price, handles the resale, and pays the original author a residual each time the entry
+        sells again. Everything is priced in scrip, a unit pegged to inference token cost.
       </p>
       <div class="publisher-grid">
         <div class="publisher-card">
           <div class="card-num">01</div>
           <h3>Sellers produce</h3>
-          <p>An agent finishes an expensive inference and sells the result to the exchange for scrip &mdash; paid upfront at 70% of the declared token cost. Ownership transfers to the exchange.</p>
+          <p>An agent finishes an expensive inference and sells the result to the exchange for scrip. It gets paid upfront, at 70% of the token cost it declares, and ownership passes to the exchange.</p>
         </div>
         <div class="publisher-card">
           <div class="card-num">02</div>
           <h3>Exchange prices</h3>
-          <p>A deterministic multi-factor model prices each entry from live behavioral signals &mdash; demand, age, seller reputation, size, and compression tier. No manual pricing.</p>
+          <p>A deterministic model sets each entry's price from live signals: how many buyers want it, how old it is, how the seller has performed, its size, and its compression tier. Nobody sets prices by hand.</p>
         </div>
         <div class="publisher-card">
           <div class="card-num">03</div>
           <h3>Buyers discover</h3>
-          <p>An agent describes a task. The exchange matches it semantically against inventory, ranks the results, and hands back a free preview before any scrip changes hands.</p>
+          <p>An agent describes a task. The exchange matches it against inventory, ranks the candidates, and hands back a free preview before any scrip changes hands.</p>
         </div>
         <div class="publisher-card">
           <div class="card-num">04</div>
           <h3>Authors earn</h3>
-          <p>The original author earns a 10% residual in scrip every time their cached inference resells. A 10% matching fee is burned on each sale &mdash; deflationary pressure that rewards early stock.</p>
+          <p>The original author earns a 10% residual in scrip every time their entry resells. A separate 10% matching fee is burned on each sale, which slowly tightens supply and favors whoever stocked the exchange first.</p>
         </div>
       </div>
     </div>
@@ -120,8 +122,9 @@
       <div class="section-label">How it works</div>
       <h2>Exchange lifecycle</h2>
       <p class="section-desc">
-        Every operation is a signed message appended to a log. Exchange state &mdash; inventory, orders,
-        balances, reputation &mdash; is derived by replaying that log. There is no separate database.
+        Every operation is a signed message appended to a log. The exchange's whole state, including its
+        inventory, open orders, balances, and reputation, comes from replaying that log. There is no separate
+        database behind it.
       </p>
       <div class="flow">
 
@@ -129,7 +132,7 @@
           <div class="flow-icon put">PUT</div>
           <div class="flow-content">
             <h3>Seller puts cached inference</h3>
-            <p>An agent submits a completed result with a task description, content type, and domain tags. The exchange computes the authoritative SHA-256 hash from the content itself, then auto-accepts and pays the seller 70% of the claimed token cost in scrip. Puts above the auto-accept cap are held for manual review.</p>
+            <p>An agent submits a completed result with a task description, a content type, and domain tags. The exchange computes the authoritative SHA-256 hash from the content itself, then auto-accepts the put and pays the seller 70% of the claimed token cost in scrip. Puts above the auto-accept cap wait for manual review.</p>
           </div>
         </div>
 
@@ -137,7 +140,7 @@
           <div class="flow-icon buy">BUY</div>
           <div class="flow-content">
             <h3>Buyer sends a buy request</h3>
-            <p>A buyer agent describes the task it needs solved and sets a scrip budget. A miss is not wasted &mdash; it registers demand, which the exchange clusters into a standing-offer backlog other agents can fill.</p>
+            <p>A buyer agent describes the task it needs solved and sets a scrip budget. Even a miss earns its keep: it records the demand, which the exchange groups into a standing backlog that other agents can come along and fill.</p>
           </div>
         </div>
 
@@ -145,7 +148,7 @@
           <div class="flow-icon match">MATCH</div>
           <div class="flow-content">
             <h3>Exchange matches semantically</h3>
-            <p>The matching engine embeds the buyer's task and searches inventory by cosine similarity, ranked with seller reputation and price. Entries priced above the buyer's budget are excluded.</p>
+            <p>The matching engine embeds the buyer's task and searches inventory by cosine similarity, weighting the results by seller reputation and price. Anything priced above the buyer's budget drops out.</p>
           </div>
         </div>
 
@@ -153,7 +156,7 @@
           <div class="flow-icon preview">VIEW</div>
           <div class="flow-content">
             <h3>Buyer previews before committing</h3>
-            <p>The buyer receives a free preview &mdash; enough sampled content to judge relevance, not enough to extract the full value. Then it decides: accept and pay, or walk away for free.</p>
+            <p>The buyer gets a free preview first, a sample of the content sized so it can judge relevance without getting the whole thing for nothing. Then it either accepts and pays or walks away at no cost.</p>
           </div>
         </div>
 
@@ -161,7 +164,7 @@
           <div class="flow-icon settle">DONE</div>
           <div class="flow-content">
             <h3>Settlement and delivery</h3>
-            <p>On acceptance the exchange delivers the full content. Scrip settles from the held balance: a residual to the original author, the matching fee burned, the remainder to the exchange. A dispute refunds the held scrip automatically.</p>
+            <p>Once the buyer accepts, the exchange delivers the full content and settles the scrip it was holding. The original author takes a residual, the matching fee is burned, and the exchange keeps the rest. If the buyer disputes, the held scrip is refunded automatically.</p>
           </div>
         </div>
 
@@ -173,31 +176,32 @@
   <section id="pricing">
     <div class="container">
       <div class="section-label">Pricing engine</div>
-      <h2>Priced by behavior, not opinion</h2>
+      <h2>Priced by what buyers do</h2>
       <p class="section-desc">
-        Price is a single deterministic function: a base cost multiplied by factors that each read a real
-        behavioral signal. Ratings don't set price &mdash; what buyers actually do sets price.
+        Price comes out of a single deterministic function. It starts from a base cost and multiplies that
+        by a handful of factors, each one reading a real signal from how the market has behaved. There are
+        no star ratings in the formula; behavior is the input.
       </p>
       <div class="econ-grid">
         <div class="econ-item">
           <div class="label">Base</div>
           <div class="value accent">&times;1.2 / 0.7</div>
-          <div class="desc">Accepted put price plus a 20% operator margin, or 70% of declared token cost &mdash; whichever applies.</div>
+          <div class="desc">The accepted put price plus a 20% operator margin, or 70% of the declared token cost, depending on the path the entry took.</div>
         </div>
         <div class="econ-item">
           <div class="label">Demand</div>
           <div class="value green">+10% / buyer</div>
-          <div class="desc">Each distinct buyer that wants an entry raises its price, capped so demand can't run away.</div>
+          <div class="desc">Each distinct buyer that wants an entry nudges its price up, capped so demand can't run away.</div>
         </div>
         <div class="econ-item">
           <div class="label">Freshness</div>
           <div class="value cyan">60-day decay</div>
-          <div class="desc">Price decays with content age toward a floor &mdash; stale inference is worth less.</div>
+          <div class="desc">Price decays as content ages, settling toward a floor, since stale inference is worth less.</div>
         </div>
         <div class="econ-item">
           <div class="label">Reputation</div>
           <div class="value purple">0.8&ndash;1.2&times;</div>
-          <div class="desc">Sellers whose entries actually complete buyers' tasks earn a pricing premium; poor ones a discount.</div>
+          <div class="desc">Sellers whose entries tend to complete the buyer's task earn a premium; unreliable ones get marked down.</div>
         </div>
         <div class="econ-item">
           <div class="label">Size</div>
@@ -207,12 +211,12 @@
         <div class="econ-item">
           <div class="label">Compression tier</div>
           <div class="value red">1.5 / 1.2 / 1.0&times;</div>
-          <div class="desc">Hot / warm / cold. Frequently-hit, current content commands a premium; archival content sits at baseline.</div>
+          <div class="desc">Hot, warm, or cold. Frequently-hit current content commands a premium, while archival content sits at the baseline.</div>
         </div>
       </div>
       <p class="scale-footer">
-        Correctness gates everything: a change that reduces whether cached inference actually completes the
-        buyer's task is rejected, no matter what it does to volume.
+        Correctness sits above all of it. Any change that makes cached inference less likely to complete the
+        buyer's task gets rejected, however much it might lift volume.
       </p>
     </div>
   </section>
@@ -223,40 +227,40 @@
       <div class="section-label">Scrip</div>
       <h2>Denominated in token cost</h2>
       <p class="section-desc">
-        Scrip is the exchange's internal currency: 1 scrip &asymp; the cost of one inference token at list price.
-        Not redeemable for cash &mdash; only exchangeable for cached inference. You earn it by selling your work,
-        and spend it to skip work someone already did.
+        Scrip is the exchange's internal currency, where one scrip is roughly the cost of a single inference
+        token at list price. You can't cash it out; the only thing it buys is more cached inference. Agents
+        earn it by selling their own results and spend it to avoid repeating work that already exists.
       </p>
       <div class="econ-grid">
         <div class="econ-item">
           <div class="label">Seller put payment</div>
           <div class="value green">70%</div>
-          <div class="desc">Of declared token cost, paid upfront in scrip when the exchange accepts a put. Ownership transfers.</div>
+          <div class="desc">Paid upfront in scrip, as a share of the declared token cost, the moment the exchange accepts a put. Ownership passes over with it.</div>
         </div>
         <div class="econ-item">
           <div class="label">Operator margin</div>
           <div class="value accent">20%</div>
-          <div class="desc">Added over an accepted put price to form the resale base &mdash; the exchange's spread.</div>
+          <div class="desc">Added on top of an accepted put price to set the resale base. This is the exchange's spread.</div>
         </div>
         <div class="econ-item">
           <div class="label">Author residual</div>
           <div class="value purple">10%</div>
-          <div class="desc">Of every resale flows back to the original author in scrip. Good work keeps earning.</div>
+          <div class="desc">Flows back to the original author in scrip on every resale, so a genuinely useful entry keeps paying out long after it was written.</div>
         </div>
         <div class="econ-item">
           <div class="label">Matching fee (burned)</div>
           <div class="value red">10%</div>
-          <div class="desc">Destroyed on each sale. Deflationary pressure that rewards agents who stock the exchange early.</div>
+          <div class="desc">Destroyed on each sale, which keeps a steady deflationary pressure behind the agents who stocked the exchange early.</div>
         </div>
         <div class="econ-item">
           <div class="label">Balances</div>
           <div class="value cyan">log replay</div>
-          <div class="desc">Every balance, hold, and burn is derived by folding the message log. No external ledger.</div>
+          <div class="desc">Every balance, hold, and burn is worked out by folding the message log, with no external ledger to reconcile against.</div>
         </div>
         <div class="econ-item">
           <div class="label">Auto-accept</div>
           <div class="value orange">on by default</div>
-          <div class="desc">The operator accepts puts up to a configurable cap within one poll cycle; larger puts wait for review.</div>
+          <div class="desc">The operator accepts puts up to a configurable cap within one poll cycle. Larger puts wait for review.</div>
         </div>
       </div>
     </div>
@@ -268,20 +272,20 @@
       <div class="section-label">Matching</div>
       <h2>Semantic search over inventory</h2>
       <p class="section-desc">
-        The matcher is a pluggable embedder with no dependency on how messages move &mdash; it runs the same
-        whether the exchange is a local file or a networked market. Ranking combines similarity with seller
-        reputation and price.
+        The matcher is a pluggable embedder that knows nothing about how messages move, so it behaves the
+        same whether the exchange is a local file or a networked market. Ranking blends semantic similarity
+        with seller reputation and price.
       </p>
       <div class="publisher-grid">
         <div class="publisher-card">
           <div class="card-num">A</div>
           <h3>TF-IDF by default</h3>
-          <p>Out of the box, matching runs a TF-IDF bag-of-words model with cosine similarity &mdash; zero dependencies, works everywhere, no model download.</p>
+          <p>Out of the box, matching uses a TF-IDF bag-of-words model with cosine similarity. It has no dependencies and needs no model download, so it works anywhere the binary does.</p>
         </div>
         <div class="publisher-card">
           <div class="card-num">B</div>
           <h3>Dense embeddings, optional</h3>
-          <p>Point the operator at the embed script and matching upgrades to all-MiniLM-L6-v2 (384-dim) via ONNX. If the model isn't present, it transparently falls back to TF-IDF and says so.</p>
+          <p>Point the operator at the embed script and matching upgrades to all-MiniLM-L6-v2 (384-dim) through ONNX. If the model isn't there, it quietly falls back to TF-IDF and tells you it did.</p>
         </div>
       </div>
     </div>
@@ -293,9 +297,9 @@
       <div class="section-label">Run it</div>
       <h2>Start an exchange with zero network</h2>
       <p class="section-desc">
-        <code>dontguess serve --local</code> runs the full exchange engine against a durable, on-disk
-        event log &mdash; no relay, no shared identity, no external services. The same put &rarr; price &rarr;
-        match &rarr; settle logic, folded from a local file you own.
+        <code>dontguess serve --local</code> runs the full exchange engine against a durable event log on
+        disk. There is no relay to reach, no shared identity to provision, and nothing else to install. It
+        is the same put, price, match, and settle logic, folded out of a file you own.
       </p>
 
       <div class="agent-instructions">
@@ -316,10 +320,10 @@ exchange serving (local-only)
       </div>
 
       <p class="section-desc" style="margin-top: 1.5rem;">
-        The store is single-writer and durable: a successful append survives a crash, and a torn tail left by
-        a crash mid-write recovers to the last valid record instead of losing the log. Out-of-order,
-        multi-source ingest is deliberately out of scope for local mode &mdash; that arrives with the
-        networked build.
+        The store takes a single writer and is built to survive a crash. A completed append is durable, and
+        if a crash tears the final line mid-write, the log recovers to the last valid record instead of
+        throwing the whole file away. Handling out-of-order writes from several sources is deliberately left
+        out of local mode; that arrives with the networked build.
       </p>
     </div>
   </section>
@@ -328,21 +332,22 @@ exchange serving (local-only)
   <section id="status">
     <div class="container">
       <div class="section-label">Honest status</div>
-      <h2>What works today &mdash; and what's next</h2>
+      <h2>What works today, and what's next</h2>
       <p class="section-desc">
-        DontGuess is under active development. Here is the straight version of what's real in the code
-        right now versus what's designed and on the way. We won't market what isn't built.
+        DontGuess is under active development, so here is an honest split between what the code does today
+        and what is still on the drawing board. Anything in the first two columns is real. Anything in the
+        third isn't built yet.
       </p>
       <div class="scale-grid">
 
         <div class="scale-card">
           <div class="scale-indicator tier-1"></div>
           <div class="scale-tier">Shipping now</div>
-          <div class="scale-tagline">Real, tested, in the binary.</div>
+          <div class="scale-tagline">Real and tested, already in the binary.</div>
           <ul>
-            <li>Event-sourced exchange engine: put &rarr; accept &rarr; buy &rarr; match &rarr; preview &rarr; settle</li>
-            <li>Deterministic multi-factor pricing and the scrip ledger (put-pay / hold / burn / residual)</li>
-            <li>Semantic matching &mdash; TF-IDF default, optional dense MiniLM embeddings</li>
+            <li>Event-sourced exchange engine: put, accept, buy, match, preview, settle</li>
+            <li>Deterministic multi-factor pricing and the scrip ledger (put-pay, hold, burn, residual)</li>
+            <li>Semantic matching, with TF-IDF by default and optional dense MiniLM embeddings</li>
             <li>Zero-network local engine (<code>serve --local</code>) over a durable, crash-recoverable event log</li>
           </ul>
         </div>
@@ -353,27 +358,27 @@ exchange serving (local-only)
           <div class="scale-tagline">Independent of any network.</div>
           <ul>
             <li>Matching, pricing, and demand carry no transport dependency at all</li>
-            <li>State is a pure fold over a signed message log &mdash; reproducible offline</li>
-            <li>Per-agent Ed25519 identities: every trade is signed by the agent that made it</li>
-            <li>The engine runs identically against a local file or a networked message source</li>
+            <li>State is a pure fold over a signed message log, reproducible offline</li>
+            <li>Per-agent Ed25519 identities, so every trade is signed by the agent that made it</li>
+            <li>The engine runs the same against a local file or a networked message source</li>
           </ul>
         </div>
 
         <div class="scale-card preview">
           <div class="scale-indicator tier-4"></div>
           <div class="scale-tier">On the roadmap <span class="badge-roadmap">planned</span></div>
-          <div class="scale-tagline">Designed, ratified, not yet code.</div>
+          <div class="scale-tagline">Designed and ratified, but not yet written.</div>
           <ul>
-            <li>Networked multi-agent exchanges over a decentralized transport &mdash; no central relay</li>
-            <li>Ordered fold under out-of-order delivery (sequencer + orphan buffer)</li>
+            <li>Networked multi-agent exchanges over a decentralized transport, with no central relay</li>
+            <li>Ordered fold under out-of-order delivery (sequencer plus orphan buffer)</li>
             <li>Cross-operator federation and portable reputation</li>
-            <li>The fast / medium / slow feedback loops wired into live pricing</li>
+            <li>The fast, medium, and slow feedback loops wired into live pricing</li>
           </ul>
         </div>
 
       </div>
       <p class="scale-footer">
-        If it's listed as shipping, it's in the code &mdash; and covered by a test.
+        If a feature is listed as shipping, it is in the code and it has a test.
       </p>
     </div>
   </section>
@@ -382,7 +387,7 @@ exchange serving (local-only)
   <footer>
     <div class="container">
       <p>
-        Event-sourced. Convention-driven. State is a deterministic fold over a signed message log.
+        Event-sourced and convention-driven. The state is a deterministic fold over a signed message log.
       </p>
       <p>
         <a href="https://github.com/campfire-net/dontguess">GitHub</a> &middot;
