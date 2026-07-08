@@ -2,9 +2,11 @@ package relay
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/campfire-net/dontguess/pkg/exchange"
 	"github.com/campfire-net/dontguess/pkg/identity"
@@ -105,7 +107,7 @@ func eTag(anteID string) []string { return []string{"e", anteID, "", "reply"} }
 
 // newWatchdogHarness wires a real Store + Sequencer + Intake + fakeRelay + a
 // Watchdog whose Subscriber is that relay. Alarm classes are recorded.
-func newWatchdogHarness(t *testing.T) (*Watchdog, *fakeRelay, *store.Store, *exchange.Sequencer, *WatchdogMetrics, *[]string, identity.Signer) {
+func newWatchdogHarness(t *testing.T, opts ...WatchdogOption) (*Watchdog, *fakeRelay, *store.Store, *exchange.Sequencer, *WatchdogMetrics, *[]string, identity.Signer) {
 	t.Helper()
 	op, err := identity.Generate()
 	if err != nil {
@@ -125,9 +127,10 @@ func newWatchdogHarness(t *testing.T) (*Watchdog, *fakeRelay, *store.Store, *exc
 
 	var alarms []string
 	wm := &WatchdogMetrics{}
-	wd := NewWatchdog(relay, seq, st, nil, wm, func(class string, _ error, _ *nostr.Event) {
+	alarm := func(class string, _ error, _ *nostr.Event) {
 		alarms = append(alarms, class)
-	})
+	}
+	wd := NewWatchdog(relay, seq, st, nil, wm, alarm, opts...)
 	return wd, relay, st, seq, wm, &alarms, op
 }
 
@@ -212,25 +215,32 @@ func TestWatchdog_ReconnectDedupAbsorbedBackfill(t *testing.T) {
 	_ = op
 }
 
-// --- TEST 2: poison antecedent → targeted refetch empty → loud quarantine ---
+// --- TEST 2: poison antecedent → targeted refetch empty → loud, NO quarantine -
 
-// TestWatchdog_PoisonAntecedentQuarantine exercises §2.5 path 2: an ingested
-// event references an antecedent the relay has PRUNED. The event orphans in the
-// Sequencer (never persists). CheckOrphans issues ONE targeted REQ ["ids",
-// <antecedent>]; the refetch is empty; the chain is QUARANTINED with a loud
-// orphan_unrecoverable alarm, while an INDEPENDENT healthy event keeps draining.
-func TestWatchdog_PoisonAntecedentQuarantine(t *testing.T) {
+// TestWatchdog_PoisonAntecedentLoudNoQuarantine exercises §2.5a path 2: an
+// ingested event references an antecedent the relay does NOT serve. The event
+// orphans in the Sequencer (never persists). CheckOrphans issues ONE targeted
+// REQ ["ids", <antecedent>]; the refetch is empty; the watchdog ALARMS loud
+// (orphan_unrecoverable) while an INDEPENDENT healthy event keeps draining.
+//
+// The ratified §2.5a design REMOVED the ingest-gating quarantine set (a re-parent
+// black hole + a false-quarantine censorship primitive). This test PINS that
+// removal: a second pass RE-refetches the still-missing antecedent (no quarantine
+// memory suppresses it) — the watchdog never permanently gives up on an id; a
+// truly stuck orphan is bounded instead by the Sequencer's LRU occupancy eviction
+// and reconciled by the resync audit.
+func TestWatchdog_PoisonAntecedentLoudNoQuarantine(t *testing.T) {
 	wd, relay, st, seq, wm, alarms, _ := newWatchdogHarness(t)
 	seller, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("generate seller: %v", err)
 	}
 
-	// A dangling antecedent id the relay will NEVER serve (pruned).
+	// A dangling antecedent id the relay will NEVER serve.
 	poisonAnte := signEventAt(t, seller, nostr.KindPut, 500, nil, "pruned-root").ID
 	relay.pruned[poisonAnte] = struct{}{}
 
-	// Orphan: a buy that e-tags the pruned root. It ingests but cannot release.
+	// Orphan: a buy that e-tags the never-served root. It ingests but cannot release.
 	orphan := signEventAt(t, seller, nostr.KindBuy, 600, [][]string{eTag(poisonAnte)}, "orphaned-buy")
 	if herr := relay.intake.HandleEvent(orphan); herr != nil {
 		t.Fatalf("ingest orphan: %v", herr)
@@ -254,14 +264,14 @@ func TestWatchdog_PoisonAntecedentQuarantine(t *testing.T) {
 		t.Fatalf("PendingAntecedents[%s] = %v, want [%s]", poisonAnte, pend[poisonAnte], orphan.ID)
 	}
 
-	// Run the orphan watchdog. Targeted REQ ["ids", poisonAnte] returns empty
-	// (pruned) → quarantine.
-	q, err := wd.CheckOrphans(context.Background())
+	// Run the orphan watchdog. Targeted REQ ["ids", poisonAnte] returns empty →
+	// loud orphan_unrecoverable, ONE refetch issued, NO quarantine.
+	refetched, err := wd.CheckOrphans(context.Background())
 	if err != nil {
 		t.Fatalf("CheckOrphans: %v", err)
 	}
-	if q != 1 {
-		t.Fatalf("quarantined chains = %d, want 1", q)
+	if refetched != 1 {
+		t.Fatalf("refetches issued = %d, want 1 (one distinct missing antecedent)", refetched)
 	}
 	// Exactly one targeted refetch was issued, an IDs filter for the antecedent.
 	var refetch *Filter
@@ -277,23 +287,34 @@ func TestWatchdog_PoisonAntecedentQuarantine(t *testing.T) {
 		t.Fatalf("OrphanUnrecoverable = %d, want 1", wm.OrphanUnrecoverable.Load())
 	}
 	if wm.OrphanPending.Load() != 1 {
-		t.Fatalf("OrphanPending gauge = %d, want 1 (orphan still buffered post-quarantine)", wm.OrphanPending.Load())
+		t.Fatalf("OrphanPending gauge = %d, want 1 (orphan still buffered)", wm.OrphanPending.Load())
 	}
 	if !containsID(*alarms, "orphan_unrecoverable") {
 		t.Fatalf("alarms = %v, want an orphan_unrecoverable", *alarms)
 	}
 
-	// A SECOND pass must NOT re-refetch the quarantined antecedent (remembered).
+	// The healthy independent event kept draining — poison did not stall the fold.
+	if ids := storeIDs(t, st); !containsID(ids, healthy.ID) {
+		t.Fatalf("healthy event no longer persisted after CheckOrphans: %v", ids)
+	}
+
+	// A SECOND pass RE-refetches the still-missing antecedent: there is NO
+	// quarantine memory (the §2.5a removal). This is the anti-censorship property —
+	// the watchdog does not permanently blacklist a foreign antecedent id.
 	refetchCountBefore := wm.OrphanRefetch.Load()
-	if _, err := wd.CheckOrphans(context.Background()); err != nil {
+	refetched2, err := wd.CheckOrphans(context.Background())
+	if err != nil {
 		t.Fatalf("CheckOrphans (2nd): %v", err)
 	}
-	if wm.OrphanRefetch.Load() != refetchCountBefore {
-		t.Fatalf("OrphanRefetch grew on 2nd pass (%d→%d); quarantined chain must not be refetched again",
+	if refetched2 != 1 {
+		t.Fatalf("2nd pass refetches = %d, want 1 (still-missing antecedent re-tried, no quarantine)", refetched2)
+	}
+	if wm.OrphanRefetch.Load() != refetchCountBefore+1 {
+		t.Fatalf("OrphanRefetch did not grow on 2nd pass (%d→%d); the removed quarantine set must NOT suppress retry",
 			refetchCountBefore, wm.OrphanRefetch.Load())
 	}
-	if wm.OrphanUnrecoverable.Load() != 1 {
-		t.Fatalf("OrphanUnrecoverable double-counted = %d, want 1", wm.OrphanUnrecoverable.Load())
+	if wm.OrphanUnrecoverable.Load() != 2 {
+		t.Fatalf("OrphanUnrecoverable = %d, want 2 (loud each pass; no quarantine to suppress it)", wm.OrphanUnrecoverable.Load())
 	}
 }
 
@@ -318,12 +339,12 @@ func TestWatchdog_OrphanRecoveredByRefetch(t *testing.T) {
 		t.Fatalf("PendingCount = %d, want 1", seq.PendingCount())
 	}
 
-	q, err := wd.CheckOrphans(context.Background())
+	refetched, err := wd.CheckOrphans(context.Background())
 	if err != nil {
 		t.Fatalf("CheckOrphans: %v", err)
 	}
-	if q != 0 {
-		t.Fatalf("quarantined = %d, want 0 (antecedent was recoverable)", q)
+	if refetched != 1 {
+		t.Fatalf("refetches = %d, want 1 (one distinct antecedent, recovered)", refetched)
 	}
 	// Refetch delivered the root → chain released → BOTH events now persisted.
 	ids := storeIDs(t, st)
@@ -338,6 +359,89 @@ func TestWatchdog_OrphanRecoveredByRefetch(t *testing.T) {
 	}
 	if containsID(*alarms, "orphan_unrecoverable") {
 		t.Fatalf("unexpected quarantine alarm on a recoverable chain: %v", *alarms)
+	}
+}
+
+// --- TEST 2b: targeted-refetch rate limit (token bucket) -------------------
+
+// TestWatchdog_RefetchRateLimited is DONE criterion (4): the targeted orphan
+// refetch is RATE-LIMITED by a token bucket (§2.5a, ADV-6 — each distinct
+// antecedent costs one relay REQ). Under a burst of many distinct missing
+// antecedents a single CheckOrphans pass issues at most `burst` refetch REQs and
+// DEFERS the rest (orphan_refetch_throttled), capping relay-REQ amplification. A
+// later pass, after the bucket refills, issues the next batch. Driven with an
+// injected clock so the rate limit is asserted deterministically.
+func TestWatchdog_RefetchRateLimited(t *testing.T) {
+	const burst = 3
+	const orphans = 10
+	clock := time.Unix(1_000_000, 0)
+	wd, relay, _, seq, wm, alarms, _ := newWatchdogHarness(t,
+		WithRefetchRate(burst, 1.0), // 3-token burst, refill 1/sec
+		WithClock(func() time.Time { return clock }),
+	)
+	seller, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate seller: %v", err)
+	}
+
+	// Ingest `orphans` events, each e-tagging a DISTINCT antecedent the relay
+	// never serves — so every one stays pending and would, unbounded, cost one
+	// refetch REQ per pass.
+	for i := 0; i < orphans; i++ {
+		ante := fmt.Sprintf("%064x", i+1) // distinct, never-served antecedent id
+		orphan := signEventAt(t, seller, nostr.KindBuy, int64(600+i), [][]string{eTag(ante)}, fmt.Sprintf("orphan-%d", i))
+		if herr := relay.intake.HandleEvent(orphan); herr != nil {
+			t.Fatalf("ingest orphan %d: %v", i, herr)
+		}
+	}
+	if seq.PendingCount() != orphans {
+		t.Fatalf("PendingCount = %d, want %d", seq.PendingCount(), orphans)
+	}
+
+	// Pass 1 at t0: only `burst` tokens → `burst` REQs, the rest throttled.
+	refetched, err := wd.CheckOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("CheckOrphans pass 1: %v", err)
+	}
+	if refetched != burst {
+		t.Fatalf("pass 1 refetches = %d, want %d (token-bucket burst)", refetched, burst)
+	}
+	if wm.OrphanRefetch.Load() != burst {
+		t.Fatalf("OrphanRefetch = %d, want %d", wm.OrphanRefetch.Load(), burst)
+	}
+	if wm.OrphanRefetchThrottled.Load() != orphans-burst {
+		t.Fatalf("OrphanRefetchThrottled = %d, want %d (deferred this pass)", wm.OrphanRefetchThrottled.Load(), orphans-burst)
+	}
+	if !containsID(*alarms, "orphan_refetch_throttled") {
+		t.Fatalf("alarms = %v, want an orphan_refetch_throttled", *alarms)
+	}
+
+	// A second pass at the SAME instant: bucket empty (no refill) → zero REQs,
+	// every pending antecedent throttled.
+	refetched, err = wd.CheckOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("CheckOrphans pass 2 (no refill): %v", err)
+	}
+	if refetched != 0 {
+		t.Fatalf("pass 2 refetches = %d, want 0 (bucket empty, no time elapsed)", refetched)
+	}
+	if wm.OrphanRefetch.Load() != burst {
+		t.Fatalf("OrphanRefetch grew without refill: %d, want %d", wm.OrphanRefetch.Load(), burst)
+	}
+
+	// Advance the clock enough to refill the bucket to its cap, then a third pass
+	// issues another `burst` REQs — the rate limit RECOVERS over time, it does not
+	// permanently give up (no quarantine).
+	clock = clock.Add(10 * time.Second) // refill 10 tokens, capped at burst
+	refetched, err = wd.CheckOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("CheckOrphans pass 3 (after refill): %v", err)
+	}
+	if refetched != burst {
+		t.Fatalf("pass 3 refetches = %d, want %d (bucket refilled to cap)", refetched, burst)
+	}
+	if wm.OrphanRefetch.Load() != 2*burst {
+		t.Fatalf("OrphanRefetch = %d, want %d (two bursts issued)", wm.OrphanRefetch.Load(), 2*burst)
 	}
 }
 

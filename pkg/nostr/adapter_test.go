@@ -2,6 +2,7 @@ package nostr
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"regexp"
 	"sort"
@@ -130,6 +131,51 @@ func TestRoundTrip_AllOpKinds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMaxAntecedentsCap is DONE criterion (3): FromNostrEvent caps causal
+// fan-in at MaxAntecedents e-tags and rejects LOUD beyond it (§2.5a (C)),
+// bounding DAG fan-in and per-event orphan-refetch amplification. Exactly
+// MaxAntecedents is accepted; MaxAntecedents+1 is rejected at the adapter
+// boundary, before the Sequencer or store ever sees the event.
+func TestMaxAntecedentsCap(t *testing.T) {
+	mkEventWithETags := func(n int) *Event {
+		tags := make([][]string, 0, n+1)
+		for i := 0; i < n; i++ {
+			// Distinct 64-hex-char antecedent ids.
+			id := fmt.Sprintf("%064x", i+1)
+			if i == 0 {
+				tags = append(tags, []string{tagE, id, "", replyMarker})
+			} else {
+				tags = append(tags, []string{tagE, id})
+			}
+		}
+		tags = append(tags, []string{tagP, sampleSender})
+		return &Event{
+			ID:        sampleID,
+			PubKey:    sampleSender,
+			CreatedAt: 1_700_000_000,
+			Kind:      KindBuy, // a base op with no operator-authorship requirement
+			Tags:      tags,
+			Content:   "buy",
+		}
+	}
+
+	// Exactly MaxAntecedents: accepted, all e-tags preserved.
+	atCap := mkEventWithETags(MaxAntecedents)
+	msg, err := FromNostrEvent(atCap)
+	if err != nil {
+		t.Fatalf("FromNostrEvent with exactly MaxAntecedents=%d e-tags: unexpected error: %v", MaxAntecedents, err)
+	}
+	if len(msg.Antecedents) != MaxAntecedents {
+		t.Fatalf("Antecedents len = %d, want %d", len(msg.Antecedents), MaxAntecedents)
+	}
+
+	// MaxAntecedents+1: rejected LOUD.
+	over := mkEventWithETags(MaxAntecedents + 1)
+	if _, err := FromNostrEvent(over); err == nil {
+		t.Fatalf("FromNostrEvent with %d e-tags returned nil error; must reject beyond MaxAntecedents=%d", MaxAntecedents+1, MaxAntecedents)
 	}
 }
 
