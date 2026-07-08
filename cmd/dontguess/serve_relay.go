@@ -280,8 +280,193 @@ func (w *relayWiring) runReader(ctx context.Context, recv frameReceiver, pub *de
 	}
 }
 
+// relaySubID is the single subscription id the operator process uses for its one
+// backfill+live REQ (and every reconnect re-subscribe re-issues it).
+const relaySubID = "dg-exchange"
+
+// runReaderReconnect is the RECONNECT-LOOP wrapper around the single read pass
+// (runReader) — the §2.5 reconnection leg. runReader owns the only Recv and
+// returns on ctx cancel OR when the connection drops (relay.Conn.Recv returns
+// ErrConnDropped on the first websocket drop; the fake relay injects one for the
+// test). This loop makes ONE disconnect a recoverable event rather than the
+// silent death of the transport it was before this leg was wired (the LOCKED-5
+// defeat: ingest stopped folding, the OK-demux died, and the next Outbox publish
+// wedged Outbox.Run indefinitely).
+//
+// On each drop it, in order:
+//
+//  1. FAILS every in-flight publish (pub.failInFlight) so a blocked Outbox
+//     publish returns and retries rather than wedging on an OK that can no longer
+//     route — this is the "Outbox publish cannot wedge" invariant;
+//  2. drives the Watchdog reconnect (wd.Reconnect): bumps intake_disconnected,
+//     alarms + loud-logs, and RE-ISSUES REQ since=(watermark−slack). NOTE
+//     relay.Conn transparently re-dials + re-AUTHs on the next Recv but does NOT
+//     re-issue the REQ — only this re-subscribe does, so a dumb relay that forgot
+//     the old REQ resumes delivering (dedup absorbs the backfill overlap);
+//  3. backs off (DefaultBackoff, reset on a clean re-subscribe) so a relay that
+//     drops instantly cannot hot-spin the reconnect;
+//  4. re-enters runReader, resuming ingest of the re-delivered events.
+//
+// watermarkFn re-samples the LOCAL high-water mark (NIP-01 seconds) at each
+// reconnect, so backfill resumes from everything folded since the last REQ.
+func (w *relayWiring) runReaderReconnect(
+	ctx context.Context,
+	recv frameReceiver,
+	pub *demuxPublisher,
+	wd *relay.Watchdog,
+	watermarkFn func() int64,
+	backoff relay.Backoff,
+) {
+	delay := backoff.Initial
+	if delay <= 0 {
+		delay = 10 * time.Millisecond
+	}
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		// One read pass: consumes frames through the Intake + OK-demux until Recv
+		// errors (drop) or ctx is cancelled.
+		w.runReader(ctx, recv, pub)
+		if ctx.Err() != nil {
+			return
+		}
+
+		// The connection dropped mid-stream. Unwedge any in-flight publish FIRST,
+		// then re-subscribe.
+		pub.failInFlight()
+
+		if rerr := wd.Reconnect(ctx, watermarkFn()); rerr != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("relay/reader: reconnect re-subscribe failed (will retry): %v", rerr)
+			if backoff.Max > 0 {
+				if delay *= 2; delay > backoff.Max {
+					delay = backoff.Max
+				}
+			}
+		} else {
+			delay = backoff.Initial
+			if delay <= 0 {
+				delay = 10 * time.Millisecond
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+	}
+}
+
+// resubscriber is the Watchdog Subscriber for the SINGLE-reader transport: its
+// Query issues ONE REQ frame over the shared send half and returns immediately
+// with NO delivered ids. In this design the one runReader loop owns the only
+// Recv and consumes the re-delivered events through the Intake — the Subscriber
+// MUST NOT read the wire itself (that would race the reader for frames). The
+// reconnect leg (Watchdog.Reconnect) ignores the delivered-id set anyway; it only
+// needs the REQ re-issued + the intake_disconnected alarm, both of which this
+// provides. (The orphan-refetch / resync audit legs, which DO consume delivered
+// ids, are §2.5 paths 2/3 and out of scope for this reconnect item.)
+type resubscriber struct {
+	send  frameSender
+	subID string
+}
+
+func (s *resubscriber) Query(ctx context.Context, f relay.Filter) ([]string, error) {
+	frame, err := relay.EncodeReq(s.subID, f)
+	if err != nil {
+		return nil, fmt.Errorf("resubscribe: encode REQ: %w", err)
+	}
+	if err := s.send.Send(ctx, frame); err != nil {
+		return nil, fmt.Errorf("resubscribe: send REQ: %w", err)
+	}
+	return nil, nil
+}
+
+// newReconnectWatchdog builds the §2.5 reconnect-leg Watchdog for the single-
+// reader transport. Its Subscriber re-issues the REQ over send (the single
+// runReader consumes the re-delivered events); it reads the live orphan view
+// (w.seq) and the local store (ls) and drives the intake_disconnected alarm +
+// WatchdogMetrics. repub is nil — the Outbox resync catch-up is §2.5 path 3, not
+// the reconnect leg. The slack matches the initial subscribe so backfill overlap
+// is consistent (the Sequencer's id-dedup absorbs it either way).
+func (w *relayWiring) newReconnectWatchdog(ls *dgstore.Store, send frameSender, alarm relay.AlarmFunc) (*relay.Watchdog, *relay.WatchdogMetrics) {
+	m := &relay.WatchdogMetrics{}
+	sub := &resubscriber{send: send, subID: relaySubID}
+	wd := relay.NewWatchdog(sub, w.seq, ls, nil, m, alarm, relay.WithReconnectSlack(reconnectSlackSeconds))
+	return wd, m
+}
+
+// storeWatermarkSeconds is the LOCAL high-water mark (max persisted Timestamp) in
+// NIP-01 created_at seconds — the value the reconnect REQ resumes backfill from.
+// Timestamps are nanoseconds in the store; the relay's Since filter is seconds. A
+// read error yields 0 (fetch from the beginning — a redundant backfill is free,
+// dedup absorbs it; a silent narrow window would be the unsafe direction).
+func storeWatermarkSeconds(ls *dgstore.Store) int64 {
+	recs, err := ls.ReadAll()
+	if err != nil {
+		return 0
+	}
+	var wm int64
+	for i := range recs {
+		if recs[i].Timestamp > wm {
+			wm = recs[i].Timestamp
+		}
+	}
+	return wm / 1_000_000_000
+}
+
+// guardOperatorKeyMigration LOUD-warns when the relay is being enabled on a
+// DG_HOME that already holds operator-authored records signed under a DIFFERENT
+// operator key than the nostr relay identity now in force — the campfire-era →
+// nostr operator-key switch (serve.go sets engineOperatorKey = relaySigner
+// pubkey when the relay is on). The Outbox would RE-SIGN those historical records
+// under the new key and republish them, re-attributing authorship; surfacing it
+// LOUD (LOCKED-5) lets the operator migrate deliberately rather than silently
+// republish old inventory under a new identity. It is non-fatal (a warning, not a
+// brick): the operator may legitimately intend the switch. Returns the count of
+// mismatched operator records. Relay-origin records are foreign and NEVER counted
+// (they are not ours to republish); the legacy empty-Sender operator origin is
+// treated as the current operator's, not a mismatch.
+func guardOperatorKeyMigration(ls *dgstore.Store, operatorKeyHex string, logf func(format string, args ...any)) int {
+	warn := logf
+	if warn == nil {
+		warn = func(format string, args ...any) { log.Printf(format, args...) }
+	}
+	recs, err := ls.ReadAll()
+	if err != nil {
+		warn("  relay migration guard: WARN could not read local store to check operator-key migration: %v", err)
+		return 0
+	}
+	foreign := map[string]struct{}{}
+	n := 0
+	for i := range recs {
+		r := recs[i]
+		if !isOperatorOrigin(r.Origin) || r.Sender == "" || r.Sender == operatorKeyHex {
+			continue
+		}
+		n++
+		foreign[r.Sender] = struct{}{}
+	}
+	if n > 0 {
+		warn("  relay migration guard: WARN %d operator-authored record(s) under %d prior operator key(s) differ from the nostr relay operator key %s… — enabling the relay will RE-SIGN and republish them under the new identity (campfire-era → nostr operator-key switch). Migrate deliberately if this is not intended.",
+			n, len(foreign), operatorKeyHex[:min(16, len(operatorKeyHex))])
+	}
+	return n
+}
+
 // okResult carries a relay ACK verdict from the reader to the blocked publisher.
-type okResult struct{ accepted bool }
+// dropped=true is the RECONNECT signal: the reader's connection dropped while the
+// publish was in flight, so no OK will ever route for it — the publisher must
+// FAIL (not block forever) and let the Outbox retry once the demux is
+// re-established (§2.5, the "Outbox publish cannot wedge" invariant).
+type okResult struct {
+	accepted bool
+	dropped  bool
+}
 
 // demuxPublisher is the production relay.EventPublisher for the single-reader
 // design. PublishEvent encodes+sends the EVENT frame over the shared connection,
@@ -326,7 +511,33 @@ func (p *demuxPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (
 	case <-ctx.Done():
 		return false, fmt.Errorf("demux publish: await OK for %s: %w", ev.ID, ctx.Err())
 	case r := <-ch:
+		if r.dropped {
+			// The reader lost the connection with this publish in flight. Return a
+			// loud error (never block for an OK that can no longer arrive) so the
+			// Outbox's publishWithRetry retries; after the reader re-subscribes the
+			// demux is live again and the retried publish's OK routes normally. This
+			// is what keeps ONE disconnect from wedging Outbox.Run forever (§2.5).
+			return false, fmt.Errorf("demux publish: connection dropped awaiting OK for %s: %w", ev.ID, relay.ErrConnDropped)
+		}
 		return r.accepted, nil
+	}
+}
+
+// failInFlight fails every publish currently blocked awaiting an OK, delivering
+// the dropped signal so each PublishEvent returns an error (and the Outbox
+// retries) rather than blocking forever on an OK that will never route. The
+// reconnect loop calls it the instant the reader's Recv drops — BEFORE it
+// re-subscribes — so the OK-demux cannot wedge across a disconnect (§2.5). The
+// send is non-blocking on the buffered-1 waiter channel; a waiter whose OK
+// already routed is a harmless no-op.
+func (p *demuxPublisher) failInFlight() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, ch := range p.waiters {
+		select {
+		case ch <- okResult{dropped: true}:
+		default:
+		}
 	}
 }
 
@@ -380,6 +591,10 @@ func attachRelayTransport(
 		return nil, err
 	}
 
+	// LOW: warn if enabling the relay would re-attribute campfire-era operator
+	// records under the new nostr operator key (non-fatal, LOUD).
+	guardOperatorKeyMigration(ls, operatorKeyHex, logf)
+
 	// Backfill + live subscription: resume from the seeded watermark with slack;
 	// the Sequencer dedups the overlap (§2.5). Timestamp is nanoseconds; nostr
 	// created_at (Since) is seconds.
@@ -387,7 +602,7 @@ func attachRelayTransport(
 	if since < 0 {
 		since = 0
 	}
-	reqFrame, err := relay.EncodeReq("dg-exchange", relay.Filter{Since: &since})
+	reqFrame, err := relay.EncodeReq(relaySubID, relay.Filter{Since: &since})
 	if err != nil {
 		return nil, fmt.Errorf("relay attach: encode REQ: %w", err)
 	}
@@ -395,9 +610,17 @@ func attachRelayTransport(
 		return nil, fmt.Errorf("relay attach: send REQ: %w", err)
 	}
 
+	// The reconnect-leg Watchdog re-issues the REQ (over send) + drives the
+	// intake_disconnected alarm on every drop (§2.5); the single runReader
+	// consumes the re-delivered events.
+	wd, _ := wiring.newReconnectWatchdog(ls, send, nil)
+
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); wiring.runReader(ctx, recv, pub) }()
+	go func() {
+		defer wg.Done()
+		wiring.runReaderReconnect(ctx, recv, pub, wd, func() int64 { return storeWatermarkSeconds(ls) }, relay.DefaultBackoff)
+	}()
 	go func() { defer wg.Done(); wiring.outbox.Run(ctx, publishInterval) }()
 
 	if logf != nil {
