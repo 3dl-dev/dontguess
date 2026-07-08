@@ -27,8 +27,12 @@ type Config struct {
 	OperatorKeyHex     string           `json:"operator_key"`
 	ConventionVersion  string           `json:"convention_version"`
 	Alias              string           `json:"alias"`
-	CreatedAt          int64            `json:"created_at"`
-	ProvenanceLevels   ProvenanceLevels `json:"provenance_levels,omitempty"`
+	CreatedAt          int64       `json:"created_at"`
+	TrustLevels        TrustLevels `json:"trust_levels,omitempty"`
+	// MinReputation is the sell-side reputation floor. When > 0, the serve path
+	// wires the behavioral reputation source into the trust gate and rejects puts
+	// from sellers scoring below it. 0 (default) disables reputation gating.
+	MinReputation int `json:"min_reputation,omitempty"`
 }
 
 // InitOptions controls the Init operation.
