@@ -34,7 +34,7 @@ func TestAgentInit_SubagentSignsUnderParent(t *testing.T) {
 	dgHome, _ := scratchExchange(t)
 
 	// Fleet member: gets a persistent npub of its own.
-	if err := runAgentInitCore(dgHome, "fleet", ""); err != nil {
+	if err := runAgentInitCore(dgHome, "fleet", "", true); err != nil {
 		t.Fatalf("agent-init fleet: %v", err)
 	}
 	fleetHome := filepath.Join(dgHome, "agents", "fleet")
@@ -44,7 +44,7 @@ func TestAgentInit_SubagentSignsUnderParent(t *testing.T) {
 	}
 
 	// Ephemeral subagent under the fleet member.
-	if err := runAgentInitCore(dgHome, "sub", "fleet"); err != nil {
+	if err := runAgentInitCore(dgHome, "sub", "fleet", false); err != nil {
 		t.Fatalf("agent-init sub --parent fleet: %v", err)
 	}
 	subHome := filepath.Join(dgHome, "agents", "sub")
@@ -76,7 +76,7 @@ func TestAgentInit_SubagentSignsUnderParent(t *testing.T) {
 
 	// Assert 4: a SECOND subagent under the same parent also signs under the
 	// parent — two ephemeral subagents do NOT produce two independent npubs.
-	if err := runAgentInitCore(dgHome, "sub2", "fleet"); err != nil {
+	if err := runAgentInitCore(dgHome, "sub2", "fleet", false); err != nil {
 		t.Fatalf("agent-init sub2 --parent fleet: %v", err)
 	}
 	sub2Signer, err := identity.Resolve(filepath.Join(dgHome, "agents", "sub2"))
@@ -96,10 +96,10 @@ func TestAgentInit_FreshFleetMemberGetsPersistentNpub(t *testing.T) {
 
 	dgHome, _ := scratchExchange(t)
 
-	if err := runAgentInitCore(dgHome, "m1", ""); err != nil {
+	if err := runAgentInitCore(dgHome, "m1", "", true); err != nil {
 		t.Fatalf("agent-init m1: %v", err)
 	}
-	if err := runAgentInitCore(dgHome, "m2", ""); err != nil {
+	if err := runAgentInitCore(dgHome, "m2", "", true); err != nil {
 		t.Fatalf("agent-init m2: %v", err)
 	}
 	m1, err := identity.Load(filepath.Join(dgHome, "agents", "m1"))
@@ -115,7 +115,7 @@ func TestAgentInit_FreshFleetMemberGetsPersistentNpub(t *testing.T) {
 		t.Fatalf("two fleet members share npub %s — not independent", m1.Npub())
 	}
 	// Persistent: re-init m1 loads the same npub (no re-mint).
-	if err := runAgentInitCore(dgHome, "m1", ""); err != nil {
+	if err := runAgentInitCore(dgHome, "m1", "", true); err != nil {
 		t.Fatalf("agent-init m1 (2nd run): %v", err)
 	}
 	m1b, err := identity.Load(filepath.Join(dgHome, "agents", "m1"))
@@ -149,7 +149,7 @@ func TestAgentInit_OperatorKeyNeverBorrowed(t *testing.T) {
 	// Every traversal-shaped parent value must be rejected — none may create an
 	// agent home nor borrow the operator key.
 	for _, parent := range []string{"..", ".", "../", "a/b", "a\\b", "foo/../..", "x..y"} {
-		err := runAgentInitCore(dgHome, "evil", parent)
+		err := runAgentInitCore(dgHome, "evil", parent, false)
 		if err == nil {
 			t.Errorf("agent-init evil --parent %q: expected rejection, got nil (possible operator-key borrow)", parent)
 		}
@@ -163,16 +163,16 @@ func TestAgentInit_OperatorKeyNeverBorrowed(t *testing.T) {
 	// Even a well-formed parent name that does not correspond to an existing
 	// fleet member must fail (BorrowParent.Load errors) — never silently mint,
 	// never fall back to the operator key.
-	if err := runAgentInitCore(dgHome, "sub", "does-not-exist"); err == nil {
+	if err := runAgentInitCore(dgHome, "sub", "does-not-exist", false); err == nil {
 		t.Fatal("agent-init sub --parent does-not-exist: expected error (no such fleet member), got nil")
 	}
 
 	// A legitimately-provisioned subagent must sign under its FLEET parent, and
 	// its npub must differ from the operator's — the operator key stays operator.
-	if err := runAgentInitCore(dgHome, "fleet", ""); err != nil {
+	if err := runAgentInitCore(dgHome, "fleet", "", true); err != nil {
 		t.Fatalf("agent-init fleet: %v", err)
 	}
-	if err := runAgentInitCore(dgHome, "sub", "fleet"); err != nil {
+	if err := runAgentInitCore(dgHome, "sub", "fleet", false); err != nil {
 		t.Fatalf("agent-init sub --parent fleet: %v", err)
 	}
 	subSigner, err := identity.Resolve(filepath.Join(dgHome, "agents", "sub"))
@@ -193,15 +193,15 @@ func TestAgentInit_SubagentCannotParentAnotherSubagent(t *testing.T) {
 
 	dgHome, _ := scratchExchange(t)
 
-	if err := runAgentInitCore(dgHome, "fleet", ""); err != nil {
+	if err := runAgentInitCore(dgHome, "fleet", "", true); err != nil {
 		t.Fatalf("agent-init fleet: %v", err)
 	}
-	if err := runAgentInitCore(dgHome, "sub", "fleet"); err != nil {
+	if err := runAgentInitCore(dgHome, "sub", "fleet", false); err != nil {
 		t.Fatalf("agent-init sub --parent fleet: %v", err)
 	}
 	// 'sub' is itself a subagent (no persistent key). Parenting under it must
 	// fail — a subagent is not a fleet member with a borrowable npub.
-	if err := runAgentInitCore(dgHome, "grandchild", "sub"); err == nil {
+	if err := runAgentInitCore(dgHome, "grandchild", "sub", false); err == nil {
 		t.Fatal("agent-init grandchild --parent sub: expected error (parent is a subagent, no persistent key), got nil")
 	}
 }

@@ -46,17 +46,13 @@ func scratchExchange(t *testing.T) (dgHome string, cfg *exchange.Config) {
 	return dgHome, cfg
 }
 
-// runAgentInitWith calls runAgentInit with DG_HOME overridden to dgHome.
-// Returns any error from the command. stdout (the export line) goes to os.Stdout
-// but that's fine for tests — we check side effects, not stdout.
+// runAgentInitWith provisions <name> as a persistent FLEET MEMBER under dgHome
+// (the --fleet-member path — these tests predate the fail-closed mode-selection
+// requirement added for dontguess-ebf and were never exercising the --parent
+// subagent path). Returns any error from the command.
 func runAgentInitWith(t *testing.T, dgHome, name string) error {
 	t.Helper()
-	// Override DG_HOME for the duration of this call.
-	orig := os.Getenv("DG_HOME")
-	os.Setenv("DG_HOME", dgHome)
-	defer os.Setenv("DG_HOME", orig)
-
-	return runAgentInit(nil, []string{name})
+	return runAgentInitCore(dgHome, name, "", true)
 }
 
 // agentPubKey reads the public key hex from an agent home directory by loading

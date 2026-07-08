@@ -131,7 +131,9 @@ dontguess put --description "what you computed" \
 ### Per-agent identity (v0.5.0+)
 # Each subagent can sign with its own Ed25519 key. The exchange campfire stays
 # on DG_HOME; only signing changes. Unset AGENT_CF_HOME = identical prior behavior.
-eval $(dontguess agent-init my-agent)   # provision identity + set AGENT_CF_HOME
+eval $(dontguess agent-init my-agent --fleet-member)   # provision identity + set AGENT_CF_HOME
+# --fleet-member is required for a persistent agent (fail-closed: no default
+# identity is minted). An ephemeral subagent uses --parent <fleet-member> instead.
 # Then: buy/put/settle signed by my-agent's key, not the operator key.
 # See docs/UPGRADING.md for full details and backward-compat guarantee.
 

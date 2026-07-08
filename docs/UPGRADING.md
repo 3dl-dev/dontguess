@@ -48,15 +48,22 @@ Exchange routing (campfire ID, operator server, health probe) always stays on
 **One-time setup per agent:**
 
 ```sh
-# 1. Provision an identity for the agent (e.g. "my-agent"):
-dontguess agent-init my-agent
+# 1. Provision an identity for the agent (e.g. "my-agent"). One of
+#    --fleet-member or --parent <name> is REQUIRED (fail-closed — there is no
+#    default that mints an identity):
+dontguess agent-init my-agent --fleet-member
 
 # 2. The command prints an export line — eval it to activate:
-eval $(dontguess agent-init my-agent)
+eval $(dontguess agent-init my-agent --fleet-member)
 
 # Or set the variable directly:
 export AGENT_CF_HOME="$HOME/.cf-agents/my-agent"
 ```
+
+A persistent long-lived agent (a "fleet member") uses `--fleet-member` and
+gets its own npub. An ephemeral per-conversation subagent uses
+`--parent <fleet-member-name>` instead and signs under that fleet member's
+npub — no new npub is minted (Sybil/convergence-integrity defense).
 
 The agent's public key is admitted to the exchange campfire automatically by
 `agent-init`. Once `AGENT_CF_HOME` is set in the agent's environment, all
