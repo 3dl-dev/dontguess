@@ -34,10 +34,19 @@ type balanceEntry struct {
 	mu    sync.Mutex
 	value int64
 	gen   uint64 // monotonic generation counter — used as ETag
+	// epoch is the store-level replayEpoch stamped at entry creation. Every
+	// Replay() bumps replayEpoch exactly once and every entry rebuilt in that
+	// replay carries the new epoch, so the ETag ("epoch-gen") can never
+	// ABA-collide across a resync: a pre-resync ETag holds the OLD epoch, and a
+	// rebuilt entry — even if it re-climbs to the identical gen — carries a NEW
+	// epoch, so the strings differ. epoch is immutable after creation (set under
+	// balancesMu before the entry is published to the map) and thereafter read
+	// only under e.mu, so it is data-race-free.
+	epoch uint64
 }
 
 func (e *balanceEntry) etag() string {
-	return fmt.Sprintf("%d", e.gen)
+	return fmt.Sprintf("%d-%d", e.epoch, e.gen)
 }
 
 // CampfireScripStore implements SpendingStore backed by a scrip operation
@@ -101,12 +110,30 @@ type CampfireScripStore struct {
 	// Uses sync.Map for lock-free concurrent reads.
 	seenMsgIDs sync.Map
 
-	// replayMu guards the entire Replay operation. Replay holds the write lock
-	// for the full duration of a replay; ApplyMessage holds the read lock while
-	// processing a single live message. This prevents a concurrent ApplyMessage
-	// from interleaving with a Replay reset window (the gap between map reset
-	// and replaying.Store(true)) and seeing empty balances in live mode.
+	// replayMu guards the entire Replay operation and every live capture-and-
+	// mutate of a *balanceEntry. Replay holds the WRITE lock for the full
+	// duration of a replay (map swap + refold); ApplyMessage AND the SpendingStore
+	// methods (GetBudget/DecrementBudget/AddBudget/Balance) hold the READ lock
+	// across their ENTIRE capture-and-mutate. This closes the double-spend TOCTOU:
+	// without it, a mutator could capture a *balanceEntry pointer under
+	// balancesMu.RLock, release balancesMu, then have Replay() swap s.balances out
+	// from under it, and finally lock e.mu and mutate a now-discarded entry — a
+	// lost decrement (double-spend). Holding replayMu.RLock across the whole
+	// operation forces Replay to wait until the mutation completes (or vice-versa),
+	// so a mutation always lands on the live map.
+	//
+	// Lock order is strictly replayMu -> balancesMu -> entry.mu. The internal
+	// apply*/addToBalance/subtractFromBalance helpers run UNDER Replay's write lock
+	// (or under ApplyMessage's read lock) and therefore MUST NOT acquire replayMu
+	// themselves — sync.RWMutex is not reentrant, so a nested RLock while the
+	// caller holds the write lock would deadlock.
 	replayMu sync.RWMutex
+
+	// replayEpoch is bumped exactly once per Replay() (under replayMu.Lock) and
+	// stamped into every balanceEntry rebuilt during that replay. It is the high
+	// bits of the ETag ("epoch-gen"), guaranteeing a pre-resync ETag can never
+	// ABA-match a rebuilt entry that happens to re-climb to the same gen.
+	replayEpoch atomic.Uint64
 
 	// replaying is true while Replay() is executing. subtractFromBalance uses
 	// this flag to decide whether to permit negative balances (replay trusts the
@@ -218,6 +245,11 @@ func (s *CampfireScripStore) Replay() error {
 		// Convert at the cf boundary before replaying into internal state.
 		msgs = proto.FromSDKMessages(result.Messages)
 	}
+
+	// Bump the replay epoch exactly once per Replay so every entry rebuilt below
+	// carries a fresh epoch. A client holding an ETag minted before this resync
+	// carries the OLD epoch and can therefore never ABA-match a rebuilt entry.
+	s.replayEpoch.Add(1)
 
 	// Reset state.
 	s.balancesMu.Lock()
@@ -441,6 +473,12 @@ func (s *CampfireScripStore) applyDisputeRefund(msg *proto.Message) {
 // Returns (0, "", nil) if the agent has no balance record.
 func (s *CampfireScripStore) GetBudget(_ context.Context, pk, rk string) (int64, string, error) {
 	_ = rk // rk is accepted for interface compat; all balances use a single counter per pk
+	// Hold replayMu.RLock across the whole capture-and-read so a concurrent
+	// Replay() map swap cannot hand back an ETag from an entry that is about to be
+	// discarded (which would let the caller present a doomed ETag to a later
+	// mutate). Lock order: replayMu -> balancesMu -> entry.mu.
+	s.replayMu.RLock()
+	defer s.replayMu.RUnlock()
 	s.balancesMu.RLock()
 	e, ok := s.balances[pk]
 	s.balancesMu.RUnlock()
@@ -461,6 +499,13 @@ func (s *CampfireScripStore) DecrementBudget(_ context.Context, pk, rk string, a
 	if etag == "" {
 		return 0, "", ErrConflict
 	}
+
+	// Hold replayMu.RLock across the ENTIRE capture-and-mutate. Without it a
+	// concurrent Replay() could swap s.balances after we capture e but before we
+	// lock e.mu, so the decrement would land on a discarded entry — a lost
+	// decrement (double-spend). Lock order: replayMu -> balancesMu -> entry.mu.
+	s.replayMu.RLock()
+	defer s.replayMu.RUnlock()
 
 	s.balancesMu.RLock()
 	e, ok := s.balances[pk]
@@ -491,6 +536,13 @@ func (s *CampfireScripStore) DecrementBudget(_ context.Context, pk, rk string, a
 func (s *CampfireScripStore) AddBudget(_ context.Context, pk, rk string, amountMicro int64, etag string) (int64, string, error) {
 	_ = rk
 
+	// Hold replayMu.RLock across the ENTIRE capture-and-mutate (and the
+	// create path) so a concurrent Replay() cannot swap s.balances after we
+	// capture e — a credit landing on a discarded entry would be lost. Lock
+	// order: replayMu -> balancesMu -> entry.mu.
+	s.replayMu.RLock()
+	defer s.replayMu.RUnlock()
+
 	s.balancesMu.RLock()
 	e, ok := s.balances[pk]
 	s.balancesMu.RUnlock()
@@ -501,7 +553,7 @@ func (s *CampfireScripStore) AddBudget(_ context.Context, pk, rk string, amountM
 		// Double-check under write lock.
 		e, ok = s.balances[pk]
 		if !ok {
-			e = &balanceEntry{value: amountMicro, gen: 1}
+			e = &balanceEntry{value: amountMicro, gen: 1, epoch: s.replayEpoch.Load()}
 			s.balances[pk] = e
 			s.balancesMu.Unlock()
 			return amountMicro, e.etag(), nil
@@ -580,6 +632,11 @@ func (s *CampfireScripStore) TotalBurned() int64 {
 // Balance returns the current balance for the given agent key (micro-tokens).
 // Returns 0 for unknown agents.
 func (s *CampfireScripStore) Balance(agentKey string) int64 {
+	// Hold replayMu.RLock across the whole capture-and-read so a concurrent
+	// Replay() swap cannot make us read a discarded entry. Lock order:
+	// replayMu -> balancesMu -> entry.mu.
+	s.replayMu.RLock()
+	defer s.replayMu.RUnlock()
 	s.balancesMu.RLock()
 	e, ok := s.balances[agentKey]
 	s.balancesMu.RUnlock()
@@ -599,7 +656,7 @@ func (s *CampfireScripStore) addToBalance(agentKey string, amount int64) {
 	s.balancesMu.Lock()
 	e, ok := s.balances[agentKey]
 	if !ok {
-		e = &balanceEntry{}
+		e = &balanceEntry{epoch: s.replayEpoch.Load()}
 		s.balances[agentKey] = e
 	}
 	s.balancesMu.Unlock()
@@ -624,7 +681,7 @@ func (s *CampfireScripStore) subtractFromBalance(agentKey string, amount int64) 
 	s.balancesMu.Lock()
 	e, ok := s.balances[agentKey]
 	if !ok {
-		e = &balanceEntry{}
+		e = &balanceEntry{epoch: s.replayEpoch.Load()}
 		s.balances[agentKey] = e
 	}
 	s.balancesMu.Unlock()
