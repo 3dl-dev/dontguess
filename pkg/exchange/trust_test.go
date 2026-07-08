@@ -365,3 +365,71 @@ func TestTrustLevelOverrides(t *testing.T) {
 		t.Error("expected error for unknown trust level name, got nil")
 	}
 }
+
+// TestCheck_AssignSubOpTrustAxis asserts the per-sub-op assign trust axis
+// (docs/design/relay-transport.md §2.4a D3): the five operator sub-ops
+// (post/accept/reject/expire/auction-close) are operator-only — an allowlisted
+// fleet member is REJECTED — while the two worker sub-ops (claim/complete) are
+// allowlisted (fleet member succeeds, anonymous rejected). This prevents the flat
+// OperationAssign=allowlisted bucket from loosening operator-only finalization.
+func TestCheck_AssignSubOpTrustAxis(t *testing.T) {
+	c := makeTrustChecker(t)
+
+	operatorSubOps := []exchange.Operation{
+		exchange.OperationAssignPost,
+		exchange.OperationAssignAccept,
+		exchange.OperationAssignReject,
+		exchange.OperationAssignExpire,
+		exchange.OperationAssignAuctionClose,
+	}
+	for _, op := range operatorSubOps {
+		// Allowlisted fleet member must NOT be able to author an operator sub-op.
+		err := c.Check(keyAllowlisted, op, "")
+		if err == nil {
+			t.Errorf("allowlisted sender was allowed operator sub-op %q; want ErrInsufficientTrust", op)
+		} else if !errors.Is(err, exchange.ErrInsufficientTrust) {
+			t.Errorf("op %q: got %v; want ErrInsufficientTrust", op, err)
+		}
+		// Anonymous rejected too.
+		if err := c.Check(keyAnon, op, ""); !errors.Is(err, exchange.ErrInsufficientTrust) {
+			t.Errorf("anonymous sender op %q: got %v; want ErrInsufficientTrust", op, err)
+		}
+		// Operator accepted.
+		if err := c.Check(keyOperator, op, ""); err != nil {
+			t.Errorf("operator rejected for operator sub-op %q: %v", op, err)
+		}
+	}
+
+	workerSubOps := []exchange.Operation{
+		exchange.OperationAssignClaim,
+		exchange.OperationAssignComplete,
+	}
+	for _, op := range workerSubOps {
+		// Allowlisted fleet member (worker) succeeds.
+		if err := c.Check(keyAllowlisted, op, ""); err != nil {
+			t.Errorf("allowlisted worker rejected for worker sub-op %q: %v", op, err)
+		}
+		// Anonymous rejected — a worker must be a vetted fleet member.
+		if err := c.Check(keyAnon, op, ""); !errors.Is(err, exchange.ErrInsufficientTrust) {
+			t.Errorf("anonymous sender op %q: got %v; want ErrInsufficientTrust", op, err)
+		}
+		// Operator accepted (higher tier passes a lower requirement).
+		if err := c.Check(keyOperator, op, ""); err != nil {
+			t.Errorf("operator rejected for worker sub-op %q: %v", op, err)
+		}
+	}
+}
+
+// TestRequiredLevel_SettlePreviewOperator asserts the preview settle phase — the
+// operator-authored response to a buyer preview-request — now resolves to the
+// operator level (previously omitted from the trust map, so it was rejected as an
+// unknown phase at the dispatch gate). docs/design/relay-transport.md §2.4a D3.
+func TestRequiredLevel_SettlePreviewOperator(t *testing.T) {
+	level, err := exchange.RequiredLevel(exchange.OperationSettle, exchange.SettlePhasePreview)
+	if err != nil {
+		t.Fatalf("RequiredLevel(settle, preview) error: %v", err)
+	}
+	if level != exchange.TrustOperator {
+		t.Errorf("settle:preview required level = %v; want TrustOperator", level)
+	}
+}
