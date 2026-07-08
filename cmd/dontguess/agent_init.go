@@ -28,6 +28,7 @@ import (
 
 	"github.com/campfire-net/campfire/cf-protocol/protocol"
 	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/campfire-net/dontguess/pkg/identity"
 	"github.com/spf13/cobra"
 )
 
@@ -145,12 +146,30 @@ func runAgentInit(_ *cobra.Command, args []string) error {
 		}
 	}
 
-	// Step 6: print the export line to stdout (for eval) and info to stderr.
+	// Step 6: issue the secp256k1/schnorr nostr identity (the FORCED re-key —
+	// campfire's Ed25519 keys are dead). This is the identity that will sign
+	// nostr events and authenticate to the team relay via NIP-42. It is
+	// persisted alongside the campfire identity in the same agent home, keyed by
+	// the persistent agent name, so re-running loads the SAME npub rather than
+	// minting a throwaway (key-management ruling: a persistent fleet member has
+	// a persistent npub; ephemeral subagents adopt their parent's key, never a
+	// fresh one). See docs/design/nostr-first-rebuild-decision.md (NFR key mgmt).
+	nostrID, nostrCreated, err := identity.LoadOrCreate(agentHome)
+	if err != nil {
+		return fmt.Errorf("issue secp256k1 identity for agent %q: %w", name, err)
+	}
+	nostrAction := "loaded existing"
+	if nostrCreated {
+		nostrAction = "generated new"
+	}
+
+	// Step 7: print the export line to stdout (for eval) and info to stderr.
 	fmt.Printf("export AGENT_CF_HOME=%s\n", agentHome)
 	if !jsonOutput {
 		fmt.Fprintf(os.Stderr, "agent-init: %s identity for %q\n", action, name)
 		fmt.Fprintf(os.Stderr, "  agent home: %s\n", agentHome)
 		fmt.Fprintf(os.Stderr, "  pubkey:     %s\n", agentPubKey)
+		fmt.Fprintf(os.Stderr, "  npub:       %s (%s secp256k1)\n", nostrID.Npub(), nostrAction)
 		fmt.Fprintf(os.Stderr, "  exchange:   %s...\n", cfg.ExchangeCampfireID[:16])
 	}
 

@@ -87,11 +87,11 @@ type OperatorHealth struct {
 
 // StatusSnapshot is the full status snapshot returned by collectStatus.
 type StatusSnapshot struct {
-	SchemaVersion   int            `json:"schema_version"`
-	Since           string         `json:"since"`
+	SchemaVersion   int             `json:"schema_version"`
+	Since           string          `json:"since"`
 	WrapperAttempts WrapperAttempts `json:"wrapper_attempts"`
-	Exchange        ExchangeCounts `json:"exchange"`
-	Operator        OperatorHealth `json:"operator"`
+	Exchange        ExchangeCounts  `json:"exchange"`
+	Operator        OperatorHealth  `json:"operator"`
 }
 
 // --------------------------------------------------------------------------
@@ -110,9 +110,10 @@ type StatusSnapshot struct {
 // wrapper to match this struct; this struct must match the wrapper.
 //
 // Wrapper writes: {"ts":"<RFC3339>","pid":<int>,"cmd":"<str>","exit":<int>,
-//                  "tag":"<str>","cf_home":"<str>","cwd":"<str>","caller":<null|"str">}
+//
+//	"tag":"<str>","cf_home":"<str>","cwd":"<str>","caller":<null|"str">}
 type attemptLine struct {
-	TS     string  `json:"ts"`     // RFC3339 timestamp string (e.g. "2026-04-11T12:00:00Z")
+	TS     string  `json:"ts"` // RFC3339 timestamp string (e.g. "2026-04-11T12:00:00Z")
 	PID    int     `json:"pid"`
 	Cmd    string  `json:"cmd"`
 	Exit   int     `json:"exit"`
