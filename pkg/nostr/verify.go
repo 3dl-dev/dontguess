@@ -41,12 +41,14 @@ var operatorSettlePhases = map[string]struct{}{
 	exchange.SettlePhaseStrPutReject: {},
 	exchange.SettlePhaseStrPreview:   {},
 	exchange.SettlePhaseStrDeliver:   {},
-	// D5 (docs/design/relay-transport.md §2.4a): settle(failed) is
-	// operator-authored — emitSettleFailed (engine_settle.go) builds
-	// [TagSettle, TagPhasePrefix+"failed"] via sendOperatorMessage — but was
-	// missing here, so a non-operator could forge a relay-delivered failure
-	// notice a client might trust. Adding it completes the operator-authored
-	// phase map (the audit found this the sole gap).
+	// D5 (docs/design/relay-transport.md §2.4a): settle(failed), if ever
+	// authored, is operator-only — an operator-emitted
+	// [TagSettle, TagPhasePrefix+"failed"] notice — so a non-operator must not
+	// be able to forge a relay-delivered failure notice a client might trust.
+	// This ACL entry stands independently of whether any engine path currently
+	// emits settle(failed) (dontguess-4be removed the settle-complete emitter,
+	// since a post-durable-emit failure is now a loud hard error, not a
+	// settle(failed)-retry). Keep the entry: it guards the message type.
 	exchange.SettlePhaseStrFailed: {},
 }
 

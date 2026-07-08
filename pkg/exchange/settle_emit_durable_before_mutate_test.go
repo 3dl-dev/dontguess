@@ -129,10 +129,62 @@ func TestPerformScripSettlement_EmitsDurableRecordBeforeBalanceMutationFails(t *
 		t.Errorf("emitted scrip-settle reservation_id = %q, want %q", settlePayload.ReservationID, resID)
 	}
 
-	// And the reservation itself must NOT have been left consumed-and-lost:
-	// since the balance mutation failed, creditResidualToSeller restores it
-	// via SaveReservation so the settle can be retried.
-	if _, err := cs.GetReservation(context.Background(), resID); err != nil {
-		t.Errorf("expected reservation %s to be restored after balance-mutation failure, got: %v", resID, err)
+	// And — dontguess-4be — the reservation must NOT be restored. Once the
+	// scrip-settle is durably emitted it is AUTHORITATIVE: applySettle credits
+	// it on every Replay. Restoring the reservation (the old divergent-recovery
+	// behavior) would let the buyer retry and mint a SECOND scrip-settle →
+	// double-credit on rebuild (double-mint). A post-emit AddBudget failure is a
+	// LOUD hard error (asserted above via dispatchErr != nil), and the
+	// reservation stays consumed. GetReservation must therefore return an error.
+	if _, err := cs.GetReservation(context.Background(), resID); err == nil {
+		t.Errorf("reservation %s was restored after a post-durable-emit balance-mutation failure — "+
+			"divergent-recovery regression: a restored reservation lets the buyer retry and emit a "+
+			"second scrip-settle, double-minting on Replay", resID)
+	}
+
+	// The durable log must never hold a contradictory settle(failed) for a
+	// reservation that already has a durable scrip-settle.
+	failedMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		// Filter by the failed-phase tag alone (the store's Tags filter is
+		// OR-semantics — adding TagSettle would also match complete/deliver).
+		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
+	})
+	for _, fm := range failedMsgs {
+		var fp struct {
+			ReservationID string `json:"reservation_id"`
+		}
+		if json.Unmarshal(fm.Payload, &fp) == nil && fp.ReservationID == resID {
+			t.Errorf("durable log holds a contradictory settle(failed) for reservation %s that also has a "+
+				"durable scrip-settle — a settled reservation must never carry a settle(failed)-retry", resID)
+		}
+	}
+
+	// Phase 3 (dontguess-4be, the actual double-mint trigger): the buyer RETRIES
+	// settle(complete) after the failed settlement. Because the reservation was
+	// consumed and NOT restored, and matchToReservation was cleaned up right
+	// after the durable emit, the retry must NOT emit a SECOND scrip-settle. A
+	// second scrip-settle would double-credit seller+operator on Replay.
+	retryPayload, _ := json.Marshal(map[string]any{"phase": "complete"})
+	retryMsg := h.sendMessage(h.buyer, retryPayload,
+		[]string{
+			exchange.TagSettle,
+			exchange.TagPhasePrefix + exchange.SettlePhaseStrComplete,
+		},
+		[]string{deliverMsg.ID},
+	)
+	retryRec, err := h.st.GetMessage(retryMsg.ID)
+	if err != nil {
+		t.Fatalf("GetMessage(retry): %v", err)
+	}
+	// The retry dispatch is a no-op settlement (reservation gone / mapping
+	// cleaned): it returns nil, not an error.
+	if derr := eng2.DispatchForTest(exchange.FromStoreRecord(retryRec)); derr != nil {
+		t.Logf("retry dispatch returned: %v (acceptable — settlement is a no-op)", derr)
+	}
+	afterRetry, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	if len(afterRetry) != len(postScripSettle) {
+		t.Fatalf("buyer retry after a post-emit failure emitted a SECOND scrip-settle: count %d → %d — "+
+			"double-mint (reservation must stay consumed and matchToReservation cleaned so retry is a no-op)",
+			len(postScripSettle), len(afterRetry))
 	}
 }

@@ -1,14 +1,20 @@
 package exchange_test
 
-// TestSettle_AddBudgetFailure_EmitsSettleFailed verifies that when
-// ScripStore.AddBudget returns an error during settle(complete), the engine
-// emits a settle(failed) campfire message to the buyer and does NOT silently
-// succeed (dontguess-234).
+// TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed
+// verifies the post-durable-emit invariant (dontguess-4be, relay-transport.md
+// §E). performScripSettlement emits the authoritative scrip-settle BEFORE it
+// credits the seller. Once that durable record lands, a subsequent AddBudget
+// (seller credit) failure MUST be a LOUD hard error that:
+//   - does NOT restore the reservation (a restored reservation lets the buyer
+//     retry and emit a SECOND scrip-settle → Replay double-mint), and
+//   - does NOT emit settle(failed) (the durable log must never hold a
+//     contradictory settled + settle(failed) for one reservation).
 //
-// Without this fix, a failed AddBudget was logged and ignored: the buyer
-// received no observable signal that the settle did not complete. With the
-// fix, a settle(failed) message with an error_code field is emitted so the
-// buyer can observe the failure and retry.
+// This supersedes the old dontguess-234 behavior (emit settle(failed) + restore
+// on AddBudget failure), which was correct only under the pre-4127 mutate-then-
+// emit ordering. Now the scrip-settle is durable first, so the settle is
+// authoritative and the missing live credit is reconciled from the log on the
+// next Replay — never retried.
 //
 // Test strategy:
 //  1. Build a full settle chain (put → accept → buy → match → buyer-accept →
@@ -16,8 +22,8 @@ package exchange_test
 //  2. Wire a second engine with a failingAddBudgetStore that wraps the real
 //     CampfireScripStore for ConsumeReservation but injects errors on AddBudget.
 //  3. Replay all state into the second engine, then dispatch settle(complete).
-//  4. Assert: a settle(failed) message with TagPhasePrefix+"failed" is emitted
-//     to the campfire. Buyer key and reservation_id must appear in its payload.
+//  4. Assert: dispatch returns a loud error; exactly one durable scrip-settle
+//     is recorded; NO settle(failed) is emitted; the reservation is NOT restored.
 
 import (
 	"context"
@@ -67,8 +73,8 @@ func (s *failingAddBudgetStore) ConsumeReservation(ctx context.Context, id strin
 	return s.real.ConsumeReservation(ctx, id)
 }
 
-// TestSettle_AddBudgetFailure_EmitsSettleFailed is the main test.
-func TestSettle_AddBudgetFailure_EmitsSettleFailed(t *testing.T) {
+// TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed is the main test.
+func TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed(t *testing.T) {
 	t.Parallel()
 
 	h := newTestHarness(t)
@@ -130,10 +136,18 @@ func TestSettle_AddBudgetFailure_EmitsSettleFailed(t *testing.T) {
 		}
 	}
 
-	// Send and dispatch settle(complete) via eng2.
-	completePre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
-		Tags: []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
+	// Send and dispatch settle(complete) via eng2. Snapshot both the
+	// settle(failed) count (must not grow) and the durable scrip-settle count
+	// (must grow by exactly one — the authoritative record emitted BEFORE the
+	// doomed AddBudget).
+	failedPre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		// Filter by the failed-phase tag ALONE. The store's Tags filter is
+		// OR-semantics, so listing TagSettle too would also match the
+		// settle(complete)/deliver/etc. messages and inflate the count. Only
+		// settle(failed) messages carry this phase tag.
+		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
 	})
+	settlePre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 
 	completePayload, _ := json.Marshal(map[string]any{
 		"phase": "complete",
@@ -151,49 +165,42 @@ func TestSettle_AddBudgetFailure_EmitsSettleFailed(t *testing.T) {
 		t.Fatalf("GetMessage: %v", err)
 	}
 
-	// Dispatch should return an error (AddBudget failed).
+	// Dispatch must return a LOUD hard error (post-emit AddBudget failed).
 	dispatchErr := eng2.DispatchForTest(exchange.FromStoreRecord(rec))
 	if dispatchErr == nil {
-		t.Fatal("expected DispatchForTest to return error when AddBudget fails, got nil")
+		t.Fatal("expected DispatchForTest to return a loud error when post-emit AddBudget fails, got nil")
 	}
 
-	// A settle(failed) message must have been emitted.
-	deadline := time.Now().Add(5 * time.Second)
-	var failedMsg *store.MessageRecord
-	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
-			Tags: []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
-		})
-		if len(msgs) > len(completePre) {
-			last := msgs[len(msgs)-1]
-			failedMsg = &last
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	// The authoritative scrip-settle must have been durably emitted exactly once
+	// (before the failing credit) — Replay will reconcile the missing live credit.
+	settlePost, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	if len(settlePost) != len(settlePre)+1 {
+		t.Fatalf("durable scrip-settle count = %d, want %d (exactly one authoritative record emitted before the failing credit)",
+			len(settlePost), len(settlePre)+1)
 	}
 
-	if failedMsg == nil {
-		t.Fatal("no settle(failed) message emitted after AddBudget failure — buyer has no observable signal")
+	// NO settle(failed) may be emitted — the durable log must never hold a
+	// contradictory settled + settle(failed)-retry for one reservation. Give any
+	// (erroneously) emitted settle(failed) time to appear before asserting absence.
+	time.Sleep(200 * time.Millisecond)
+	failedPost, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		// Filter by the failed-phase tag ALONE. The store's Tags filter is
+		// OR-semantics, so listing TagSettle too would also match the
+		// settle(complete)/deliver/etc. messages and inflate the count. Only
+		// settle(failed) messages carry this phase tag.
+		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
+	})
+	if len(failedPost) != len(failedPre) {
+		t.Errorf("settle(failed) count = %d, want %d — a post-durable-emit AddBudget failure must NOT emit "+
+			"settle(failed) (would contradict the durable scrip-settle and let the buyer retry → double-mint)",
+			len(failedPost), len(failedPre))
 	}
 
-	// The payload must include an error_code and the buyer key.
-	var payload map[string]any
-	if err := json.Unmarshal(failedMsg.Payload, &payload); err != nil {
-		t.Fatalf("settle(failed) payload is not valid JSON: %v", err)
-	}
-
-	if payload["error_code"] == nil || payload["error_code"] == "" {
-		t.Errorf("settle(failed) payload missing error_code: %v", payload)
-	}
-
-	buyerField, _ := payload["buyer"].(string)
-	if buyerField != h.buyer.PublicKeyHex() {
-		t.Errorf("settle(failed) payload buyer = %q, want %q", buyerField, h.buyer.PublicKeyHex())
-	}
-
-	resIDField, _ := payload["reservation_id"].(string)
-	if resIDField != resID {
-		t.Errorf("settle(failed) payload reservation_id = %q, want %q", resIDField, resID)
+	// The reservation must NOT be restored — it is settled and gone. A restored
+	// reservation is the divergent-recovery regression that enables double-mint.
+	if _, err := cs.GetReservation(context.Background(), resID); err == nil {
+		t.Errorf("reservation %s was restored after a post-durable-emit AddBudget failure — "+
+			"divergent-recovery regression (enables retry → double-mint)", resID)
 	}
 }
 
@@ -202,9 +209,9 @@ func TestSettle_AddBudgetFailure_EmitsSettleFailed(t *testing.T) {
 // (operator revenue). DecrementBudget always delegates to the real store so the
 // seller-credit rollback path can execute normally.
 type sellerOkOperatorFailStore struct {
-	real         scrip.SpendingStore
-	addBudgetN   atomic.Int32 // counts AddBudget calls
-	operatorErr  error
+	real        scrip.SpendingStore
+	addBudgetN  atomic.Int32 // counts AddBudget calls
+	operatorErr error
 }
 
 func (s *sellerOkOperatorFailStore) AddBudget(ctx context.Context, pk, rk string, amount int64, etag string) (int64, string, error) {
@@ -241,15 +248,25 @@ func (s *sellerOkOperatorFailStore) ConsumeReservation(ctx context.Context, id s
 	return s.real.ConsumeReservation(ctx, id)
 }
 
-// TestSettle_OperatorAddBudgetFailure_RollsBackSellerCredit verifies that when
-// AddBudget succeeds for the seller but fails for the operator, the engine:
-//  1. Rolls back the seller credit via DecrementBudget.
-//  2. Restores the reservation so the settle can be retried.
-//  3. Emits settle(failed) so the buyer has an observable signal.
+// TestSettle_OperatorAddBudgetFailureAfterDurableEmit_NoRollbackNoRestore
+// verifies the post-durable-emit invariant (dontguess-4be) for a partial-credit
+// failure: seller AddBudget succeeds, operator AddBudget fails. Because the
+// authoritative scrip-settle was durably emitted FIRST and applySettle re-credits
+// BOTH residual (seller) and revenue (operator) from that one record on every
+// Replay, the engine must NOT try to "undo" the partial live credit. Specifically
+// it must:
+//  1. NOT roll back the seller credit (Replay re-adds it; a live rollback just
+//     diverges live state further from the authoritative log).
+//  2. NOT restore the reservation (a restored reservation → retry → second
+//     scrip-settle → double-mint).
+//  3. NOT emit settle(failed) (no contradictory settled + settle(failed)).
 //
-// Without the fix in engine.go, the seller would retain unearned scrip and the
-// reservation would be gone, leaving scrip state permanently inconsistent.
-func TestSettle_OperatorAddBudgetFailure_RollsBackSellerCredit(t *testing.T) {
+// The operator's missing live credit is reconciled from the durable log on the
+// next Replay. The failure surfaces as a loud dispatch error.
+//
+// This inverts the old dontguess-234 rollback behavior, which was correct only
+// under the pre-4127 mutate-then-emit ordering.
+func TestSettle_OperatorAddBudgetFailureAfterDurableEmit_NoRollbackNoRestore(t *testing.T) {
 	t.Parallel()
 
 	h := newTestHarness(t)
@@ -308,9 +325,14 @@ func TestSettle_OperatorAddBudgetFailure_RollsBackSellerCredit(t *testing.T) {
 		}
 	}
 
-	completePre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
-		Tags: []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
+	failedPre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		// Filter by the failed-phase tag ALONE. The store's Tags filter is
+		// OR-semantics, so listing TagSettle too would also match the
+		// settle(complete)/deliver/etc. messages and inflate the count. Only
+		// settle(failed) messages carry this phase tag.
+		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
 	})
+	settlePre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 
 	completePayload, _ := json.Marshal(map[string]any{"phase": "complete"})
 	completeMsg := h.sendMessage(h.buyer, completePayload,
@@ -328,40 +350,47 @@ func TestSettle_OperatorAddBudgetFailure_RollsBackSellerCredit(t *testing.T) {
 
 	dispatchErr := eng2.DispatchForTest(exchange.FromStoreRecord(rec))
 	if dispatchErr == nil {
-		t.Fatal("expected DispatchForTest to return error when operator AddBudget fails, got nil")
+		t.Fatal("expected DispatchForTest to return a loud error when operator AddBudget fails, got nil")
 	}
 
-	// A settle(failed) message must have been emitted.
-	deadline := time.Now().Add(5 * time.Second)
-	var failedMsg *store.MessageRecord
-	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
-			Tags: []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
-		})
-		if len(msgs) > len(completePre) {
-			last := msgs[len(msgs)-1]
-			failedMsg = &last
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if failedMsg == nil {
-		t.Fatal("no settle(failed) message emitted after operator AddBudget failure")
+	// The authoritative scrip-settle must be durably emitted exactly once.
+	settlePost, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	if len(settlePost) != len(settlePre)+1 {
+		t.Fatalf("durable scrip-settle count = %d, want %d (exactly one authoritative record)",
+			len(settlePost), len(settlePre)+1)
 	}
 
-	// Seller balance must NOT be increased — credit must be rolled back.
+	// NO settle(failed) may be emitted (no contradictory settled + settle(failed)).
+	time.Sleep(200 * time.Millisecond)
+	failedPost, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		// Filter by the failed-phase tag ALONE. The store's Tags filter is
+		// OR-semantics, so listing TagSettle too would also match the
+		// settle(complete)/deliver/etc. messages and inflate the count. Only
+		// settle(failed) messages carry this phase tag.
+		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
+	})
+	if len(failedPost) != len(failedPre) {
+		t.Errorf("settle(failed) count = %d, want %d — a post-durable-emit failure must NOT emit settle(failed)",
+			len(failedPost), len(failedPre))
+	}
+
+	// Seller balance must be INCREASED (credited, NOT rolled back). The durable
+	// scrip-settle is authoritative and Replay re-credits the seller; a live
+	// rollback would fight the log. A restored/rolled-back state is the
+	// divergent-recovery regression.
 	sellerBalAfter, _, err := cs.GetBudget(context.Background(), h.seller.PublicKeyHex(), scrip.BalanceKey)
 	if err != nil {
 		t.Fatalf("GetBudget(seller) after settle: %v", err)
 	}
-	if sellerBalAfter != sellerBalBefore {
-		t.Errorf("seller balance changed: before=%d after=%d — unearned credit not rolled back",
+	if sellerBalAfter <= sellerBalBefore {
+		t.Errorf("seller balance not credited: before=%d after=%d — a post-durable-emit operator failure must "+
+			"NOT roll back the already-applied seller credit (Replay reconciles from the authoritative log)",
 			sellerBalBefore, sellerBalAfter)
 	}
 
-	// The reservation must be restored (retryable).
-	_, resErr := cs.GetReservation(context.Background(), resID)
-	if resErr != nil {
-		t.Errorf("reservation %s not restored after operator AddBudget failure: %v", resID, resErr)
+	// The reservation must NOT be restored — it is settled and gone.
+	if _, resErr := cs.GetReservation(context.Background(), resID); resErr == nil {
+		t.Errorf("reservation %s was restored after operator AddBudget failure — divergent-recovery regression "+
+			"(enables retry → double-mint)", resID)
 	}
 }

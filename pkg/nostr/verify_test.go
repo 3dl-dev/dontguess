@@ -134,10 +134,11 @@ func TestVerifyOperatorAuthorship_RejectsForgedOperatorKind(t *testing.T) {
 }
 
 // TestVerifyOperatorAuthorship_SettleFailedIsOperatorOnly is the D5 regression:
-// settle(failed) is operator-authored (emitSettleFailed builds it via
-// sendOperatorMessage) but was MISSING from operatorSettlePhases, so a non-operator
-// could forge a relay-delivered failure notice a client might trust. It must now
-// be gated: attacker-signed settle(failed) -> ErrForgedOperatorEvent, and a
+// settle(failed), if authored, is operator-only, but was MISSING from
+// operatorSettlePhases, so a non-operator could forge a relay-delivered failure
+// notice a client might trust. It must be gated regardless of whether any engine
+// path currently emits settle(failed) (dontguess-4be removed the settle-complete
+// emitter): attacker-signed settle(failed) -> ErrForgedOperatorEvent, and a
 // genuine operator-signed settle(failed) passes.
 func TestVerifyOperatorAuthorship_SettleFailedIsOperatorOnly(t *testing.T) {
 	op, err := identity.Generate()

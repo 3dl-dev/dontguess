@@ -250,6 +250,23 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 		}
 		return fmt.Errorf("scrip: settle: emit scrip-settle: %w", emitErr)
 	}
+	// PAST THE POINT OF NO RETURN (relay-transport.md §E, dontguess-4be): the
+	// scrip-settle is now durably recorded and is AUTHORITATIVE. applySettle
+	// credits residual→seller and revenue→operator on EVERY replay of this
+	// message (deduped only by message ID), so a cold rebuild reconstructs the
+	// full settlement from this one record regardless of what the live balance
+	// mutations below do. Consequences that the code below MUST honor:
+	//   - The reservation is settled and GONE. Clean up the engine-side mapping
+	//     NOW, unconditionally, so cleanup is consistent whether or not the
+	//     live credits succeed — no retry may re-enter settlement for this match.
+	//   - A subsequent live-balance mutation failure must NOT restore the
+	//     reservation and must NOT emit settle(failed)-retry. Either would
+	//     contradict the durable settle: on the buyer's retry a SECOND
+	//     scrip-settle would be emitted and Replay would double-credit
+	//     (double-mint). Such a failure is a LOUD hard error; the missing live
+	//     credit is reconciled from the durable log on the next Replay.
+	delete(e.matchToReservation, matchMsgID)
+
 	if len(burnPayload) > 0 {
 		if _, emitErr := e.sendOperatorMessage(burnPayload,
 			[]string{scrip.TagScripBurn}, []string{msg.ID}); emitErr != nil {
@@ -257,18 +274,17 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 		}
 	}
 
-	// Credit residual to seller.
-	if err := e.creditResidualToSeller(ctx, msg, sellerKey, reservationID, residual, res); err != nil {
+	// Credit residual to seller. Post-durable-emit: failure is a loud hard
+	// error, never a restore/retry (see block above).
+	if err := e.creditResidualToSeller(ctx, sellerKey, reservationID, residual); err != nil {
 		return err
 	}
 
-	// Credit exchange revenue to operator.
-	if err := e.creditRevenueToOperator(ctx, msg, operatorKey, sellerKey, reservationID, residual, exchangeRevenue, res); err != nil {
+	// Credit exchange revenue to operator. Post-durable-emit: failure is a loud
+	// hard error, never a restore/retry (see block above).
+	if err := e.creditRevenueToOperator(ctx, operatorKey, reservationID, exchangeRevenue); err != nil {
 		return err
 	}
-
-	// Clean up engine-side mapping now that the reservation is consumed.
-	delete(e.matchToReservation, matchMsgID)
 
 	e.opts.log("engine: settle: reservation=%s seller=%s price=%d residual=%d fee_burned=%d exchange=%d",
 		shortKey(reservationID), shortKey(sellerKey), price, residual, fee, exchangeRevenue)
@@ -334,75 +350,49 @@ func (e *Engine) marshalSettlePayloads(msg *Message, sellerKey, reservationID st
 	return settlePayload, burnPayload, nil
 }
 
-// creditResidualToSeller credits residual scrip to the seller. On failure,
-// restores the reservation and emits settle-failed.
-func (e *Engine) creditResidualToSeller(ctx context.Context, msg *Message, sellerKey, reservationID string, residual int64, res scrip.Reservation) error {
+// creditResidualToSeller credits residual scrip to the seller.
+//
+// This runs AFTER the authoritative scrip-settle record is durably emitted
+// (see performScripSettlement, relay-transport.md §E). It is therefore a
+// best-effort live-state update: applySettle re-credits this residual on every
+// Replay of the durable record. A failure here must NOT restore the reservation
+// and must NOT emit settle(failed) — either would contradict the durable settle
+// and, on the buyer's retry, mint a SECOND scrip-settle (double-mint). A failure
+// is surfaced as a LOUD hard error; the credit is reconciled from the log on the
+// next Replay.
+func (e *Engine) creditResidualToSeller(ctx context.Context, sellerKey, reservationID string, residual int64) error {
 	if residual <= 0 {
 		return nil
 	}
 	if _, _, err := e.opts.ScripStore.AddBudget(ctx, sellerKey, scrip.BalanceKey, residual, ""); err != nil {
-		e.opts.log("engine: settle: add residual to seller %s: %v", shortKey(sellerKey), err)
-		if restoreErr := e.opts.ScripStore.SaveReservation(ctx, res); restoreErr != nil {
-			e.opts.log("engine: settle: CRITICAL: failed to restore reservation %s after AddBudget(seller) failure: %v",
-				shortKey(reservationID), restoreErr)
-		}
-		e.emitSettleFailed(msg, reservationID, fmt.Sprintf("add-residual: %v", err))
-		return fmt.Errorf("scrip: settle: AddBudget(seller %s): %w", shortKey(sellerKey), err)
+		e.opts.log("engine: settle: CRITICAL: AddBudget(seller %s) FAILED after durable scrip-settle emit for reservation %s: %v — durable record is authoritative; NOT restoring reservation, NOT emitting settle(failed); live credit deferred to next Replay",
+			shortKey(sellerKey), shortKey(reservationID), err)
+		return fmt.Errorf("scrip: settle: AddBudget(seller %s) after durable emit (reservation %s settled in log, reconciled on Replay): %w",
+			shortKey(sellerKey), shortKey(reservationID), err)
 	}
 	return nil
 }
 
-// creditRevenueToOperator credits exchange revenue to the operator. On failure,
-// rolls back the seller credit, restores the reservation, and emits settle-failed.
-func (e *Engine) creditRevenueToOperator(ctx context.Context, msg *Message, operatorKey, sellerKey, reservationID string, residual, exchangeRevenue int64, res scrip.Reservation) error {
+// creditRevenueToOperator credits exchange revenue to the operator.
+//
+// Like creditResidualToSeller, this runs AFTER the authoritative scrip-settle is
+// durably emitted. applySettle re-credits both residual (seller) and revenue
+// (operator) from that one durable record on every Replay, so a failure here is
+// NOT rolled back against the seller credit and does NOT restore the reservation
+// or emit settle(failed): doing so would fight the durable settle and double-mint
+// on retry. A failure is a LOUD hard error; the operator credit is reconciled
+// from the log on the next Replay.
+func (e *Engine) creditRevenueToOperator(ctx context.Context, operatorKey, reservationID string, exchangeRevenue int64) error {
 	if exchangeRevenue <= 0 {
 		return nil
 	}
 	if _, _, err := e.opts.ScripStore.AddBudget(ctx, operatorKey, scrip.BalanceKey, exchangeRevenue, ""); err != nil {
-		e.opts.log("engine: settle: add exchange revenue to operator: %v", err)
-		// Roll back seller credit.
-		if residual > 0 {
-			if _, etag, getErr := e.opts.ScripStore.GetBudget(ctx, sellerKey, scrip.BalanceKey); getErr != nil {
-				e.opts.log("engine: settle: CRITICAL: failed to get seller etag for rollback of %s: %v",
-					shortKey(sellerKey), getErr)
-			} else if _, _, decrErr := e.opts.ScripStore.DecrementBudget(ctx, sellerKey, scrip.BalanceKey, residual, etag); decrErr != nil {
-				e.opts.log("engine: settle: CRITICAL: failed to roll back seller credit for %s after operator AddBudget failure: %v",
-					shortKey(sellerKey), decrErr)
-			}
-		}
-		if restoreErr := e.opts.ScripStore.SaveReservation(ctx, res); restoreErr != nil {
-			e.opts.log("engine: settle: CRITICAL: failed to restore reservation %s after operator AddBudget failure: %v",
-				shortKey(reservationID), restoreErr)
-		}
-		e.emitSettleFailed(msg, reservationID, fmt.Sprintf("add-exchange-revenue: %v", err))
-		return fmt.Errorf("scrip: settle: AddBudget(operator): %w", err)
+		e.opts.log("engine: settle: CRITICAL: AddBudget(operator) FAILED after durable scrip-settle emit for reservation %s: %v — durable record is authoritative; NOT rolling back seller credit, NOT restoring reservation, NOT emitting settle(failed); live credit deferred to next Replay",
+			shortKey(reservationID), err)
+		return fmt.Errorf("scrip: settle: AddBudget(operator) after durable emit (reservation %s settled in log, reconciled on Replay): %w",
+			shortKey(reservationID), err)
 	}
 	return nil
-}
-
-// emitSettleFailed sends a settle(failed) message to the buyer so they receive
-// an observable signal when the settle(complete) flow cannot complete. The buyer
-// key is taken from msg.Sender (settle(complete) is always sent by the buyer).
-// A best-effort emit: failures are logged but not propagated to the caller.
-func (e *Engine) emitSettleFailed(completeMsg *Message, reservationID, errorCode string) {
-	payload, err := e.marshal(map[string]any{
-		"phase":          SettlePhaseStrFailed,
-		"error_code":     errorCode,
-		"reservation_id": reservationID,
-		"buyer":          completeMsg.Sender,
-		"guide":          "Settlement failed. Your scrip reservation has been released — no charge. Common causes: content hash mismatch (entry was updated), reservation expired (5-minute window), or scrip ledger unavailable. You may retry the purchase by sending a new buy request.",
-	})
-	if err != nil {
-		e.opts.log("engine: settle-failed: marshal: %v", err)
-		return
-	}
-	tags := []string{
-		TagSettle,
-		TagPhasePrefix + SettlePhaseStrFailed,
-	}
-	if _, emitErr := e.sendOperatorMessage(payload, tags, []string{completeMsg.ID}); emitErr != nil {
-		e.opts.log("engine: settle-failed: emit: %v", emitErr)
-	}
 }
 
 // emitConsumeSignal records a buyer consume/accept behavioral signal when a
