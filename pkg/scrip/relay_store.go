@@ -11,6 +11,7 @@ import (
 	"github.com/campfire-net/campfire/cf-protocol/protocol"
 
 	"github.com/campfire-net/dontguess/pkg/proto"
+	dgstore "github.com/campfire-net/dontguess/pkg/store"
 )
 
 // scrip operation tag constants. These match the convention spec in
@@ -39,23 +40,48 @@ func (e *balanceEntry) etag() string {
 	return fmt.Sprintf("%d", e.gen)
 }
 
-// CampfireScripStore implements SpendingStore backed by a campfire message log.
+// CampfireScripStore implements SpendingStore backed by a scrip operation
+// message log. The transport that supplies that log is pluggable:
 //
-// State is derived by replaying all scrip operation messages in sequence order.
-// The in-memory balance map is a materialized view; it can always be rebuilt from
-// the message log. ETags are monotonic generation counters that increment on every
-// balance mutation.
+//   - NewCampfireScripStore reads from a live campfire (client + campfireID) —
+//     the original transport.
+//   - NewLocalScripStore reads from a campfire-free local event log
+//     (pkg/store, dgstore.Store) — the relay/local transport swap for the
+//     nostr-first migration (dontguess-203). This is the same record shape
+//     (dgstore.Record -> proto.Message) the exchange engine already replays
+//     from a campfire store (dontguess-275), so applyMessage cannot tell the
+//     difference between a message that arrived via campfire's
+//     FromSDKMessages and one that arrived via dgstore.Store.Replay.
 //
-// Reservations are stored in memory. They are ephemeral — the campfire log
+// Whichever transport supplies it, state is derived by replaying all scrip
+// operation messages in sequence order. The in-memory balance map is a
+// materialized view; it can always be rebuilt from the message log. ETags are
+// monotonic generation counters that increment on every balance mutation —
+// this scheme is transport-independent: it depends only on there being a
+// single deterministic replay order per domain, which both transports supply
+// (a campfire's message log order, or a local store's single-writer append
+// order).
+//
+// Reservations are stored in memory. They are ephemeral — the message log
 // contains the authoritative record of scrip movements (buy-hold messages are
-// written to the campfire before a reservation is created here). On restart,
-// any in-flight reservations that were not settled become stale; the escrow
+// written to the log before a reservation is created here). On restart, any
+// in-flight reservations that were not settled become stale; the escrow
 // timeout mechanism (external) handles automatic refund.
 //
 // CampfireScripStore is safe for concurrent use.
 type CampfireScripStore struct {
 	campfireID string
 	client     *protocol.Client
+
+	// localStore, when non-nil, is the campfire-free relay/local transport
+	// (dontguess-203): Replay reads from localStore.Replay() instead of
+	// issuing a campfire client.Read(). Set via NewLocalScripStore. Mutually
+	// exclusive with client/campfireID in practice (a store is constructed
+	// with exactly one transport), but Replay only inspects localStore, so
+	// having both set is harmless — localStore simply takes priority, mirroring
+	// the exchange engine's LocalStore-takes-priority-for-ingest convention
+	// (EngineOptions.LocalStore doc, pkg/exchange/engine_core.go).
+	localStore *dgstore.Store
 
 	// OperatorKey is the public key hex of the exchange operator. When non-empty,
 	// scrip operation messages from any other sender are rejected. An empty string
@@ -125,9 +151,42 @@ func NewCampfireScripStore(campfireID string, client *protocol.Client, operatorK
 	return s, nil
 }
 
-// Replay rebuilds balance state from the campfire message log.
+// NewLocalScripStore creates a CampfireScripStore backed by the campfire-free
+// relay/local event log (pkg/store) instead of a live campfire, and replays
+// it to build initial balance state.
+//
+// This is the relay/local transport swap for the nostr-first migration
+// (dontguess-203): SpendingStore's signature, ETag optimistic locking, and
+// atomic ConsumeReservation are byte-for-byte identical to the
+// NewCampfireScripStore path — only the message source changes (localStore
+// instead of a campfire client.Read()). operatorKey is the public key hex of
+// the exchange operator; only messages from this sender are accepted for
+// scrip operations, exactly as in the campfire path. Pass an empty string to
+// disable the check (backwards compat for tests).
+func NewLocalScripStore(localStore *dgstore.Store, operatorKey string) (*CampfireScripStore, error) {
+	s := &CampfireScripStore{
+		localStore:      localStore,
+		OperatorKey:     operatorKey,
+		balances:        make(map[string]*balanceEntry),
+		reservations:    make(map[string]Reservation),
+		loans:           make(map[string]*LoanRecord),
+		loansByBorrower: make(map[string][]string),
+	}
+	if err := s.Replay(); err != nil {
+		return nil, fmt.Errorf("scrip store: replay: %w", err)
+	}
+	return s, nil
+}
+
+// Replay rebuilds balance state from the scrip operation message log.
 // It resets all balances and re-derives them from scratch.
 // Called on construction; can be called again to resync.
+//
+// The message source depends on which transport the store was constructed
+// with: localStore (dontguess-203, relay/local) takes priority when set,
+// mirroring the exchange engine's LocalStore-takes-priority-for-ingest
+// convention; otherwise Replay falls back to the original campfire
+// client.Read() path. Both sources feed the exact same applyMessage fold.
 //
 // Replay holds replayMu exclusively for the entire operation so that no
 // concurrent ApplyMessage can observe the window between map reset and
@@ -136,14 +195,28 @@ func (s *CampfireScripStore) Replay() error {
 	s.replayMu.Lock()
 	defer s.replayMu.Unlock()
 
-	result, err := s.client.Read(protocol.ReadRequest{
-		CampfireID:       s.campfireID,
-		AfterTimestamp:   0,
-		SkipSync:         true,
-		IncludeCompacted: true,
-	})
-	if err != nil {
-		return fmt.Errorf("listing messages: %w", err)
+	var msgs []proto.Message
+	if s.localStore != nil {
+		// Relay/local transport (dontguess-203): dgstore.Store.Replay already
+		// returns []proto.Message in append (fold) order — no SDK boundary
+		// conversion needed, unlike the campfire path below.
+		m, err := s.localStore.Replay()
+		if err != nil {
+			return fmt.Errorf("listing messages: %w", err)
+		}
+		msgs = m
+	} else {
+		result, err := s.client.Read(protocol.ReadRequest{
+			CampfireID:       s.campfireID,
+			AfterTimestamp:   0,
+			SkipSync:         true,
+			IncludeCompacted: true,
+		})
+		if err != nil {
+			return fmt.Errorf("listing messages: %w", err)
+		}
+		// Convert at the cf boundary before replaying into internal state.
+		msgs = proto.FromSDKMessages(result.Messages)
 	}
 
 	// Reset state.
@@ -161,8 +234,6 @@ func (s *CampfireScripStore) Replay() error {
 	s.totalBurned.Store(0)
 	s.totalLoanPrincipal.Store(0)
 
-	// Convert at the cf boundary before replaying into internal state.
-	msgs := proto.FromSDKMessages(result.Messages)
 	s.replaying.Store(true)
 	for i := range msgs {
 		s.applyMessage(&msgs[i])
