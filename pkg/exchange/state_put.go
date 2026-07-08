@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+
+	"github.com/campfire-net/dontguess/pkg/scrip"
 )
 
 // validCompressionTiers is the set of accepted compression_tier values.
@@ -18,14 +20,33 @@ var validCompressionTiers = map[string]struct{}{
 
 // isExchangeOpTag reports whether a tag is a first-class exchange operation
 // constant — the canonical vocabulary that selects a fold/dispatch handler.
-// Secondary markers (exchange:buy-miss, exchange:consume, exchange:synthetic),
-// phase/domain/verdict tags, and scrip ops are deliberately NOT in this set:
-// they never select the executed op.
+// Secondary markers (exchange:buy-miss, exchange:consume, exchange:synthetic)
+// and phase/domain/verdict tags are deliberately NOT in this set: they never
+// select the executed op.
+//
+// Scrip ops (dontguess:scrip-*) ARE included (dontguess-e15, wave-7 security
+// review of dontguess-c22). A scrip-kind (Kind=3411) message's own canonical op
+// (e.g. dontguess:scrip-mint) does not itself dispatch a fold handler through
+// this switch (applyLocked's default branch scans for the few scrip tags it
+// actually indexes, e.g. TagScripBuyHold) — but it MUST still count as a
+// canonical op member for the ambiguity check below. Excluding scrip ops from
+// this set made a scrip-kind event carrying a smuggled
+// ["x","exchange:assign-auction-close"] tag resolve as a single, unambiguous
+// op (the smuggled tag was the only isExchangeOpTag member found), so the
+// multi-op fail-loud never triggered and the smuggled assign-auction-close op
+// executed cleanly. Counting scrip ops here means any additional distinct
+// canonical op tag on a scrip-kind event — smuggled or not — trips the
+// ambiguity check and exchangeOp fails loud, matching the invariant documented
+// on exchangeOp below: an ["x","exchange:*"] op-collision must be inert for
+// every event kind, not just put/buy/match/settle/assign*.
 func isExchangeOpTag(t string) bool {
 	switch t {
 	case TagPut, TagBuy, TagMatch, TagSettle,
 		TagAssign, TagAssignClaim, TagAssignComplete, TagAssignAccept, TagAssignReject,
-		TagAssignExpire, TagAssignAuctionClose:
+		TagAssignExpire, TagAssignAuctionClose,
+		scrip.TagScripMint, scrip.TagScripBurn, scrip.TagScripPutPay, scrip.TagScripBuyHold,
+		scrip.TagScripSettle, scrip.TagScripAssignPay, scrip.TagScripDisputeRefund,
+		scrip.TagScripLoanMint, scrip.TagScripLoanRepay, scrip.TagScripLoanVigAccrue:
 		return true
 	}
 	return false
