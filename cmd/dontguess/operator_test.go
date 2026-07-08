@@ -997,4 +997,3 @@ func TestOperatorCLI_SocketPath(t *testing.T) {
 		}
 	})
 }
-
