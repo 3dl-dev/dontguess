@@ -485,19 +485,52 @@ func (s *State) applyPut(msg *Message) {
 	if _, exists := s.contentHashIndex[contentHash]; exists {
 		return
 	}
+	contentType := stripTagPrefix(payload.ContentType, "exchange:content-type:")
+
+	// Blossom offload (dontguess-7783): oversize content must never be inlined
+	// in the replicated entry / message log. When a blob store is configured
+	// and the decoded content exceeds BlossomOffloadThreshold, upload the full
+	// bytes to the blob store and keep only a precomputed inline preview slice
+	// (15-25% of content, content-type-aware chunked — same algorithm used for
+	// the buyer-facing preview) plus the pointer. The full-fidelity deliver
+	// path fetches-and-verifies against contentHash (see FetchAndVerifyBlob).
+	//
+	// If no blob store is configured, or content is at/below the threshold,
+	// behavior is unchanged from before this change: full bytes stored inline.
+	entryContent := contentBytes
+	blobPointer := ""
+	if s.blobStore != nil && len(contentBytes) > BlossomOffloadThreshold {
+		previewBytes, err := buildInlinePreviewBytes(contentBytes, contentType, msg.ID)
+		if err != nil {
+			// Cannot produce a safe inline preview — drop the put rather than
+			// inline the oversize content as a fallback (hard constraint: never
+			// inline oversize content on the relay).
+			return
+		}
+		pointer, err := s.blobStore.Put(contentBytes)
+		if err != nil {
+			// Upload failed — drop the put. Do not fall back to inlining, and
+			// do not register the content hash, so the seller may retry.
+			return
+		}
+		entryContent = previewBytes
+		blobPointer = pointer
+	}
+
 	entry := &InventoryEntry{
 		EntryID:         msg.ID,
 		PutMsgID:        msg.ID,
 		SellerKey:       msg.Sender,
 		Description:     payload.Description,
 		ContentHash:     contentHash,
-		ContentType:     stripTagPrefix(payload.ContentType, "exchange:content-type:"),
+		ContentType:     contentType,
 		Domains:         stripDomainPrefixes(payload.Domains),
 		TokenCost:       payload.TokenCost,
 		ContentSize:     int64(len(contentBytes)),
 		PutTimestamp:    msg.Timestamp,
 		CompressionTier: tier,
-		Content:         contentBytes,
+		Content:         entryContent,
+		BlobPointer:     blobPointer,
 	}
 	s.pendingPuts[msg.ID] = entry
 	s.putToEntry[msg.ID] = msg.ID
@@ -506,6 +539,28 @@ func (s *State) applyPut(msg *Message) {
 	// is accepted into inventory (the inventory entry retains the same hash).
 	// Not removed on reject — prevents immediate re-put of identical rejected content.
 	s.contentHashIndex[contentHash] = struct{}{}
+}
+
+// buildInlinePreviewBytes computes the buyer-facing preview chunks for content
+// (same algorithm PreviewAssembler uses at settle(preview) time) and
+// concatenates them into a single inline byte slice. Used at put time to
+// derive the inline preview that stays with the entry when the full content
+// is offloaded to Blossom (dontguess-7783).
+func buildInlinePreviewBytes(content []byte, contentType, entryID string) ([]byte, error) {
+	pa := &PreviewAssembler{}
+	result, err := pa.Assemble(PreviewRequest{
+		Content:     content,
+		ContentType: contentType,
+		EntryID:     entryID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var buf strings.Builder
+	for _, c := range result.Chunks {
+		buf.WriteString(c.Content)
+	}
+	return []byte(buf.String()), nil
 }
 
 // stripTagPrefix removes a convention tag prefix from a value if present.

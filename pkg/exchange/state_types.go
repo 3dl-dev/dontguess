@@ -120,6 +120,16 @@ const (
 	// Content is TAINTED — enforce this limit before storing or hashing.
 	MaxContentBytes = 1048576 // 1 MiB
 
+	// BlossomOffloadThreshold is the content size (bytes) above which applyPut
+	// offloads the full content to the Blossom blob store instead of inlining it
+	// in the InventoryEntry / message log (dontguess-7783, design doc "Large
+	// content via Blossom": preview stays inline, full deliver is a pointer +
+	// client-side hash verification). Chosen well above the typical put size
+	// (~10 KB observed in the live exchange, nostr-first rebuild decision doc
+	// §NFR) so the common case is unaffected, while still catching genuinely
+	// large payloads before they bloat the replicated state/log.
+	BlossomOffloadThreshold = 32 * 1024 // 32 KiB
+
 	// MinBytesPerToken is the minimum plausible bytes-per-token ratio used to
 	// derive the content-size-based token_cost ceiling at put time.
 	//
@@ -234,10 +244,21 @@ type InventoryEntry struct {
 	// Buyers may filter by tier; entries with "" match any tier filter.
 	CompressionTier string
 
-	// Content holds the raw bytes of the cached inference result.
+	// Content holds the raw bytes of the cached inference result — OR, when
+	// BlobPointer is non-empty (dontguess-7783), only the precomputed inline
+	// preview slice (15-25% of the full content, content-type-aware chunked).
 	// Populated at put time from the base64-encoded "content" payload field.
-	// ContentHash is computed from this field by applyPut — never trusted from payload.
+	// ContentHash is computed from the full decoded content by applyPut — never
+	// trusted from payload — regardless of whether the full bytes are offloaded.
 	Content []byte
+
+	// BlobPointer is the Blossom blob identifier for the full content when it
+	// was too large to inline (dontguess-7783). Empty means Content holds the
+	// full raw bytes (legacy / small-content path). Non-empty means Content
+	// holds only the inline preview slice, and the full content must be
+	// fetched via BlobStore.Fetch(BlobPointer) and verified against
+	// ContentHash before delivery.
+	BlobPointer string
 }
 
 // IsExpired returns true if the entry has passed its expiry time.
@@ -964,4 +985,11 @@ type State struct {
 	//     the same content immediately after rejection (e.g., junk content).
 	//   - Reset on Replay — rebuilt from the log by re-running applyPut for all msgs.
 	contentHashIndex map[string]struct{}
+
+	// blobStore is the optional Blossom client seam (dontguess-7783). When set,
+	// applyPut offloads oversize content (> BlossomOffloadThreshold bytes) to the
+	// blob store instead of retaining the full raw bytes inline in the entry's
+	// Content field. Nil means legacy behavior: all content (up to MaxContentBytes)
+	// stays inline, exactly as before this change. See SetBlobStore.
+	blobStore BlobStore
 }

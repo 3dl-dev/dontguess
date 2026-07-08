@@ -90,6 +90,41 @@ func (pa *PreviewAssembler) Assemble(req PreviewRequest) (PreviewResult, error) 
 	}, nil
 }
 
+// previewForEntry produces the buyer-facing PreviewResult for entry.
+//
+// When entry.BlobPointer is empty (small/legacy content stored fully inline),
+// this re-derives the standard-behavior preview by running PreviewAssembler
+// over entry.Content, unchanged from before dontguess-7783.
+//
+// When entry.BlobPointer is set (dontguess-7783: full content offloaded to
+// Blossom), entry.Content already holds the precomputed inline preview slice
+// (assembled once at put time via buildInlinePreviewBytes, using the same
+// PreviewAssembler algorithm over the full content). Re-running the assembler
+// over that already-small slice would sub-chunk it and misreport total token
+// count, so this returns it directly as a single chunk, with TotalTokens
+// derived from entry.ContentSize (the true full-content size) rather than
+// len(entry.Content).
+func previewForEntry(entry *InventoryEntry) (PreviewResult, error) {
+	if entry.BlobPointer != "" {
+		return PreviewResult{
+			Chunks: []PreviewChunk{{
+				Content:    string(entry.Content),
+				StartByte:  0,
+				EndByte:    len(entry.Content),
+				ChunkIndex: 0,
+			}},
+			TotalTokens:   int((entry.ContentSize + 3) / 4),
+			PreviewTokens: estimateTokens(entry.Content),
+		}, nil
+	}
+	pa := &PreviewAssembler{}
+	return pa.Assemble(PreviewRequest{
+		Content:     entry.Content,
+		ContentType: entry.ContentType,
+		EntryID:     entry.EntryID,
+	})
+}
+
 // estimateTokens estimates the token count using a simple bytes/4 approximation.
 func estimateTokens(content []byte) int {
 	return (len(content) + 3) / 4

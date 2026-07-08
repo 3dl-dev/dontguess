@@ -564,12 +564,7 @@ func (e *Engine) handleSettlePreviewRequest(msg *Message) error {
 
 // sendPreviewResponse generates and emits the settle(preview) message for an entry.
 func (e *Engine) sendPreviewResponse(msg *Message, matchMsgID string, entry *InventoryEntry) error {
-	pa := &PreviewAssembler{}
-	previewResult, err := pa.Assemble(PreviewRequest{
-		Content:     entry.Content,
-		ContentType: entry.ContentType,
-		EntryID:     entry.EntryID,
-	})
+	previewResult, err := previewForEntry(entry)
 	if err != nil {
 		return fmt.Errorf("engine: preview-request: assemble preview for entry %s: %w", shortKey(entry.EntryID), err)
 	}
@@ -644,7 +639,16 @@ func (e *Engine) handleSettleDeliverContent(msg *Message) error {
 		return nil
 	}
 
-	if len(entry.Content) == 0 {
+	// Resolve the full deliver content. For offloaded entries (dontguess-7783),
+	// entry.Content holds only the inline preview slice — the full content
+	// must be fetched from the Blossom blob store and verified against
+	// entry.ContentHash before it can ever be delivered to a buyer.
+	deliverBytes, err := e.resolveDeliverContent(entry)
+	if err != nil {
+		e.opts.log("engine: settle-deliver: entry=%s: %v", shortKey(entry.EntryID), err)
+		return nil
+	}
+	if len(deliverBytes) == 0 {
 		e.opts.log("engine: settle-deliver: entry=%s has no content — cannot emit deliver", shortKey(entry.EntryID))
 		return nil
 	}
@@ -661,18 +665,36 @@ func (e *Engine) handleSettleDeliverContent(msg *Message) error {
 		return nil
 	}
 
-	return e.emitDeliverContent(msg, entry, buyerKey)
+	return e.emitDeliverContent(msg, entry, deliverBytes, buyerKey)
+}
+
+// resolveDeliverContent returns the full content bytes to deliver for entry.
+//
+// If entry has no BlobPointer, the content was never offloaded — entry.Content
+// already holds the full bytes (legacy / small-content path), returned as-is.
+//
+// If entry has a BlobPointer (dontguess-7783), the full content lives only in
+// the Blossom blob store. This fetches it and verifies its sha256 against
+// entry.ContentHash — the client-side hash verification that mitigates a
+// tampered or corrupted blob (a mismatch here means the blob store returned
+// content that does not match what the seller originally put, and it is
+// refused rather than delivered).
+func (e *Engine) resolveDeliverContent(entry *InventoryEntry) ([]byte, error) {
+	if entry.BlobPointer == "" {
+		return entry.Content, nil
+	}
+	return e.state.FetchAndVerifyBlob(entry)
 }
 
 // emitDeliverContent builds and sends the content-bearing settle(deliver) message.
-func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, buyerKey string) error {
-	rawHash := sha256.Sum256(entry.Content)
+func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, content []byte, buyerKey string) error {
+	rawHash := sha256.Sum256(content)
 	contentHash := "sha256:" + hex.EncodeToString(rawHash[:])
 
 	deliverContentPayload, err := e.marshal(map[string]any{
 		"phase":        SettlePhaseStrDeliver,
 		"entry_id":     entry.EntryID,
-		"content":      base64.StdEncoding.EncodeToString(entry.Content),
+		"content":      base64.StdEncoding.EncodeToString(content),
 		"content_hash": contentHash,
 		"buyer":        buyerKey,
 		"guide":        "Content delivered. Verify integrity: SHA-256 hash the decoded content and compare to content_hash. To confirm receipt, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns 30% of token_cost in scrip (you have the content cached, making you the ideal compressor).",
