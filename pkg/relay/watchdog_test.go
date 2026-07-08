@@ -445,6 +445,114 @@ func TestWatchdog_RefetchRateLimited(t *testing.T) {
 	}
 }
 
+// --- TEST 2c: refetch fairness under a low-id flood ------------------------
+
+// TestWatchdog_RefetchFairnessImpactFirstNotStarvedByLowIDFlood is the wave-9
+// LOW regression. The previous CheckOrphans spent the finite refetch budget in
+// ascending antecedent-id order (sort.Strings), so an attacker publishing many
+// orphans with low-sorting fabricated antecedent ids ("0000…") pinned the whole
+// budget every pass — permanently STARVING a legit antecedent's recovery and
+// storming the alarm sink with one alarm per deferred antecedent.
+//
+// The fix spends the budget by IMPACT (dependent count) first. This test floods
+// many distinct low-sorting fabricated antecedents (one dependent each) alongside
+// ONE legit antecedent with more dependents, gives a scarce budget, and asserts:
+// the legit antecedent IS refetched (and recovers) within the pass despite the
+// flood, and the many deferred flood antecedents raise exactly ONE coalesced
+// throttle alarm (not one per antecedent).
+func TestWatchdog_RefetchFairnessImpactFirstNotStarvedByLowIDFlood(t *testing.T) {
+	const burst = 4
+	clock := time.Unix(2_000_000, 0)
+	wd, relay, _, seq, wm, alarms, _ := newWatchdogHarness(t,
+		WithRefetchRate(burst, 0.0), // burst tokens, NO refill: exactly `burst` REQs this pass
+		WithClock(func() time.Time { return clock }),
+	)
+	seller, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate seller: %v", err)
+	}
+
+	// Flood: many orphans, each e-tagging a DISTINCT, LOW-SORTING fabricated
+	// antecedent the relay never serves, each with exactly ONE dependent. Under the
+	// old ascending-id order these "0000…" ids monopolize the budget every pass.
+	const floodN = 40
+	for i := 0; i < floodN; i++ {
+		ante := fmt.Sprintf("0000%060x", i)
+		orphan := signEventAt(t, seller, nostr.KindBuy, int64(500+i), [][]string{eTag(ante)}, fmt.Sprintf("flood-%d", i))
+		if herr := relay.intake.HandleEvent(orphan); herr != nil {
+			t.Fatalf("ingest flood orphan %d: %v", i, herr)
+		}
+	}
+
+	// One LEGIT antecedent the relay DOES serve, with MORE dependents (higher
+	// impact) than any single flood antecedent. Its id is a real event hash — it
+	// sorts ABOVE the "0000…" flood, so id-order would have starved it.
+	legitRoot := signEventAt(t, seller, nostr.KindPut, 900, nil, "legit-root")
+	relay.held = []*nostr.Event{legitRoot}
+	const legitDeps = 5
+	for k := 0; k < legitDeps; k++ {
+		dep := signEventAt(t, seller, nostr.KindBuy, int64(901+k), [][]string{eTag(legitRoot.ID)}, fmt.Sprintf("legit-dep-%d", k))
+		if herr := relay.intake.HandleEvent(dep); herr != nil {
+			t.Fatalf("ingest legit dep %d: %v", k, herr)
+		}
+	}
+
+	if got, want := seq.PendingCount(), floodN+legitDeps; got != want {
+		t.Fatalf("PendingCount = %d, want %d", got, want)
+	}
+	// Sanity: distinct pending antecedents = floodN flood + 1 legit.
+	distinctAntes := len(seq.PendingAntecedents())
+	if distinctAntes != floodN+1 {
+		t.Fatalf("distinct pending antecedents = %d, want %d", distinctAntes, floodN+1)
+	}
+
+	// One recovery pass with a scarce budget (burst << floodN). Impact-first
+	// ordering must spend a token on the legit antecedent despite the low-id flood.
+	refetched, err := wd.CheckOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("CheckOrphans: %v", err)
+	}
+	if refetched != burst {
+		t.Fatalf("refetched = %d, want %d (scarce budget fully spent this pass)", refetched, burst)
+	}
+
+	// The legit antecedent WAS refetched: a targeted REQ ids=[legitRoot] issued.
+	sawLegitREQ := false
+	for _, q := range relay.queries {
+		if len(q.IDs) == 1 && q.IDs[0] == legitRoot.ID {
+			sawLegitREQ = true
+			break
+		}
+	}
+	if !sawLegitREQ {
+		t.Fatalf("legit antecedent %s was NOT refetched — starved by the low-id flood (fairness regression)", shortID(legitRoot.ID))
+	}
+	// Recovery actually happened: the relay served the root, the Intake released the
+	// 5 dependent chain, so only the flood orphans remain.
+	if _, stillPending := seq.PendingAntecedents()[legitRoot.ID]; stillPending {
+		t.Fatalf("legit antecedent still pending after refetch; chain not released")
+	}
+	if got := seq.PendingCount(); got != floodN {
+		t.Fatalf("PendingCount after pass = %d, want %d (only the flood remains, legit chain drained)", got, floodN)
+	}
+
+	// Alarm-storm bound: the deferred flood antecedents raise exactly ONE coalesced
+	// orphan_refetch_throttled alarm, not one per antecedent.
+	throttledAlarms := 0
+	for _, a := range *alarms {
+		if a == "orphan_refetch_throttled" {
+			throttledAlarms++
+		}
+	}
+	if throttledAlarms != 1 {
+		t.Fatalf("orphan_refetch_throttled alarms = %d, want exactly 1 (coalesced, not one per antecedent)", throttledAlarms)
+	}
+	// The per-antecedent METRIC still counts every distinct deferred antecedent.
+	if got, want := wm.OrphanRefetchThrottled.Load(), int64(distinctAntes-burst); got != want {
+		t.Fatalf("OrphanRefetchThrottled metric = %d, want %d (per-antecedent, distinct-burst)", got, want)
+	}
+}
+
 // --- TEST 3: resync audit id-set diff --------------------------------------
 
 // TestWatchdog_ResyncAuditIDSetDiff exercises §2.5 path 3. It sets up BOTH diff

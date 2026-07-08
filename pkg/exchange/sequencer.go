@@ -100,12 +100,33 @@ type Sequencer struct {
 	// entries with a positive count exist; entries are removed once the count
 	// reaches zero. len(missingCount) == trueOrphans at all times.
 	missingCount map[string]int
-	// missingWaiters[a] lists the buffered event ids that count `a` among
+	// missingWaiters[a] is the SET of buffered event ids that count `a` among
 	// their currently-unknown antecedents. When `a` is ingested (arrives, by
 	// any means -- buffered or immediately emitted), every waiter's
 	// missingCount is decremented in O(1) amortized total work, and any
-	// waiter that reaches zero is no longer a true orphan.
-	missingWaiters map[string][]string
+	// waiter that reaches zero is no longer a true orphan. It is a set (not a
+	// slice) so a single waiter can be removed in O(1) when it is EVICTED
+	// before `a` ever arrives — without which a never-arriving antecedent's
+	// waiter list would accumulate every evicted event that referenced it,
+	// growing missingWaiters 1:1 with total events ever ingested (an unbounded
+	// memory DoS, wave-9 HIGH). An `a` key is deleted when its set empties.
+	missingWaiters map[string]map[string]struct{}
+	// missingOf[id] is the set of missing (never-ingested) antecedents that
+	// buffered event `id` was admitted with — exactly the `a` keys under which
+	// `id` currently appears in missingWaiters. It is the reverse index eviction
+	// needs to reclaim `id`'s missingWaiters membership in O(len(missing)) when
+	// `id` is evicted before its antecedents arrive. Set on admit
+	// (insertBufferedLocked), deleted when `id` fully resolves
+	// (resolveArrivalLocked) or is evicted (evictOldestLocked).
+	// len(missingOf) == len(missingCount) == trueOrphans at all times, so total
+	// sequencer memory (buffered + missingWaiters + missingOf + missingCount +
+	// orderElem) is O(maxOrphans * MaxAntecedents) — BOUNDED under any flood. An
+	// entry may name an antecedent that has since arrived (its missingWaiters[a]
+	// set already bulk-deleted by resolveArrivalLocked); removing a non-present
+	// id from an absent set on eviction is a harmless no-op, which is why
+	// resolveArrivalLocked does NOT prune missingOf per arrival — that preserves
+	// its amortized-O(1) property.
+	missingOf map[string]map[string]struct{}
 
 	// order is the insertion-order index over the buffered set: front == the
 	// OLDEST buffered orphan, back == the most recently admitted. It backs the
@@ -130,7 +151,8 @@ func NewSequencer(maxOrphans int) *Sequencer {
 		emitted:        make(map[string]struct{}),
 		buffered:       make(map[string]*Message),
 		missingCount:   make(map[string]int),
-		missingWaiters: make(map[string][]string),
+		missingWaiters: make(map[string]map[string]struct{}),
+		missingOf:      make(map[string]map[string]struct{}),
 		order:          list.New(),
 		orderElem:      make(map[string]*list.Element),
 	}
@@ -300,9 +322,17 @@ func (s *Sequencer) insertBufferedLocked(m Message, missing []string) {
 	if len(missing) > 0 {
 		s.missingCount[m.ID] = len(missing)
 		s.trueOrphans++
+		of := make(map[string]struct{}, len(missing))
 		for _, a := range missing {
-			s.missingWaiters[a] = append(s.missingWaiters[a], m.ID)
+			w := s.missingWaiters[a]
+			if w == nil {
+				w = make(map[string]struct{})
+				s.missingWaiters[a] = w
+			}
+			w[m.ID] = struct{}{}
+			of[a] = struct{}{}
 		}
+		s.missingOf[m.ID] = of
 	}
 	// This event's own id is now known; resolve any earlier-buffered event
 	// that was counting m.ID as one of its missing antecedents.
@@ -323,9 +353,13 @@ func (s *Sequencer) removeOrderLocked(id string) {
 // evictOldestLocked removes the OLDEST buffered orphan (front of the insertion-
 // order list) and returns its id, or "" if the buffer is empty. It removes only
 // buffered (never-released) state: the buffered entry, its order element, and
-// its true-orphan bookkeeping. Any missingWaiters entries that still name the
-// evicted id are left in place and harmlessly skipped by resolveArrivalLocked
-// (it guards on the missingCount entry existing). Caller must hold s.mu.
+// its true-orphan bookkeeping — INCLUDING the evicted id's membership in the
+// missingWaiters set of EACH antecedent it was still waiting on (via missingOf).
+// Reclaiming those edges is what keeps total memory O(maxOrphans*MaxAntecedents)
+// under a flood of distinct never-arriving antecedents: without it,
+// missingWaiters[a] for a fabricated `a` would accumulate every evicted event
+// that ever referenced it, growing 1:1 with total events ever ingested (the
+// wave-9 HIGH unbounded-memory DoS). Caller must hold s.mu.
 //
 // Note: evicting event X may orphan a still-buffered dependent Y that referenced
 // X but did not count X as missing (X was buffered/known when Y arrived). Y then
@@ -346,6 +380,19 @@ func (s *Sequencer) evictOldestLocked() string {
 	if _, ok := s.missingCount[id]; ok {
 		delete(s.missingCount, id)
 		s.trueOrphans--
+		// Reclaim this orphan's edges in missingWaiters so a never-arriving
+		// antecedent's set cannot grow past the live orphan population. For an
+		// antecedent that has since arrived, missingWaiters[a] is already gone —
+		// a no-op. Delete the antecedent key when its set empties.
+		for a := range s.missingOf[id] {
+			if w := s.missingWaiters[a]; w != nil {
+				delete(w, id)
+				if len(w) == 0 {
+					delete(s.missingWaiters, a)
+				}
+			}
+		}
+		delete(s.missingOf, id)
 	}
 	return id
 }
@@ -372,7 +419,7 @@ func (s *Sequencer) resolveArrivalLocked(id string) {
 		return
 	}
 	delete(s.missingWaiters, id)
-	for _, w := range waiters {
+	for w := range waiters {
 		c, ok := s.missingCount[w]
 		if !ok {
 			continue // already resolved via another path (defensive)
@@ -380,6 +427,7 @@ func (s *Sequencer) resolveArrivalLocked(id string) {
 		c--
 		if c <= 0 {
 			delete(s.missingCount, w)
+			delete(s.missingOf, w)
 			s.trueOrphans--
 		} else {
 			s.missingCount[w] = c
