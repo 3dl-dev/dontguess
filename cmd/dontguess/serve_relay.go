@@ -298,13 +298,22 @@ const relaySubID = "dg-exchange"
 //  1. FAILS every in-flight publish (pub.failInFlight) so a blocked Outbox
 //     publish returns and retries rather than wedging on an OK that can no longer
 //     route — this is the "Outbox publish cannot wedge" invariant;
-//  2. drives the Watchdog reconnect (wd.Reconnect): bumps intake_disconnected,
-//     alarms + loud-logs, and RE-ISSUES REQ since=(watermark−slack). NOTE
-//     relay.Conn transparently re-dials + re-AUTHs on the next Recv but does NOT
-//     re-issue the REQ — only this re-subscribe does, so a dumb relay that forgot
-//     the old REQ resumes delivering (dedup absorbs the backfill overlap);
-//  3. backs off (DefaultBackoff, reset on a clean re-subscribe) so a relay that
-//     drops instantly cannot hot-spin the reconnect;
+//  2. RE-SUBSCRIBES BEFORE re-reading (the wave-14 HIGH fix): it drives the
+//     Watchdog reconnect (wd.Reconnect) — which bumps intake_disconnected, alarms
+//     + loud-logs, and RE-ISSUES REQ since=(watermark−slack) — and RETRIES it with
+//     bounded backoff UNTIL the REQ Send actually succeeds. Only then does the
+//     reader re-enter. wd.Reconnect and runReader share the SAME connection:
+//     relay.Conn transparently re-dials + re-AUTHs on the next Recv but NEVER
+//     replays the REQ — only this re-subscribe issues it. Re-entering the reader
+//     after a FAILED re-subscribe could hand runReader a LIVE-but-subscription-less
+//     socket (the relay recovered during backoff): NIP-01 then delivers nothing,
+//     Recv blocks forever, and wd.Reconnect (the sole re-subscribe) is never
+//     retried — a permanent SILENT ingest death on a healthy-looking socket. The
+//     retry-until-REQ-succeeds loop closes that wedge; the alarm stays loud on
+//     every retry (each wd.Reconnect bumps intake_disconnected + alarms);
+//  3. bounds the backoff (grows to backoff.Max on repeated failure, reset on a
+//     clean re-subscribe) and applies a settle delay before resuming so a relay
+//     that drops instantly on each fresh socket cannot hot-spin the reconnect;
 //  4. re-enters runReader, resuming ingest of the re-delivered events.
 //
 // watermarkFn re-samples the LOCAL high-water mark (NIP-01 seconds) at each
@@ -317,10 +326,11 @@ func (w *relayWiring) runReaderReconnect(
 	watermarkFn func() int64,
 	backoff relay.Backoff,
 ) {
-	delay := backoff.Initial
-	if delay <= 0 {
-		delay = 10 * time.Millisecond
+	initial := backoff.Initial
+	if initial <= 0 {
+		initial = 10 * time.Millisecond
 	}
+	delay := initial
 	for {
 		if ctx.Err() != nil {
 			return
@@ -336,23 +346,39 @@ func (w *relayWiring) runReaderReconnect(
 		// then re-subscribe.
 		pub.failInFlight()
 
-		if rerr := wd.Reconnect(ctx, watermarkFn()); rerr != nil {
+		// RESUBSCRIBE-BEFORE-READ (wave-14 HIGH). Retry wd.Reconnect with bounded
+		// backoff until its REQ Send actually SUCCEEDS, holding the reader out until
+		// then. A reader re-entered on a re-subscribe that FAILED could read a
+		// live-but-unsubscribed socket forever (NIP-01 delivers nothing without a
+		// REQ), and wd.Reconnect — the only re-subscribe — would never be retried:
+		// silent ingest death on a healthy socket. Looping here guarantees a live
+		// subscription precedes every reader pass.
+		for {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Printf("relay/reader: reconnect re-subscribe failed (will retry): %v", rerr)
+			if rerr := wd.Reconnect(ctx, watermarkFn()); rerr == nil {
+				delay = initial // clean re-subscribe: reset the backoff
+				break
+			} else if ctx.Err() != nil {
+				return
+			} else {
+				log.Printf("relay/reader: reconnect re-subscribe REQ failed (reader held out, will retry): %v", rerr)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
 			if backoff.Max > 0 {
 				if delay *= 2; delay > backoff.Max {
 					delay = backoff.Max
 				}
 			}
-		} else {
-			delay = backoff.Initial
-			if delay <= 0 {
-				delay = 10 * time.Millisecond
-			}
 		}
 
+		// Settle delay before resuming the reader on the now-live subscription, so a
+		// relay that drops instantly on each fresh socket cannot hot-spin the loop.
 		select {
 		case <-ctx.Done():
 			return
