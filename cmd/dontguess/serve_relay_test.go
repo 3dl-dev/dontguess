@@ -53,11 +53,16 @@ type fakeRelayConn struct {
 	recvCh chan []byte
 	dropCh chan struct{} // buffered(1): injectDrop makes the next Recv return ErrConnDropped
 
-	mu      sync.Mutex
-	events  []*identity.Event // every EVENT the "relay" received via Send
-	reqs    []*int64          // Since value of every REQ frame received (nil => absent)
-	echo    bool
-	blockOK bool
+	mu          sync.Mutex
+	events      []*identity.Event // every EVENT the "relay" received via Send
+	reqs        []*int64          // Since value of every SUCCESSFUL REQ frame received (nil => absent)
+	echo        bool
+	blockOK     bool
+	failNextREQ int  // >0: fail (not record) that many upcoming REQ Sends (models a flapping relay)
+	reqFailures int  // count of REQ Sends failed via failNextREQ (flap assertion)
+	gateOnSub   bool // model NIP-01: deliver injected events ONLY while a live REQ subscription exists
+	subscribed  bool // gateOnSub: a successful REQ makes the subscription live; a drop clears it
+	pending     [][]byte // gateOnSub: events injected while unsubscribed, flushed on the next successful REQ
 }
 
 func newFakeRelayConn(echo bool) *fakeRelayConn {
@@ -70,22 +75,68 @@ func (r *fakeRelayConn) setBlockOK(b bool) {
 	r.mu.Unlock()
 }
 
+// setGateOnSub turns on the NIP-01 fidelity model: injected events are delivered
+// to the reader ONLY while a live REQ subscription exists. A drop clears the
+// subscription and a subsequent SUCCESSFUL REQ re-establishes it, flushing events
+// injected in between. This is what makes a reader re-entered on a
+// subscription-less socket observably starve (the wave-14 wedge).
+func (r *fakeRelayConn) setGateOnSub(b bool) {
+	r.mu.Lock()
+	r.gateOnSub = b
+	r.mu.Unlock()
+}
+
+// setFailNextREQ makes the next n REQ Sends fail (return an error, not record the
+// REQ, not (re)subscribe) — a flapping relay whose re-subscribe REQ momentarily
+// fails before recovering.
+func (r *fakeRelayConn) setFailNextREQ(n int) {
+	r.mu.Lock()
+	r.failNextREQ = n
+	r.mu.Unlock()
+}
+
+// reqFailureCount returns how many REQ Sends have been failed via setFailNextREQ.
+func (r *fakeRelayConn) reqFailureCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reqFailures
+}
+
 func (r *fakeRelayConn) Send(_ context.Context, frame []byte) error {
 	f, err := relay.ParseFrame(frame)
 	if err != nil {
 		return nil // tolerate anything non-parseable (defensive)
 	}
 	if f.Type == relay.LabelREQ {
+		r.mu.Lock()
+		if r.failNextREQ > 0 {
+			// Flap: this re-subscribe REQ fails. The subscription stays down; the
+			// reconnect leg must RETRY before the reader may read again.
+			r.failNextREQ--
+			r.reqFailures++
+			r.mu.Unlock()
+			return fmt.Errorf("fake relay: injected REQ send failure")
+		}
 		// Record the subscribe/re-subscribe so a test can assert the reconnect leg
 		// re-issued the REQ (and with what Since). A real relay would replay
 		// matching history here; the test drives re-delivery explicitly via inject.
-		r.mu.Lock()
 		var since *int64
 		if len(f.Filters) > 0 && f.Filters[0].Since != nil {
 			v := *f.Filters[0].Since
 			since = &v
 		}
 		r.reqs = append(r.reqs, since)
+		if r.gateOnSub {
+			// Live subscription: flush anything injected while unsubscribed.
+			r.subscribed = true
+			pend := r.pending
+			r.pending = nil
+			r.mu.Unlock()
+			for _, fr := range pend {
+				r.recvCh <- fr
+			}
+			return nil
+		}
 		r.mu.Unlock()
 		return nil
 	}
@@ -125,8 +176,17 @@ func (r *fakeRelayConn) Recv(ctx context.Context) ([]byte, error) {
 }
 
 // injectDrop forces the next Recv to return ErrConnDropped once — the mid-stream
-// disconnect the reconnect leg must survive.
-func (r *fakeRelayConn) injectDrop() { r.dropCh <- struct{}{} }
+// disconnect the reconnect leg must survive. Under gateOnSub it also tears down
+// the live subscription: no injected event is delivered again until a successful
+// re-subscribe REQ.
+func (r *fakeRelayConn) injectDrop() {
+	r.mu.Lock()
+	if r.gateOnSub {
+		r.subscribed = false
+	}
+	r.mu.Unlock()
+	r.dropCh <- struct{}{}
+}
 
 // reqCount returns how many REQ frames the relay has received (initial subscribe
 // + every reconnect re-subscribe).
@@ -136,9 +196,20 @@ func (r *fakeRelayConn) reqCount() int {
 	return len(r.reqs)
 }
 
-// inject delivers a foreign signed event to the operator's subscription.
+// inject delivers a foreign signed event to the operator's subscription. Under
+// gateOnSub, if no live subscription exists (post-drop, pre-resubscribe) the event
+// is BUFFERED and delivered only when a successful REQ re-establishes the
+// subscription — modeling a NIP-01 relay that delivers nothing on a
+// subscription-less socket.
 func (r *fakeRelayConn) inject(ev *identity.Event) {
 	frame, _ := relay.EncodeSubEvent("dg-exchange", ev)
+	r.mu.Lock()
+	if r.gateOnSub && !r.subscribed {
+		r.pending = append(r.pending, frame)
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
 	r.recvCh <- frame
 }
 
@@ -761,6 +832,211 @@ func TestRelayForcedDisconnect_ReconnectResubscribeIngestPublishResume(t *testin
 	}
 	t.Logf("reconnect OK: intake_disconnected=%d reqs=%d matches_published=%d publish_lag=%d",
 		wdM.IntakeDisconnected.Load(), relayConn.reqCount(), len(relayConn.receivedByKind(nostr.KindMatch)), w.outbox.PublishLag())
+}
+
+// TestRelayReconnectFlap_ReqSendFailsThenSucceeds_ReaderHeldUntilLiveSub is the
+// wave-14 HIGH regression test (resubscribe-ordering wedge). On a drop the reader
+// MUST NOT resume until a SUCCESSFUL re-subscribe REQ exists — because
+// wd.Reconnect and runReader share one connection and only wd.Reconnect ever
+// issues the REQ. This test flaps the relay: the FIRST post-drop re-subscribe REQ
+// Send FAILS, the next SUCCEEDS. The fake models NIP-01 fidelity (gateOnSub): an
+// event injected while unsubscribed is delivered ONLY once a live REQ is issued.
+//
+// A foreign put injected during the unsubscribed window folds (lands as an
+// Origin=relay record) ONLY after the retry re-subscribes. On the PRE-FIX code the
+// reader re-enters immediately after the FAILED reconnect, blocks on a
+// subscription-less socket, wd.Reconnect is never retried, and the put is never
+// delivered — so this test times out. It passes only with the retry-until-REQ-
+// succeeds loop, and asserts the flap actually happened (a REQ Send failed, then
+// intake_disconnected was bumped more than once — the retry).
+func TestRelayReconnectFlap_ReqSendFailsThenSucceeds_ReaderHeldUntilLiveSub(t *testing.T) {
+	dir := t.TempDir()
+	ls, err := dgstore.Open(dir + "/events.jsonl")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = ls.Close() })
+
+	operator, _ := identity.Generate()
+	seller, _ := identity.Generate()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	relayConn := newFakeRelayConn(false /* no echo */)
+	relayConn.setGateOnSub(true) // NIP-01: no delivery without a live REQ subscription
+	pub := newDemuxPublisher(relayConn)
+	w, watermark, err := buildRelayWiring(ls, operator, operator.PubKeyHex(),
+		dir+"/events.jsonl.pubcursor", pub, 0, func(string, error, *nostr.Event) {})
+	if err != nil {
+		t.Fatalf("buildRelayWiring: %v", err)
+	}
+
+	// Initial subscribe: makes the subscription live (mirrors attachRelayTransport).
+	since := watermark/1_000_000_000 - reconnectSlackSeconds
+	if since < 0 {
+		since = 0
+	}
+	reqFrame, _ := relay.EncodeReq(relaySubID, relay.Filter{Since: &since})
+	if err := relayConn.Send(ctx, reqFrame); err != nil {
+		t.Fatalf("initial REQ: %v", err)
+	}
+
+	wd, wdM := w.newReconnectWatchdog(ls, relayConn, func(string, error, *nostr.Event) {})
+	fastBackoff := relay.Backoff{Initial: 5 * time.Millisecond, Max: 20 * time.Millisecond}
+	go w.runReaderReconnect(ctx, relayConn, pub, wd, func() int64 { return storeWatermarkSeconds(ls) }, fastBackoff)
+	t.Cleanup(func() { cancel() })
+
+	// BASELINE: a foreign put delivered over the LIVE subscription folds into the
+	// local log (Origin=relay). This proves the live-sub delivery path works before
+	// the flap.
+	put1 := signExchangeEvent(t, seller,
+		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"}, nil,
+		localPutPayload("Go HTTP handler unit test generator", 8000))
+	relayConn.inject(put1)
+	waitFor(t, 8*time.Second, "put1 ingested over the live subscription (Origin=relay)", func() bool {
+		return w.metrics.Persisted.Load() == 1
+	})
+
+	reqsBeforeDrop := relayConn.reqCount()
+
+	// Arrange the FLAP: the first re-subscribe REQ after the drop FAILS, the next
+	// succeeds.
+	relayConn.setFailNextREQ(1)
+
+	// Drop the connection AND inject put2 during the unsubscribed window. put2 is
+	// BUFFERED (gateOnSub) and delivered only when a live re-subscribe succeeds, so
+	// a reader resumed on the failed/unsubscribed socket can never see it.
+	relayConn.injectDrop()
+	put2 := signExchangeEvent(t, seller,
+		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"}, nil,
+		localPutPayload("Go gRPC interceptor unit test generator", 9000))
+	relayConn.inject(put2)
+
+	// The flap was actually exercised: a REQ Send failed once...
+	waitFor(t, 8*time.Second, "a re-subscribe REQ Send failed (flap exercised)", func() bool {
+		return relayConn.reqFailureCount() >= 1
+	})
+	// ...and the reconnect leg RETRIED (intake_disconnected bumped on each
+	// wd.Reconnect: at least the failed attempt + the successful one). On the
+	// pre-fix code Reconnect is called once then the reader blocks, leaving this at
+	// exactly 1.
+	waitFor(t, 8*time.Second, "reconnect retried after the failed REQ (intake_disconnected >= 2)", func() bool {
+		return wdM.IntakeDisconnected.Load() >= 2
+	})
+	waitFor(t, 8*time.Second, "the successful retry re-issued the REQ", func() bool {
+		return relayConn.reqCount() > reqsBeforeDrop
+	})
+
+	// INGEST RESUMES only after the live re-subscribe: put2, buffered while
+	// unsubscribed, now folds. This is the load-bearing proof the reader never read
+	// on a subscription-less socket — it starved until the REQ succeeded.
+	waitFor(t, 8*time.Second, "put2 folds after the flap (ingest resumed on a live sub)", func() bool {
+		return w.metrics.Persisted.Load() == 2
+	})
+
+	recs, _ := ls.ReadAll()
+	if got := countTag(recs, exchange.TagPut); got != 2 {
+		t.Fatalf("local log has %d put records after the flap, want 2 (both foreign puts ingested)", got)
+	}
+	t.Logf("flap OK: reqFailures=%d intake_disconnected=%d reqs=%d persisted=%d",
+		relayConn.reqFailureCount(), wdM.IntakeDisconnected.Load(), relayConn.reqCount(), w.metrics.Persisted.Load())
+}
+
+// TestRelayInFlightPublishAtDrop_FailedAndRetried_NoWedge closes the veracity gap
+// the prior attempt left (failInFlight scenario-A): a publish that is IN-FLIGHT AT
+// THE MOMENT of the drop — blocked in the OK-demux awaiting an OK — must be FAILED
+// (pub.failInFlight) so the Outbox RETRIES it, rather than blocking forever on an
+// OK that can no longer route (which would wedge Outbox.Run). The existing
+// reconnect test only covers a NEW publish issued AFTER reconnect; this one blocks
+// a publish, drops WITH it in flight, and proves it recovers.
+//
+// The relay blocks OK (never ACKs) so the first publish blocks in flight; the drop
+// is then injected. Without failInFlight the blocked PublishEvent never returns,
+// Outbox.Run wedges, the cursor never advances, and this times out. With it the
+// publish is failed, retried, and — once the reader re-subscribes and the OK-demux
+// is live — the retry's OK routes and the cursor advances.
+func TestRelayInFlightPublishAtDrop_FailedAndRetried_NoWedge(t *testing.T) {
+	dir := t.TempDir()
+	ls, err := dgstore.Open(dir + "/events.jsonl")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = ls.Close() })
+
+	operator, _ := identity.Generate()
+
+	// One operator record queued for publish (Origin=local) — the event that will
+	// be in flight when the connection drops.
+	rec := dgstore.Record{
+		ID:         randomLocalMsgID(t),
+		CampfireID: "local",
+		Sender:     operator.PubKeyHex(),
+		Payload:    []byte(`{"buy_id":"b1","entry_id":"e1"}`),
+		Tags:       []string{exchange.TagMatch},
+		Timestamp:  time.Now().UnixNano(),
+		Origin:     "local",
+	}
+	if err := ls.Append(rec); err != nil {
+		t.Fatalf("append operator match: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	relayConn := newFakeRelayConn(false /* no echo */)
+	relayConn.setBlockOK(true) // never ACK -> the publish blocks IN-FLIGHT awaiting OK
+	pub := newDemuxPublisher(relayConn)
+	w, watermark, err := buildRelayWiring(ls, operator, operator.PubKeyHex(),
+		dir+"/events.jsonl.pubcursor", pub, 0, func(string, error, *nostr.Event) {})
+	if err != nil {
+		t.Fatalf("buildRelayWiring: %v", err)
+	}
+
+	since := watermark/1_000_000_000 - reconnectSlackSeconds
+	if since < 0 {
+		since = 0
+	}
+	reqFrame, _ := relay.EncodeReq(relaySubID, relay.Filter{Since: &since})
+	if err := relayConn.Send(ctx, reqFrame); err != nil {
+		t.Fatalf("initial REQ: %v", err)
+	}
+
+	wd, _ := w.newReconnectWatchdog(ls, relayConn, func(string, error, *nostr.Event) {})
+	fastBackoff := relay.Backoff{Initial: 5 * time.Millisecond, Max: 20 * time.Millisecond}
+	go w.runReaderReconnect(ctx, relayConn, pub, wd, func() int64 { return storeWatermarkSeconds(ls) }, fastBackoff)
+	go w.outbox.Run(ctx, 5*time.Millisecond)
+	t.Cleanup(func() { cancel() })
+
+	// The publish is IN-FLIGHT AT the drop: the relay has RECEIVED the EVENT but
+	// (blockOK) never ACKed it, so PublishEvent is blocked in the OK-demux and the
+	// cursor has NOT advanced.
+	waitFor(t, 8*time.Second, "operator match EVENT sent, awaiting OK (in-flight)", func() bool {
+		return len(relayConn.receivedByKind(nostr.KindMatch)) >= 1
+	})
+	if got := w.outbox.Cursor(); got != 0 {
+		t.Fatalf("Outbox cursor = %d before any ACK, want 0 (publish must still be in flight)", got)
+	}
+
+	// Drop WITH the publish still in flight; unblock the relay so the RETRY can be
+	// ACKed once the OK-demux is re-established.
+	relayConn.injectDrop()
+	relayConn.setBlockOK(false)
+
+	// failInFlight must have failed the in-flight publish so the Outbox retried;
+	// after the reconnect re-subscribes, the retry's OK routes and the cursor
+	// advances. A wedged Outbox would leave the cursor at 0 and publish_lag pinned.
+	waitFor(t, 12*time.Second, "in-flight publish failed+retried -> cursor advances (no wedge)", func() bool {
+		return w.outbox.Cursor() >= 1 && w.outbox.PublishLag() == 0
+	})
+
+	// The relay received the EVENT more than once: the first (in-flight, dropped)
+	// send, plus at least one retry after failInFlight.
+	if got := len(relayConn.receivedByKind(nostr.KindMatch)); got < 2 {
+		t.Fatalf("relay received the match EVENT %d time(s), want >= 2 (in-flight send + retry after failInFlight)", got)
+	}
+	t.Logf("in-flight-at-drop OK: cursor=%d publish_lag=%d sends=%d",
+		w.outbox.Cursor(), w.outbox.PublishLag(), len(relayConn.receivedByKind(nostr.KindMatch)))
 }
 
 // TestGuardOperatorKeyMigration_WarnsOnCampfireEraRecords proves the LOW
