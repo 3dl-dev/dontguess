@@ -410,6 +410,33 @@ func (s *Sequencer) PendingCount() int {
 	return len(s.buffered)
 }
 
+// PendingAntecedents returns, for every event currently buffered as an orphan,
+// the missing (not-yet-released) antecedent ids it is waiting on, mapped to the
+// buffered event ids that depend on each. An empty map means nothing is
+// orphaned. It is a read-only diagnostic — it releases nothing and mutates no
+// state — for the reconnection / gap-recovery watchdog
+// (docs/design/relay-transport.md §2.5): the watchdog issues one targeted
+// REQ ["ids", <antecedent>] per returned key and, if the antecedent stays
+// unrecoverable, quarantines the dependent chain(s) loudly. The mapping is keyed
+// by missing-antecedent so a single quarantine decision covers every orphan
+// stalled behind the same pruned event.
+func (s *Sequencer) PendingAntecedents() map[string][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string][]string)
+	for id, m := range s.buffered {
+		for _, a := range m.Antecedents {
+			if a == "" {
+				continue
+			}
+			if _, ok := s.emitted[a]; !ok {
+				out[a] = append(out[a], id)
+			}
+		}
+	}
+	return out
+}
+
 // antecedentsSatisfiedLocked reports whether every antecedent of m has been
 // released. An empty antecedent id is ignored (roots and messages that carry no
 // causal predecessor). Caller must hold s.mu.
