@@ -254,6 +254,145 @@ so `pollLocalStore`'s premise "append order == fold order" is restored as a cons
 guarantee rather than a single-writer accident. The only engine touch is the additive
 `OnOperatorEmit` hook. This deliberately preserves every dontguess-b84/-90d cursor fix verbatim.
 
+### 2.4a Ingest authentication model (amended 2026-07-08)
+
+The §2.4 step-1 ACL ("operator-key ACL filter") was **under-specified**: it named the operator
+re-verify but not the *universal* signature floor beneath it, and it did not rule on the ACL/engine
+op-parsing differential. Wave-5 in-wave security review found two exploitable gaps against this
+under-specification. This subsection is the **ratified full authentication model** for the Intake
+boundary; it CORRECTS and SUPERSEDES the wording of §2.4 step 1. It is a design correction applied
+**before** `pkg/relay/intake.go` is written (the file does not yet exist on any branch — verified
+`git log --all --follow -- '*intake.go'` empty; `pkg/relay` today holds only `conn.go`/`frames.go`/
+`outbox.go`, none wired into `serve.go`). Two of the fixes are patches to **already-shipped**
+exchange-layer code reachable by ANY transport that can construct a `proto.Message`, not just nostr.
+
+**The corrected per-event pipeline. Every received `["EVENT", ev]` passes these steps IN ORDER;
+any failure DROPS pre-fold, increments a DISTINCT counter, and alarms (LOCKED-5). No event reaches
+`Sequencer.Ingest` — let alone `LocalStore` or `State.Apply` — until step 3 passes.**
+
+```
+0. VerifyEventSignature(ev)         universal Schnorr+id re-derive, ALL kinds   → dropped_unsigned
+1. VerifyOperatorAuthorship(ev,K)   operator-kind author==operator (unchanged)  → dropped_forged
+2. FromNostrEvent(ev) -> msg        reserved-x-tag rejection (D2)               → dropped_smuggled_op
+3. Sequencer.Ingest(msg) / Drain    dedup + causal order (bounded at ingest)    → orphan_overflow
+4. LocalStore.BatchAppend(...)      Origin="relay"; orphans NEVER persist
+5. pollLocalStore folds+dispatches  trust gate + per-handler operator guards (D3)
+```
+
+#### D1 — RULING: universal per-event signature verify is the floor, run FIRST, for EVERY kind.
+
+The CRITICAL was real by the design's own guarantee: `VerifyOperatorAuthorship` returns `nil` for
+every non-operator kind (`requiresOperatorAuthor` false), so put(3401)/buy(3402)/settle buyer
+phases/assign-claim/assign-complete rode in with `msg.Sender = ev.PubKey` **attacker-controlled and
+cryptographically unbound**. `state_settle.go`'s buyer-phase auth (`msg.Sender == expectedBuyer`,
+lines 104/168/249/341/401) is then sound *only if `msg.Sender` is itself proven* — which nothing did.
+The module's advertised "a dumb relay that enforces nothing is fully defended" was FALSE for all
+non-operator kinds.
+
+**RULE.** Add `nostr.VerifyEventSignature(ev *Event) error` = `identity.VerifyEvent(toIdentityEvent(ev))`
+(reuse the existing `toIdentityEvent`, verify.go:196). Intake calls it as the **unconditional FIRST
+step for EVERY event**, on the raw wire `*nostr.Event` **before** `FromNostrEvent` (the id must be
+recomputed from the wire fields), before `VerifyOperatorAuthorship`, before `Sequencer.Ingest`.
+It recomputes the NIP-01 id and checks the BIP-340 Schnorr signature against `ev.PubKey` for ALL
+kinds; an invalid/absent signature is `dropped_unsigned` + alarm. Cost is one secp256k1 verify
+(~50-150 µs) on the async cache-warm ingest leg only — never on the buy/match response path
+(LOCKED-1). **Composition:** step 0 makes `msg.Sender == ev.PubKey` a cryptographically-bound fact
+for every kind (closing the CRITICAL — buyer-phase settle auth is now sound); `VerifyOperatorAuthorship`
+(step 1) then *escalates* only the operator-only kinds to "and that bound key IS the operator." Its
+internal `identity.VerifyEvent` call (verify.go:185) becomes redundant once step 0 runs first — LEAVE
+IT (defense-in-depth, cheap, already covered by `verify_test.go`). LOCKED Q3 preserved: this is
+client-side re-verify, zero dependence on any relay write policy.
+
+#### D2 — RULING: reject reserved `["x", …]` smuggling at the adapter boundary (option a).
+
+The HIGH was real: `FromNostrEvent` copies an arbitrary `["x", <raw>]` tag verbatim into `msg.Tags`
+(adapter.go:199-202). The ACL (`eventOp`, verify.go:66-78) reads op ONLY from the structured
+`["op"]` tag, but the engine's `exchangeOp` (state_put.go:21-31) FIRST-MATCH scans the flat
+`msg.Tags` — which now contains BOTH the legitimate discriminator AND the smuggled x-value as sibling
+strings, in **attacker-chosen wire order**. Craft kind=3405 signed by the attacker's OWN key with
+`["op","exchange:assign-claim"]` (ACL: worker op, gate skips) + `["x","exchange:assign-auction-close"]`
+ordered first (engine: runs `applyAssignAuctionClose`). Same seam smuggles a phase: an
+`["x","exchange:phase:deliver"]` is copied verbatim and `settlePhaseFromTags` would pick it up.
+
+**RULE — option (a), enforced where the ambiguity is created.** In `FromNostrEvent`'s `tagX` branch,
+REJECT (return error, `dropped_smuggled_op`) any `["x", v]` whose value `v` collides with the
+reserved exchange vocabulary: any first-class exchange op constant (the `exchangeOp` switch set:
+`TagPut/TagBuy/TagMatch/TagSettle` + all seven assign tags + scrip ops), or carries a reserved
+prefix (`TagPhasePrefix` `"exchange:phase:"`, `domainPrefix` `"exchange:domain:"`). These vocabularies
+have first-class tag representations (`op`/`phase`/`t` tags) and MUST NEVER ride as opaque `x`
+passthrough. **Rejected — (b)** adding a canonical `Op` field to `proto.Message`: that seam is
+LOCKED byte-identical and the 32,209-LOC exchange suite passing UNCHANGED is the M2 acceptance gate.
+**Rejected — (c)** making the ACL mirror `exchangeOp`'s first-match scan: that only makes both layers
+agree on the SAME attacker-chosen ambiguity — worse for defense-in-depth. **Defense-in-depth (both
+layers, ships independently of nostr):** harden `exchangeOp` (state_put.go) to fail loud — return
+`""` (unroutable/dropped) if `msg.Tags` contains MORE THAN ONE known op constant, instead of silently
+returning the first. This defends every transport, not just the relay.
+
+#### D3 — RULING: per-handler operator guard is the authoritative correctness boundary; trust-gate-before-Apply is defense-in-depth.
+
+Two distinct layers, do not conflate. **(i) Operator AUTHORSHIP** of operator-only state effects is
+enforced by the `if s.OperatorKey != "" && msg.Sender != s.OperatorKey { return }` guard *inside each
+`State.Apply` handler* — this lives in the fold, so **dispatch ordering cannot bypass it**. Audit of
+`state_assign.go` + `state_settle.go` (exhaustive): every operator-only handler carries the guard —
+`applyAssign`:22, `applyAssignAccept`:335, `applyAssignReject`:363, `applyAssignExpire`:398,
+`applySettlePutAccept`:35, `applySettlePutReject`:66, `applySettleDeliver`:183, `applySettlePreview`:454
+— EXCEPT **`applyAssignAuctionClose` (state_assign.go:205-267)**, the sole gap. Combined with D2 (or a
+non-operator simply signing a 3405 with `["op","exchange:assign-auction-close"]`, since
+`dispatch`'s `TagAssignAuctionClose` case returns nil and lets `state.Apply` do the work), a
+non-operator finalizes an operator-only Vickrey auction (forces winner + clearing price).
+**RULE:** add the identical 3-line guard to `applyAssignAuctionClose` at entry. This is the
+authoritative, ordering-independent boundary and is the primary CLOSE for the b67d exploit — it must
+ship regardless of any dispatch reorder. **(ii) Trust POLICY** (NIP-42 allowlist + reputation floor)
+is the `dispatch` trust gate (engine_core.go:803-816). Two corrections: (a) `tagToTrustOp`
+(engine_core.go:845) returns `""` for the ENTIRE assign family, so assign bypasses trust policy
+entirely — map the assign tags through it, which requires an **assign-sub-op trust axis in `trust.go`
+parallel to `defaultSettlePhaseLevels`** (operator sub-ops → `TrustOperator`, matching
+`operatorAssignOps`; worker sub-ops `assign-claim`/`assign-complete` → the worker level) rather than
+the single flat `OperationAssign=TrustAllowlisted` bucket, which would wrongly loosen the operator
+sub-ops. (b) The trust gate currently runs AFTER `state.Apply` at both call sites (engine_core.go:616
+campfire, :720 local), so a non-allowlisted sender's put/buy pollutes `State` before dispatch rejects
+it. **RULE:** the trust-policy gate SHOULD run before `state.Apply`; reorder so a trust rejection
+short-circuits pre-fold. This is **defense-in-depth, lower severity** (team-tier NIP-42 already bounds
+authorship to the fleet at the relay — ADV-13) and **HIGH-RISK** against the b84/-90d fold-cursor/
+dispatch-cursor invariants (`foldAndDispatchLocalSnapshot`, and `State` holds no `TrustChecker`
+reference — the reorder likely threads trust-extraction ahead of `applyLocked` at both sites). It is
+therefore **gated on new property tests** ("a trust-rejected message never reaches `applyLocked`,
+under both transports, under the fold/dispatch race") and bundled into b67d as its clearly-flagged
+highest-risk element — the auction-close guard and the `tagToTrustOp`/axis work land first and close
+the exploit without waiting on it. Also fix the `WithReputationFloor` doc/impl mismatch surfaced by
+b67d while in `trust.go`.
+
+#### D4 — RULING: every rejection is a DISTINCT counted alarm; forged events NEVER reach the store.
+
+The MEDIUM audit-gap (forged operator events silently `BatchAppend`'d — the dontguess-553
+"fails-toward-silent" mode) is structurally impossible under the §2.4a pipeline because steps 0-2 run
+**before** `Sequencer.Ingest`/`BatchAppend` (step 3-4). **RULE:** Intake wires THREE distinct,
+separately-alarmed counters — `dropped_unsigned` (D1, all kinds), `dropped_forged` (existing
+`ErrForgedOperatorEvent`, operator-kind author/sig mismatch), `dropped_smuggled_op` (D2 reserved
+x-tag) — plus the existing `provenance_rejected` / `orphan_overflow` rows in §3. Do NOT collapse them:
+bad-signature, right-signature-wrong-author, and smuggled-tag are different attack classes with
+different triage paths. `errors.Is(err, ErrForgedOperatorEvent)` remains the matchable sentinel for
+`dropped_forged`. No rejection path may `return nil` silently (LOCKED-5).
+
+#### D5 — RULING: complete the operator-authored phase/op map — add settle(failed); rest is clean.
+
+`exchange.SettlePhaseStrFailed = "failed"` (state_types.go:76) IS operator-authored — `emitSettleFailed`
+(engine_settle.go:304-320) builds `[TagSettle, TagPhasePrefix+"failed"]` via `sendOperatorMessage` —
+but is MISSING from `operatorSettlePhases` (verify.go:39-44), so a non-operator could forge it.
+Impact is bounded: `applySettle`'s phase switch (state_settle.go:9-31) has NO `"failed"` case, so a
+forged settle(failed) mutates no fold state; the risk is a client trusting an unauthenticated
+relay-delivered failure notice — real but MEDIUM. **RULE:** add `exchange.SettlePhaseStrFailed: {}`
+to `operatorSettlePhases`. **Audit result (the rest is clean):** the five assign operator sub-ops are
+all present in `operatorAssignOps`; match(3403) and scrip(3411) are kind-wide operator-required
+(`requiresOperatorAuthor` returns true for the whole kind); `settle.json`'s sender-roles list matches
+verify.go's operator set. settle(failed) is the sole gap.
+
+**Locked invariants preserved by this amendment:** Q3 client-side re-verify floor (D1 depends on no
+relay policy); operator = sole order authority, local path operator-trusted by construction (D3 guards
+only foreign/ingested authorship, never the operator's own writes); loud degradation on every drop
+(D4); `proto.Message`/`SpendingStore`/Sequencer seams byte-identical (D2 chose the boundary-layer
+fix precisely to hold this — no Message shape change).
+
 ---
 
 ## 3. Failure / degradation model (LOCKED-5)
@@ -294,12 +433,20 @@ behind," never toward "silently wrong." The buy hit path is unaffected by every 
 | ADV-12 | Scrip emit-failure swallowed after in-memory mutate | **RESOLVED (Build outcome).** Reorder `performScripSettlement` to emit-durable-then-mutate (like `handleDeadlineMissRefund`); emit failure is loud + retried via Outbox. |
 | ADV-13 | Attacker controls `(Timestamp,ID)` sort keys for foreign events | **CONSTRAINT (neutralized at team tier).** NIP-42 allowlist bounds authorship to fleet; foreign kinds are only put/buy; every order-sensitive money/authority decision (assign first-writer, Vickrey close) is resolved by the operator's single-writer emission, not by foreign relative order. Enforce `dg_ts` always emitted so ties never mass-collapse to grindable ids. |
 | ADV-14 | Silent provenance/forgery drops; match absent from dispatch switch | **RESOLVED.** Intake operator-key ACL + schnorr re-verify pre-fold; all drops counted+alarmed; no relay-ingested event claiming operator authorship reaches a state mutation without verification (§2.4, §3). |
+| ADV-15 | No universal per-event sig verify; non-operator kinds ride in with attacker-controlled `Sender` → spoof a buyer's settle-buyer-phase | **RESOLVED (§2.4a D1).** `VerifyEventSignature` runs FIRST for EVERY kind pre-Ingest; `msg.Sender==ev.PubKey` cryptographically bound; `state_settle.go` buyer-phase auth now sound. |
+| ADV-16 | ACL/engine op-parser differential via `["x",raw]` smuggling → non-operator finalizes Vickrey auction | **RESOLVED (§2.4a D2+D3).** `FromNostrEvent` rejects reserved-vocabulary x-tags (`dropped_smuggled_op`); `exchangeOp` fails loud on multi-op; `applyAssignAuctionClose` gains the operator guard. |
+| ADV-17 | Operator-only state effect executes before the trust/authorship gate can reject | **RESOLVED for authorship (§2.4a D3-i):** per-handler `Sender==OperatorKey` guard lives in the fold, ordering-independent; auction-close gap closed. **CONSTRAINT for trust POLICY (D3-ii):** allowlist/reputation gate reorder-before-Apply is DEFERRED (b84/-90d regression risk); until it lands, a non-allowlisted put/buy transiently pollutes `State` before dispatch rejects it — bounded by team-tier NIP-42 allowlist (ADV-13), no money effect, gated on property tests. |
+| ADV-18 | settle(failed) operator-authored but absent from `operatorSettlePhases` → forgeable | **RESOLVED (§2.4a D5).** Added to the map. Bounded pre-fix: no `applySettle` "failed" case, so client-notice forgery only. |
 
 Permanent constraints (cannot be engineered to zero, only bounded):
 **ADV-11** (fsync/lock coupling on operator emit — monitored), **ADV-13** (foreign tie-break is
-biasable — neutralized by allowlist + operator-authored resolution), and the **ADV-9 cache-warm
+biasable — neutralized by allowlist + operator-authored resolution), the **ADV-9 cache-warm
 residual** (bounded-window backfill can miss an unreferenced far-past root — audited, not
-money-affecting).
+money-affecting), the **ADV-17 trust-policy-reorder residual** (non-allowlisted foreign put/buy
+transiently folded before dispatch-reject until the gated reorder ships — bounded by NIP-42, no money
+effect), and the **afb antecedent-completeness residual** (Sequencer trusts each event's
+self-declared `Antecedents`; a crafted event omitting its true antecedent can release early —
+mitigated but not eliminated by the afb completeness check; see build item 5).
 
 ---
 
