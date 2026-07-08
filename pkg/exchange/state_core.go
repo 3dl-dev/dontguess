@@ -165,16 +165,21 @@ func (s *State) applyLocked(msg *Message) {
 	case TagAssignAuctionClose:
 		s.applyAssignAuctionClose(msg)
 	default:
-		// Handle non-exchange-op messages that carry known tags.
-		for _, tag := range msg.Tags {
-			switch tag {
-			case scrip.TagScripBuyHold:
-				s.applyScripBuyHold(msg)
-				return
-			case TagConsume:
-				s.applyConsume(msg)
-				return
-			}
+		// Canonical ops with no switch case above (scrip ops, consume) dispatch
+		// here. CRITICAL (dontguess-5be, docs/design/relay-transport.md §2.4a D2):
+		// dispatch on the RESOLVED op, never on a raw msg.Tags scan. exchangeOp
+		// already enforced the single-canonical-op invariant — if it returned ""
+		// the message is ambiguous/smuggled (two+ distinct canonical ops) or
+		// carries no canonical op at all, and MUST be dropped, consistent with
+		// the switch path. A raw msg.Tags scan would instead fire a handler off a
+		// smuggled tag (e.g. [scrip-buy-hold, assign-auction-close] resolving to
+		// "" yet still triggering applyScripBuyHold) — the residual half of the
+		// parser-differential that c22/e15/13c closed only for the switch path.
+		switch op {
+		case scrip.TagScripBuyHold:
+			s.applyScripBuyHold(msg)
+		case TagConsume:
+			s.applyConsume(msg)
 		}
 	}
 }
