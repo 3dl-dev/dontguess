@@ -33,3 +33,37 @@ type IntakeMetrics struct {
 	// buffered pending-antecedent events. Loud — the operator investigates. (§3)
 	OrphanOverflow atomic.Int64
 }
+
+// WatchdogMetrics holds the reconnection / gap-recovery counters
+// (docs/design/relay-transport.md §2.5 + §3). Like IntakeMetrics, each is a
+// DISTINCT atomic.Int64 so the watchdog's background goroutines can update them
+// without a lock, and every increment is paired with a loud alarm at the call
+// site (LOCKED-5) — none is a silent internal-only signal.
+type WatchdogMetrics struct {
+	// IntakeDisconnected counts live-subscription drops the watchdog reacted to
+	// by re-issuing the reconnect backfill (REQ since=watermark−slack). (§3
+	// intake_disconnected)
+	IntakeDisconnected atomic.Int64
+	// OrphanPending is a GAUGE (Store, not Add): the number of events currently
+	// held in the sequencer's orphan buffer, sampled on each CheckOrphans pass.
+	// A recoverable causal gap — the targeted e-tag refetch may still fill it. (§3
+	// orphan_pending)
+	OrphanPending atomic.Int64
+	// OrphanUnrecoverable counts orphan CHAINS quarantined because a targeted
+	// REQ ["ids", <antecedent>] came back empty — the antecedent is provably
+	// unrecoverable (relay-pruned). Incremented once per quarantined chain; the
+	// chain's dependents stall (correct), every other chain keeps draining. (§3
+	// orphan_unrecoverable)
+	OrphanUnrecoverable atomic.Int64
+	// OrphanRefetch counts targeted e-tag refetch REQs the watchdog issued for a
+	// pending antecedent (whether or not they recovered it). Diagnostic.
+	OrphanRefetch atomic.Int64
+	// ResyncMismatch counts events the periodic since=0 audit found on the relay
+	// but absent from the local store AND still unfetchable after the audit fed
+	// them through the Intake (an orphan or a rejected event) — a loud
+	// reconcile-impossible signal. (§3 resync_mismatch)
+	ResyncMismatch atomic.Int64
+	// ResyncRepublished counts local-only operator events the since=0 audit found
+	// the relay lacked and handed to the Outbox catch-up for re-publish. (§2.5)
+	ResyncRepublished atomic.Int64
+}
