@@ -273,9 +273,10 @@ func (e *Engine) autoAcceptPutLocked(putMsgID string, price int64, expiresAt tim
 		e.state.Apply(rec)
 	}
 
-	// Record the seller's current provenance level against the newly accepted entry.
-	if e.opts.ProvenanceChecker != nil && putSellerKey != "" {
-		level := int(e.opts.ProvenanceChecker.store.Level(putSellerKey))
+	// Record the seller's current trust level against the newly accepted entry,
+	// so a later de-allowlisting can flag the entry for re-validation.
+	if e.opts.TrustChecker != nil && putSellerKey != "" {
+		level := int(e.opts.TrustChecker.Level(putSellerKey))
 		e.state.SetEntryProvenanceLevel(putMsgID, level)
 	}
 

@@ -18,7 +18,6 @@ import (
 
 	"github.com/campfire-net/campfire/cf-protocol/protocol"
 	"github.com/campfire-net/campfire/cf-protocol/store"
-	"github.com/campfire-net/campfire/pkg/provenance"
 	"github.com/campfire-net/dontguess/pkg/exchange"
 	"github.com/campfire-net/dontguess/pkg/matching"
 	"github.com/campfire-net/dontguess/pkg/scrip"
@@ -129,29 +128,23 @@ func runServe(_ *cobra.Command, _ []string) error {
 	}
 	logger := log.New(logDest, "[exchange] ", log.LstdFlags|log.Lmsgprefix)
 
-	provCfg := provenance.DefaultConfig()
-	provCfg.AllowSelfAttestation = true
-	provenanceStore := provenance.NewStore(provCfg)
-	// Self-claim the operator and all existing campfire members so they can
-	// participate immediately. Anonymous provenance blocks all operations.
+	// Trust gate (replaces the former campfire provenance store):
+	//   - the operator key gets operator write authority (match/settle(put-*)/mint/burn);
+	//   - every current campfire member is admitted to the fleet allowlist so they
+	//     can put/settle-buyer/assign immediately.
+	// Campfire keys are ed25519 and do not parse as secp256k1 npubs, so the
+	// membership is a plain KeySet rather than identity.Allowlist here; the nostr
+	// transport swap re-homes this onto identity.Allowlist over fleet npubs.
 	operatorKey := writeClient.PublicKeyHex()
-	provenanceStore.TrustVerifier(operatorKey, 0)
-	provenanceStore.SetSelfClaimed(operatorKey)
-	// Self-attest the operator to reach "present" level — required for
-	// match, settle(put-accept/reject/deliver), mint, burn, rate-publish.
-	_ = provenanceStore.AddAttestation(&provenance.Attestation{
-		TargetKey:   operatorKey,
-		VerifierKey: operatorKey,
-		VerifiedAt:  time.Now(),
-		CoSigned:    true,
-	})
+	fleet := exchange.NewKeySet()
 	members, _ := writeClient.Members(cfg.ExchangeCampfireID)
 	for _, m := range members {
-		provenanceStore.SetSelfClaimed(m.MemberPubkey)
+		fleet.Add(m.MemberPubkey)
 	}
-	provenanceChecker, err := exchange.NewProvenanceChecker(provenanceStore, cfg.ProvenanceLevels)
+	trustChecker, err := exchange.NewTrustChecker(operatorKey, fleet,
+		exchange.WithTrustLevelOverrides(cfg.TrustLevels))
 	if err != nil {
-		return fmt.Errorf("creating provenance checker: %w", err)
+		return fmt.Errorf("creating trust checker: %w", err)
 	}
 
 	// Use dense embeddings if the embed script is available.
@@ -168,18 +161,26 @@ func runServe(_ *cobra.Command, _ []string) error {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        cfg.ExchangeCampfireID,
-		Store:             st,
-		ReadClient:        readClient,
-		WriteClient:       writeClient,
-		Embedder:          embedder,
-		PollInterval:      servePollInterval,
-		ScripStore:        cs,
-		ProvenanceChecker: provenanceChecker,
+		CampfireID:   cfg.ExchangeCampfireID,
+		Store:        st,
+		ReadClient:   readClient,
+		WriteClient:  writeClient,
+		Embedder:     embedder,
+		PollInterval: servePollInterval,
+		ScripStore:   cs,
+		TrustChecker: trustChecker,
 		Logger: func(format string, args ...any) {
 			logger.Printf(format, args...)
 		},
 	})
+
+	// Reputation floor is opt-in: only wire the behavioral reputation source when
+	// the operator configured a positive floor, to avoid silently blocking sellers.
+	// Set before the poll loop starts (below) so there is no concurrent access.
+	if cfg.MinReputation > 0 {
+		trustChecker.SetReputationFloor(eng.State().SellerReputation, cfg.MinReputation)
+		logger.Printf("  reputation floor: %d (sell-side puts below this rejected)", cfg.MinReputation)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -248,8 +249,8 @@ func runServeLocal(dgHome string) error {
 		logger.Printf("  embedder:  tf-idf (set DONTGUESS_EMBED_SCRIPT for dense)")
 	}
 
-	// No ReadClient, no WriteClient, no ScripStore, no ProvenanceChecker —
-	// none of those require a campfire. ScripStore/ProvenanceChecker nil
+	// No ReadClient, no WriteClient, no ScripStore, no TrustChecker —
+	// none of those require a campfire. ScripStore/TrustChecker nil
 	// already means "skip these checks" (see their EngineOptions doc).
 	eng := exchange.NewEngine(exchange.EngineOptions{
 		CampfireID:        "local",

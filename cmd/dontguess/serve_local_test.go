@@ -10,7 +10,7 @@ package main
 // with only CampfireID/LocalStore/OperatorPublicKey set) and drives a real
 // put -> put-accept -> buy -> match flow through eng.Start, with NO
 // protocol.Client, NO ReadClient/WriteClient, NO ScripStore, NO
-// ProvenanceChecker anywhere in this file — nothing here can reach a
+// TrustChecker anywhere in this file — nothing here can reach a
 // campfire even if one existed.
 
 import (

@@ -161,9 +161,10 @@ type EngineOptions struct {
 	// on buy / settle / dispute operations. If nil, scrip checks are skipped (useful
 	// for tests that do not exercise the scrip flow).
 	ScripStore scrip.SpendingStore
-	// ProvenanceChecker validates sender provenance levels before processing operations.
-	// If nil, provenance checks are skipped (useful for tests that don't exercise provenance).
-	ProvenanceChecker *ProvenanceChecker
+	// TrustChecker gates sender authority (NIP-42 allowlist + operator write
+	// authority + reputation floor) before processing operations. If nil, trust
+	// checks are skipped (useful for tests that don't exercise trust gating).
+	TrustChecker *TrustChecker
 	// ReadSkipSync skips the filesystem sync step in Read operations.
 	// Set to true when the ReadClient shares its store with the test harness's
 	// store (h.st), so that messages written directly to h.st are visible
@@ -798,16 +799,16 @@ func (e *Engine) rebuildAndDispatchGapLocal() error {
 func (e *Engine) dispatch(msg *Message) error {
 	op := exchangeOp(msg.Tags)
 
-	// Provenance gate: check sender's provenance level if checker is configured.
-	if e.opts.ProvenanceChecker != nil {
+	// Trust gate: check sender's trust level if a checker is configured.
+	if e.opts.TrustChecker != nil {
 		var phase SettlePhase
 		if op == TagSettle {
 			phase = SettlePhase(settlePhaseFromTags(msg.Tags))
 		}
-		provOp := tagToProvenanceOp(op)
-		if provOp != "" {
-			if err := e.opts.ProvenanceChecker.Check(msg.Sender, provOp, phase); err != nil {
-				e.opts.log("engine: provenance rejected msg=%s op=%s sender=%s: %v",
+		trustOp := tagToTrustOp(op)
+		if trustOp != "" {
+			if err := e.opts.TrustChecker.Check(msg.Sender, trustOp, phase); err != nil {
+				e.opts.log("engine: trust rejected msg=%s op=%s sender=%s: %v",
 					msg.ID, op, shortKey(msg.Sender), err)
 				return nil // silently reject — don't propagate error to poll loop
 			}
@@ -839,9 +840,9 @@ func (e *Engine) dispatch(msg *Message) error {
 	return nil
 }
 
-// tagToProvenanceOp maps a campfire exchange operation tag to a provenance Operation type.
-// Returns "" for unknown/untracked operations (no provenance check needed).
-func tagToProvenanceOp(op string) Operation {
+// tagToTrustOp maps a campfire exchange operation tag to a trust Operation type.
+// Returns "" for unknown/untracked operations (no trust check needed).
+func tagToTrustOp(op string) Operation {
 	switch op {
 	case TagPut:
 		return OperationPut
@@ -852,7 +853,7 @@ func tagToProvenanceOp(op string) Operation {
 	case TagSettle:
 		return OperationSettle
 	default:
-		return "" // unknown operation — no provenance check
+		return "" // unknown operation — no trust check
 	}
 }
 
@@ -1161,7 +1162,7 @@ func (e *Engine) createCompressionDerivative(rec *AssignRecord, acceptMsgID stri
 		PutTimestamp:   orig.PutTimestamp,
 		CompressedFrom: orig.EntryID,
 		// AcceptedProvenanceLevel and NeedsRevalidation inherit zero values;
-		// provenance checking is done at put-accept time for primary entries.
+		// trust checking is done at put-accept time for primary entries.
 	}
 
 	// Insert into state inventory (thread-safe via accessor).
