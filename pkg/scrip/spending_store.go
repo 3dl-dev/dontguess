@@ -9,6 +9,14 @@
 // imported because Forge's ratelimit package is internal to that module.
 // The semantics are identical: pre-decrement / adjust / refund pattern with
 // ETag-based optimistic locking.
+//
+// SpendingStore is transport-agnostic by design: it names no campfire, relay,
+// or local-store type in its method signatures. relay_store.go's
+// CampfireScripStore is the implementation on file, constructible over either
+// a live campfire (NewCampfireScripStore) or a campfire-free relay/local
+// event log (NewLocalScripStore, dontguess-203) — this interface's shape is
+// identical either way, which is what lets pkg/exchange depend on
+// SpendingStore without caring which transport backs it.
 package scrip
 
 import (
