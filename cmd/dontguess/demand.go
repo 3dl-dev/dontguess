@@ -77,10 +77,15 @@ func runDemand(_ *cobra.Command, _ []string) error {
 	}
 
 	// Read all exchange:buy-miss messages from the campfire (read-only).
-	// buy-miss messages carry both TagBuyMiss and TagMatch tags; query by TagBuyMiss
-	// to get only misses (not the hit-match messages). TagBuyMiss doesn't own a
-	// nostr kind (it's a discriminator on a kind-3403 match message), so it's
-	// matched via the ReqFilter "x" passthrough tag — see reqfilter.go.
+	// buy-miss standing offers carry both TagBuyMiss and TagMatch tags; query
+	// by TagBuyMiss to get only misses (not the hit-match messages). TagBuyMiss
+	// doesn't own a nostr kind (it's a discriminator on a kind-3403 match
+	// message), so it's matched via the ReqFilter "x" passthrough tag — see
+	// reqfilter.go. buyMissFilter also excludes TagSettle: a fulfilled offer's
+	// settle(put-accept) message (pkg/exchange/engine_put.go's emitPutAccept)
+	// is ALSO stamped with TagBuyMiss to link it back to the offer it filled,
+	// so without the exclusion this read would return fulfillment messages
+	// too and BuildBacklog would misparse them as phantom empty-task misses.
 	rawMisses, err := readFilter(client, cfg.ExchangeCampfireID, buyMissFilter(cutoffNano))
 	if err != nil {
 		return fmt.Errorf("read miss log: %w", err)

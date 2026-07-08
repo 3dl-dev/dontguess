@@ -40,6 +40,22 @@ type ReqFilter struct {
 	// worked. None of the three CLI commands need AND-of-tag-families.
 	Tags map[string][]string
 
+	// ExcludeTags holds literal legacy exchange tags: a message is dropped
+	// from the result even if it matches Kinds/Tags when it also carries any
+	// tag listed here (passed straight through to protocol.ReadRequest.
+	// ExcludeTags, which the underlying store treats as "exclude if message
+	// has ANY of these exact tags" — see cf-protocol/internal/store).
+	//
+	// This exists because some legacy tags are stamped on more than one
+	// logical message type: emitPutAccept (pkg/exchange/engine_put.go) tags a
+	// buy-miss fulfillment's settle(put-accept) message with TagBuyMiss
+	// *alongside* TagSettle+phase:put-accept, so a bare Tags-based buy-miss
+	// query also matches fulfillment messages, not just open standing offers.
+	// ExcludeTags lets a filter say "has this tag, but is not also that other
+	// message type" without an AND-of-tag-families the campfire query can't
+	// express positively.
+	ExcludeTags []string
+
 	// Since is an inclusive lower bound on message timestamp (nanoseconds).
 	// 0 means no lower bound.
 	Since int64
@@ -84,10 +100,11 @@ func (f ReqFilter) legacyTags() []string {
 
 // The functions below are the ReqFilter equivalent of each deleted
 // pkg/exchange.StandardViews() entry that hitrate.go, status.go, and demand.go
-// actually query (put-accept/put-reject share kind 3401 with plain puts, so
-// they're distinguished by the "phase" tag rather than Kinds; buy-miss and
-// consume don't own a kind at all, so they're distinguished by the "x"
-// passthrough tag — see the ReqFilter.Tags doc above).
+// actually query (put-accept/put-reject share kind 3404 (KindSettle) with
+// plain settlements — they're all settle(phase) sub-messages — so they're
+// distinguished by the "phase" tag rather than Kinds; buy-miss and consume
+// don't own a kind at all, so they're distinguished by the "x" passthrough
+// tag — see the ReqFilter.Tags doc above).
 
 // putsFilter is the "puts" view: all exchange:put messages.
 func putsFilter(since int64) ReqFilter {
@@ -111,9 +128,13 @@ func settlementsFilter(since int64) ReqFilter {
 }
 
 // putAcceptsFilter is the "put-accepts" view: exchange:phase:put-accept
-// messages (a put-accept is a phase of the put op, so it carries kind 3401
-// plus the phase tag; matching on the phase tag alone reproduces the
-// original single-tag-predicate view).
+// messages (a put-accept is a settle-phase message — emitted by both
+// autoAcceptPutLocked and emitPutAccept in pkg/exchange — so it carries kind
+// 3404 (KindSettle) plus the phase tag; matching on the phase tag alone
+// reproduces the original single-tag-predicate view and also naturally
+// includes buy-miss fulfillments, which is the desired "all accepted puts"
+// count for status.go — see buyMissFilter below for the narrower "open
+// standing offers only" case).
 func putAcceptsFilter(since int64) ReqFilter {
 	return ReqFilter{Tags: map[string][]string{"phase": {exchange.SettlePhaseStrPutAccept}}, Since: since}
 }
@@ -134,8 +155,25 @@ func consumesFilter(since int64) ReqFilter {
 
 // buyMissFilter is the demand command's read of exchange:buy-miss standing
 // offers (no dedicated view existed for this either).
+//
+// TagBuyMiss alone is not enough to isolate open standing offers: emitPutAccept
+// (pkg/exchange/engine_put.go) also stamps a buy-miss fulfillment's
+// settle(put-accept) message with TagBuyMiss, alongside TagSettle and
+// phase:put-accept — so it can be paid and tracked back to the offer it
+// filled. Without ExcludeTags, a bare exchange:buy-miss tag query would
+// return both the still-open standing offer (kind Match, tags
+// [TagBuyMiss, TagMatch]) and every fulfillment settle message for offers
+// that have already been filled, corrupting demand.BuildBacklog (which
+// parses each hit as a BuyMissPayload — a fulfillment's payload has no
+// "task" field, so it decodes to an empty-task phantom backlog entry).
+// ExcludeTags{TagSettle} drops fulfillment messages, since a genuine open
+// standing offer never carries TagSettle.
 func buyMissFilter(since int64) ReqFilter {
-	return ReqFilter{Tags: map[string][]string{"x": {exchange.TagBuyMiss}}, Since: since}
+	return ReqFilter{
+		Tags:        map[string][]string{"x": {exchange.TagBuyMiss}},
+		ExcludeTags: []string{exchange.TagSettle},
+		Since:       since,
+	}
 }
 
 // readFilter executes f against the exchange campfire identified by cfID and
@@ -143,8 +181,9 @@ func buyMissFilter(since int64) ReqFilter {
 // client-side (see ReqFilter doc).
 func readFilter(client *protocol.Client, cfID string, f ReqFilter) ([]exchange.Message, error) {
 	result, err := client.Read(protocol.ReadRequest{
-		CampfireID: cfID,
-		Tags:       f.legacyTags(),
+		CampfireID:  cfID,
+		Tags:        f.legacyTags(),
+		ExcludeTags: f.ExcludeTags,
 	})
 	if err != nil {
 		return nil, err
