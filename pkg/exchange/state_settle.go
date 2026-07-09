@@ -33,6 +33,7 @@ func (s *State) applySettle(msg *Message) {
 // applySettlePutAccept moves an entry from pending to active inventory.
 func (s *State) applySettlePutAccept(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	if len(msg.Antecedents) == 0 {
@@ -64,6 +65,7 @@ func (s *State) applySettlePutAccept(msg *Message) {
 // applySettlePutReject removes an entry from pending inventory.
 func (s *State) applySettlePutReject(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	if len(msg.Antecedents) == 0 {
@@ -99,9 +101,16 @@ func (s *State) applySettleBuyerAccept(msg *Message) {
 	}
 
 	// Enforce buyer identity: the sender must be the buyer who placed the
-	// original buy order that this match fulfills.
+	// original buy order that this match fulfills. An unknown match (!ok) is a
+	// benign drop (stale/never-seen antecedent); a KNOWN match with the wrong
+	// sender is a security-relevant buyer-identity forgery and is counted +
+	// alarmed rather than dropped silently (dontguess-9ed, convention §5.3).
 	expectedBuyer, ok := s.matchToBuyer[matchMsgID]
-	if !ok || msg.Sender != expectedBuyer {
+	if !ok {
+		return
+	}
+	if msg.Sender != expectedBuyer {
+		s.recordFoldDenial(foldDenialBuyerIdentity, msg)
 		return
 	}
 
@@ -181,6 +190,7 @@ func (s *State) applySettleBuyerReject(msg *Message) {
 // the deliver→match mapping for use by applySettleComplete.
 func (s *State) applySettleDeliver(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	if len(msg.Antecedents) == 0 {

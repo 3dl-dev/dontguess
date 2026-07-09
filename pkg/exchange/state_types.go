@@ -737,9 +737,24 @@ type State struct {
 	mu sync.RWMutex
 
 	// OperatorKey is the hex-encoded Ed25519 public key of the exchange operator.
-	// Operator-only messages (put-accept, put-reject, match, deliver) are silently
-	// rejected when their Sender does not match this key.
+	// Operator-only messages (put-accept, put-reject, match, deliver) are
+	// rejected when their Sender does not match this key. Those rejections are
+	// counted + alarmed via onFoldDenial (dontguess-9ed), not dropped silently.
 	OperatorKey string
+
+	// onFoldDenial, when non-nil, is invoked when a security-relevant fold guard
+	// (operator-only settlement guard, or the buyer-identity gate) rejects a
+	// message — it counts + alarms the drop. Wired by NewEngine to increment the
+	// engine's DegradationMetrics and log. nil when State is constructed directly
+	// in tests: the guard still rejects, just without counting. Caller holds s.mu.
+	onFoldDenial func(reason foldDenialReason, msg *Message)
+
+	// replaying is true only for the duration of Replay. Fold-guard denials seen
+	// during a full log replay MUST NOT re-increment the live counters — the log
+	// is replayed on every engine restart / state rebuild, so counting there
+	// would inflate the alarm counters without a new real-time rejection. Live
+	// Apply (not replaying) is the only path that counts.
+	replaying bool
 
 	// Inventory is keyed by EntryID (= put message ID).
 	// Includes only accepted, non-expired entries.

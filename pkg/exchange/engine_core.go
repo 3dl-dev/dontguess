@@ -389,6 +389,24 @@ type DegradationMetrics struct {
 	// Present so a future new rejection class is still counted, never dropped
 	// into a silent nil-return while its bucket is added.
 	TrustDenialOther atomic.Int64
+
+	// FoldDenialNotOperator counts STATE-fold rejections where an operator-only
+	// settlement fold guard (applySettlePutAccept / applySettlePutReject /
+	// applySettleDeliver in state_settle.go) dropped a message whose Sender is
+	// not the operator key. Distinct from TrustDenialNotOperator, which is the
+	// dispatch trust gate: the trust gate runs on the ENGINE side (matching,
+	// operator responses), while these guards run inside State.Apply and are the
+	// last line of defense against a forged operator-authored settlement mutating
+	// state directly. A forged put-accept that reached the fold without being
+	// counted here would be a silent security-relevant drop (dontguess-9ed
+	// LOCKED-5).
+	FoldDenialNotOperator atomic.Int64
+	// FoldDenialBuyerIdentity counts STATE-fold rejections where a
+	// settle(buyer-accept) was dropped because its Sender is not the buyer bound
+	// to the match (applySettleBuyerAccept, convention §5.3 buyer-identity gate).
+	// A forged buyer-accept that reached the fold without being counted would let
+	// a non-buyer bind/redirect another buyer's match silently (dontguess-9ed).
+	FoldDenialBuyerIdentity atomic.Int64
 }
 
 // DegradationCounts is a plain (non-atomic) point-in-time copy of
@@ -399,6 +417,35 @@ type DegradationCounts struct {
 	TrustDenialNotOperator    int64 `json:"trust_denial_not_operator"`
 	TrustDenialLowReputation  int64 `json:"trust_denial_low_reputation"`
 	TrustDenialOther          int64 `json:"trust_denial_other"`
+	FoldDenialNotOperator     int64 `json:"fold_denial_not_operator"`
+	FoldDenialBuyerIdentity   int64 `json:"fold_denial_buyer_identity"`
+}
+
+// foldDenialReason identifies which security-relevant State.Apply fold guard
+// dropped a message, so the wired counter callback (set in NewEngine) can bucket
+// it into the matching DegradationMetrics counter and emit a loud log line —
+// closing the silent nil-drop the guards previously did (dontguess-9ed LOCKED-5).
+type foldDenialReason int
+
+const (
+	// foldDenialNotOperator: an operator-only settlement fold guard rejected a
+	// non-operator sender (put-accept / put-reject / deliver).
+	foldDenialNotOperator foldDenialReason = iota
+	// foldDenialBuyerIdentity: settle(buyer-accept) rejected because the sender
+	// is not the buyer bound to the match.
+	foldDenialBuyerIdentity
+)
+
+// String renders a foldDenialReason for the alarm log line.
+func (r foldDenialReason) String() string {
+	switch r {
+	case foldDenialNotOperator:
+		return "not-operator"
+	case foldDenialBuyerIdentity:
+		return "buyer-identity"
+	default:
+		return "unknown"
+	}
 }
 
 // engineCtx returns the shutdown context stored at Start time.
@@ -432,7 +479,7 @@ func NewEngine(opts EngineOptions) *Engine {
 		// Derive operator key from the write client's identity (convenience path).
 		st.OperatorKey = opts.WriteClient.PublicKeyHex()
 	}
-	return &Engine{
+	e := &Engine{
 		opts:               opts,
 		state:              st,
 		matchIndex:         idx,
@@ -441,6 +488,23 @@ func NewEngine(opts EngineOptions) *Engine {
 		localMsgByID:       make(map[string]*Message),
 		degradation:        &DegradationMetrics{},
 	}
+	// Wire the State fold-guard denial callback so security-relevant silent
+	// drops inside State.Apply (operator-only settlement guards; the
+	// buyer-identity gate) are counted into the same DegradationMetrics the
+	// dispatch trust gate uses and alarmed with a loud log line — never a bare
+	// nil (dontguess-9ed LOCKED-5). Skipped during State.Replay (see State.replaying)
+	// so a full log rebuild does not re-inflate the live counters each restart.
+	st.onFoldDenial = func(reason foldDenialReason, msg *Message) {
+		switch reason {
+		case foldDenialNotOperator:
+			e.degradation.FoldDenialNotOperator.Add(1)
+		case foldDenialBuyerIdentity:
+			e.degradation.FoldDenialBuyerIdentity.Add(1)
+		}
+		e.opts.log("engine: fold rejected msg=%s reason=%s sender=%s",
+			msg.ID, reason, shortKey(msg.Sender))
+	}
+	return e
 }
 
 // State returns the engine's live state view.
@@ -457,6 +521,8 @@ func (e *Engine) DegradationSnapshot() DegradationCounts {
 		TrustDenialNotOperator:    e.degradation.TrustDenialNotOperator.Load(),
 		TrustDenialLowReputation:  e.degradation.TrustDenialLowReputation.Load(),
 		TrustDenialOther:          e.degradation.TrustDenialOther.Load(),
+		FoldDenialNotOperator:     e.degradation.FoldDenialNotOperator.Load(),
+		FoldDenialBuyerIdentity:   e.degradation.FoldDenialBuyerIdentity.Load(),
 	}
 }
 
@@ -928,6 +994,12 @@ func tagToTrustOp(op string) Operation {
 		return OperationBuy
 	case TagMatch:
 		return OperationMatch
+	case TagConsume:
+		// Consume signals are operator-authored (emitConsumeSignal) and feed the
+		// per-entry behavioral booster. Route through the operator-only
+		// OperationConsume so a forged non-operator consume is gated + counted at
+		// the trust gate instead of reaching the fold unchecked (dontguess-9ed).
+		return OperationConsume
 	case TagSettle:
 		return OperationSettle
 	// The seven assign-family sub-ops each carry their own trust level rather than

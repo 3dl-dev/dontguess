@@ -590,12 +590,14 @@ func printStatus(snap *StatusSnapshot, asJSON bool) {
 	}
 	fmt.Println()
 
-	fmt.Printf("Degradation (dispatch trust-gate rejections)\n")
+	fmt.Printf("Degradation (dispatch trust-gate + state-fold rejections)\n")
 	if snap.Degradation != nil {
-		fmt.Printf("  not allowlisted: %d\n", snap.Degradation.TrustDenialNotAllowlisted)
-		fmt.Printf("  not operator:    %d\n", snap.Degradation.TrustDenialNotOperator)
-		fmt.Printf("  low reputation:  %d\n", snap.Degradation.TrustDenialLowReputation)
-		fmt.Printf("  other:           %d\n", snap.Degradation.TrustDenialOther)
+		fmt.Printf("  not allowlisted:    %d\n", snap.Degradation.TrustDenialNotAllowlisted)
+		fmt.Printf("  not operator:       %d\n", snap.Degradation.TrustDenialNotOperator)
+		fmt.Printf("  low reputation:     %d\n", snap.Degradation.TrustDenialLowReputation)
+		fmt.Printf("  other:              %d\n", snap.Degradation.TrustDenialOther)
+		fmt.Printf("  fold not-operator:  %d\n", snap.Degradation.FoldDenialNotOperator)
+		fmt.Printf("  fold buyer-identity:%d\n", snap.Degradation.FoldDenialBuyerIdentity)
 	} else {
 		fmt.Printf("  n/a (%s)\n", snap.DegradationNote)
 	}
