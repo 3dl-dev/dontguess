@@ -94,6 +94,26 @@ func WithLogf(logf func(format string, args ...interface{})) Option {
 	}
 }
 
+// WithoutClientAuth disables the NIP-42 client handshake, so the Conn dials and
+// proceeds STRAIGHT to publish/subscribe without waiting for an ["AUTH", …]
+// challenge. It is the interop switch for a relay that OFFERS-BUT-DOES-NOT-
+// REQUIRE NIP-42 AUTH and instead gates writes by a signed-author allowlist:
+// strfry (dontguess-13f infra) verifies the event's BIP-340 Schnorr signature
+// and then a writePolicy plugin checks the author pubkey — it never pushes an
+// AUTH challenge for writes. Against such a relay the default handshake
+// (identity.ClientAuthenticate) blocks forever on ReadMessage waiting for a
+// challenge that never arrives; this option is the explicit, named opt-out
+// (mirroring identity.OpenAllowlist()'s "disable the gate at the call site,
+// auditably" pattern) rather than a silent auto-detect.
+//
+// It weakens NOTHING on the receive/fold path: the Intake's §2.4a universal
+// signature floor (VerifyEventSignature over EVERY ingested event) and
+// operator-authorship gate (VerifyOperatorAuthorship for operator-only kinds)
+// are independent of this connection handshake and stay fully enforced. The
+// operator's own outbound events are still Schnorr-signed end to end — this only
+// skips the connection-level NIP-42 AUTH exchange the relay does not require.
+func WithoutClientAuth() Option { return func(c *Conn) { c.skipAuth = true } }
+
 // Conn is a self-healing single-relay connection. It owns the websocket
 // lifecycle: dial, the NIP-42 client handshake (via identity.ClientAuthenticate),
 // and reconnect-with-backoff on drop. It does NOT own subscription state,
@@ -107,9 +127,10 @@ type Conn struct {
 	url    string
 	signer identity.Signer
 
-	dialer  Dialer
-	backoff Backoff
-	logf    func(format string, args ...interface{})
+	dialer   Dialer
+	backoff  Backoff
+	logf     func(format string, args ...interface{})
+	skipAuth bool // WithoutClientAuth: dial straight to publish/subscribe, no NIP-42 handshake
 
 	mu      sync.Mutex // guards ws + reconnection + metrics
 	ws      WSConn
@@ -290,6 +311,13 @@ func (c *Conn) dialAndAuth(ctx context.Context) (WSConn, error) {
 	ws, err := c.dialer.Dial(ctx, c.url)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
+	}
+	// WithoutClientAuth: the relay gates writes by a signed-author allowlist and
+	// never pushes an AUTH challenge (dontguess-13f strfry interop). Running the
+	// handshake would block forever on a challenge that never arrives, so proceed
+	// straight to publish/subscribe. The Intake's §2.4a verification is unaffected.
+	if c.skipAuth {
+		return ws, nil
 	}
 	// A *websocket.Conn already satisfies identity.FrameConn, so the handshake
 	// runs over it directly with no adapter (relay-transport.md §2.1).
