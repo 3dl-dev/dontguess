@@ -111,7 +111,7 @@ func (e *Engine) handleSettleComplete(msg *Message) error {
 	}
 
 	// Look up the reservation created at buyer-accept time (not from buyer payload).
-	reservationID, hasReservation := e.matchToReservation[matchMsgID]
+	reservationID, hasReservation := e.reservationFor(matchMsgID)
 	if !hasReservation || reservationID == "" {
 		e.opts.log("engine: settle: no reservation found for match=%s — buyer-accept scrip hold may not have run", shortKey(matchMsgID))
 		return nil
@@ -119,9 +119,12 @@ func (e *Engine) handleSettleComplete(msg *Message) error {
 
 	ctx := e.engineCtx()
 
-	// Deadline-miss check (insurance guarantee).
-	if handled, err := e.checkDeadlineMiss(ctx, msg, matchMsgID, reservationID); handled {
-		return err
+	// Deadline-miss check (insurance guarantee). checkDeadlineMiss handles the
+	// full refund internally and never surfaces an error to the settle flow
+	// (dontguess-471 dead-code cleanup): a failed refund falls through to normal
+	// settlement rather than aborting.
+	if e.checkDeadlineMiss(ctx, msg, matchMsgID, reservationID) {
+		return nil
 	}
 
 	return e.performScripSettlement(ctx, msg, sellerKey, matchMsgID, reservationID, settledEntry)
@@ -167,17 +170,24 @@ func (e *Engine) hasLiveReservationForComplete(msg *Message) bool {
 	if !ok {
 		return false
 	}
-	reservationID, hasReservation := e.matchToReservation[matchMsgID]
+	reservationID, hasReservation := e.reservationFor(matchMsgID)
 	return hasReservation && reservationID != ""
 }
 
 // checkDeadlineMiss checks whether the settle(complete) arrived after the
-// guarantee_deadline. If so, issues a full refund and returns (true, err).
-// If no deadline miss, returns (false, nil).
-func (e *Engine) checkDeadlineMiss(ctx context.Context, msg *Message, matchMsgID, reservationID string) (bool, error) {
+// guarantee_deadline. If so, it issues a full refund and returns true (the
+// caller must stop — the reservation has been consumed by the refund). If there
+// is no deadline miss (or the refund itself failed and we fell through to normal
+// settlement) it returns false.
+//
+// It returns no error: every failure path here is handled internally (a failed
+// refund is logged and falls through to normal settlement so the buyer is not
+// double-refunded), so there was never an error for the caller to act on
+// (dontguess-471 dead-code cleanup).
+func (e *Engine) checkDeadlineMiss(ctx context.Context, msg *Message, matchMsgID, reservationID string) bool {
 	deadline, insuredAmount, hasGuarantee := e.state.GuaranteeForMatch(matchMsgID)
 	if !hasGuarantee {
-		return false, nil
+		return false
 	}
 	// TRUST + DETERMINISM (relay-transport.md §4 ADV-10 + §Sequencer): the
 	// deadline-miss verdict must be derived from an OPERATOR-TRUSTED,
@@ -194,19 +204,19 @@ func (e *Engine) checkDeadlineMiss(ctx context.Context, msg *Message, matchMsgID
 		// No operator-trusted delivery time is available — we cannot make a
 		// sound deadline verdict, so do NOT auto-refund (fail closed toward the
 		// normal settlement path rather than a manipulable/nondeterministic one).
-		return false, nil
+		return false
 	}
 	if !time.Unix(0, deliverTS).UTC().After(deadline) {
-		return false, nil
+		return false
 	}
 	if err := e.handleDeadlineMissRefund(ctx, msg, matchMsgID, reservationID, insuredAmount); err != nil {
 		e.opts.log("engine: settle: deadline-miss refund failed for match=%s: %v", shortKey(matchMsgID), err)
 		// Fall through to normal settlement — refund failed, do not double-pay.
-		return false, nil
+		return false
 	}
 	e.opts.log("engine: settle: deadline-miss refund issued for match=%s deadline=%s",
 		shortKey(matchMsgID), deadline.Format(time.RFC3339))
-	return true, nil
+	return true
 }
 
 // performScripSettlement executes the scrip distribution for a completed settle:
@@ -282,7 +292,7 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 	//     scrip-settle would be emitted and Replay would double-credit
 	//     (double-mint). Such a failure is a LOUD hard error; the missing live
 	//     credit is reconciled from the durable log on the next Replay.
-	delete(e.matchToReservation, matchMsgID)
+	e.deleteReservation(matchMsgID)
 
 	if len(burnPayload) > 0 {
 		if _, emitErr := e.sendOperatorMessage(burnPayload,
@@ -512,15 +522,30 @@ func (e *Engine) handleSettleBuyerAcceptScrip(msg *Message) error {
 // restoreExistingHold re-hydrates an in-memory reservation when a scrip-buy-hold
 // was already written to the campfire log on a previous engine run. This prevents
 // double-charging the buyer on restart.
+//
+// The restored Amount is the ORIGINAL amount that was held at buyer-accept time
+// (read from the durable scrip-buy-hold event via GetBuyHoldAmount), NOT a fresh
+// recomputation from the current dynamic price. The price may have drifted
+// between the original hold and this restart; recomputing would restore a
+// reservation whose Amount no longer matches the scrip the buyer actually had
+// decremented, so a later settle/refund would move the wrong number of scrip
+// (dontguess-471 MED). Fall back to a recompute only if the buy-hold amount is
+// somehow unavailable (defensive — the reservation existed, so the event should
+// too).
 func (e *Engine) restoreExistingHold(msg *Message, matchMsgID, existingResID string) error {
 	ctx := e.engineCtx()
 	_, currentETag, _ := e.opts.ScripStore.GetBudget(ctx, msg.Sender, scrip.BalanceKey)
-	entryID := e.state.MatchEntryID(matchMsgID)
-	entry := e.state.GetInventoryEntry(entryID)
-	var holdAmount int64
-	if entry != nil {
-		p := e.computePrice(entry)
-		holdAmount = p + p/MatchingFeeRate
+	holdAmount, ok := e.state.GetBuyHoldAmount(matchMsgID)
+	if !ok {
+		// Defensive fallback: no recorded original amount. Recompute from current
+		// price (pre-dontguess-471 behavior) rather than restore a zero hold.
+		entryID := e.state.MatchEntryID(matchMsgID)
+		if entry := e.state.GetInventoryEntry(entryID); entry != nil {
+			p := e.computePrice(entry)
+			holdAmount = p + p/MatchingFeeRate
+		}
+		e.opts.log("engine: buyer-accept scrip: warning: no recorded buy-hold amount for match=%s — recomputed hold=%d from current price",
+			shortKey(matchMsgID), holdAmount)
 	}
 	res := scrip.Reservation{
 		ID:        existingResID,
@@ -534,7 +559,7 @@ func (e *Engine) restoreExistingHold(msg *Message, matchMsgID, existingResID str
 		e.opts.log("engine: buyer-accept scrip: warning: re-save reservation after restart %s: %v",
 			shortKey(existingResID), err)
 	}
-	e.matchToReservation[matchMsgID] = existingResID
+	e.setReservation(matchMsgID, existingResID)
 	e.opts.log("engine: buyer-accept scrip: hold already replayed, skipping pre-decrement buyer=%s reservation=%s",
 		shortKey(msg.Sender), shortKey(existingResID))
 	return nil
@@ -591,7 +616,7 @@ func (e *Engine) decAndSaveHold(msg *Message, matchMsgID string, holdAmount, bes
 	}
 
 	// Record the reservation so the complete handler can find it.
-	e.matchToReservation[matchMsgID] = reservationID
+	e.setReservation(matchMsgID, reservationID)
 
 	e.opts.log("engine: buyer-accept scrip: pre-decremented buyer=%s hold=%d reservation=%s match=%s",
 		shortKey(buyerKey), holdAmount, shortKey(reservationID), shortKey(matchMsgID))
@@ -877,19 +902,28 @@ func (e *Engine) handleSettleSmallContentDispute(msg *Message) error {
 	}
 
 	// Verify the entry is actually small content. Derive entry from antecedent chain.
+	// The small-content restriction is MANDATORY (dontguess-471): if the entry
+	// cannot be derived from the antecedent chain we CANNOT prove the content is
+	// below SmallContentThreshold, so we must refuse the auto-refund rather than
+	// skip the restriction. The previous `if entry != nil { ... }` shape let a
+	// dispute against an unresolvable (or non-small) entry force a refund on
+	// normal-sized paid content — bypassing the whole reason this path exists.
 	if len(msg.Antecedents) == 0 {
 		return nil
 	}
 	deliverMsgID := msg.Antecedents[0]
 	entry := e.entryForDeliver(deliverMsgID)
-	if entry != nil {
-		isSmall := entry.TokenCost < SmallContentThreshold ||
-			entry.ContentSize < int64(SmallContentThreshold)*4
-		if !isSmall {
-			e.opts.log("engine: small-content-dispute: entry %s is not small content (token_cost=%d, content_size=%d) — rejecting refund",
-				shortKey(entry.EntryID), entry.TokenCost, entry.ContentSize)
-			return nil
-		}
+	if entry == nil {
+		e.opts.log("engine: small-content-dispute: cannot derive entry for deliver=%s — refusing auto-refund (small-content restriction is mandatory)",
+			shortKey(deliverMsgID))
+		return nil
+	}
+	isSmall := entry.TokenCost < SmallContentThreshold ||
+		entry.ContentSize < int64(SmallContentThreshold)*4
+	if !isSmall {
+		e.opts.log("engine: small-content-dispute: entry %s is not small content (token_cost=%d, content_size=%d) — rejecting refund",
+			shortKey(entry.EntryID), entry.TokenCost, entry.ContentSize)
+		return nil
 	}
 
 	ctx := e.engineCtx()
@@ -902,16 +936,27 @@ func (e *Engine) handleSettleSmallContentDispute(msg *Message) error {
 		return nil // reservation missing or already settled
 	}
 
-	// Security check: buyer_key in payload must match the agent key in the reservation.
-	if res.AgentKey != payload.BuyerKey {
+	// Security: the refund may be triggered ONLY by the reservation's own owner —
+	// the buyer whose scrip is held. reservation_id is PUBLIC (it is emitted in the
+	// scrip-buy-hold event on the relay log), so any allowlisted member can read a
+	// victim's reservation_id and craft a small-content-dispute for it. Binding
+	// identity to the attacker-controlled payload alone (the pre-dontguess-471
+	// check, res.AgentKey != payload.BuyerKey, which an attacker satisfies by
+	// setting buyer_key = the victim's own key) let such a member force-consume +
+	// refund a victim's live reservation: griefing + ledger corruption (the
+	// victim's in-flight purchase is destroyed without consent; a later
+	// settle(complete) finds no reservation). Bind to msg.Sender — the signed,
+	// unforgeable message author. Restore the reservation on mismatch so the
+	// legitimate buyer's hold is not lost.
+	if msg.Sender != res.AgentKey {
 		if restoreErr := e.opts.ScripStore.SaveReservation(ctx, res); restoreErr != nil {
-			e.opts.log("engine: small-content-dispute: CRITICAL: failed to restore reservation %s after key mismatch: %v",
+			e.opts.log("engine: small-content-dispute: CRITICAL: failed to restore reservation %s after sender/owner mismatch: %v",
 				shortKey(payload.ReservationID), restoreErr)
-			return fmt.Errorf("scrip: small-content-dispute reservation %s: buyer_key mismatch AND restore failed (reservation lost): %w",
+			return fmt.Errorf("scrip: small-content-dispute reservation %s: sender is not reservation owner AND restore failed (reservation lost): %w",
 				shortKey(payload.ReservationID), restoreErr)
 		}
-		return fmt.Errorf("scrip: small-content-dispute reservation %s: buyer_key mismatch (payload=%s, reservation=%s)",
-			shortKey(payload.ReservationID), shortKey(payload.BuyerKey), shortKey(res.AgentKey))
+		return fmt.Errorf("scrip: small-content-dispute reservation %s: sender %s is not reservation owner %s (unauthorized refund attempt)",
+			shortKey(payload.ReservationID), shortKey(msg.Sender), shortKey(res.AgentKey))
 	}
 
 	// Marshal the convention refund message BEFORE mutating scrip state.

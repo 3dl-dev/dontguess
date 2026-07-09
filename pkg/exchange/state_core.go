@@ -37,6 +37,7 @@ func NewState() *State {
 		entryDeliverCount:     make(map[string]int),
 		priceAdjustments:      make(map[string]PriceAdjustment),
 		matchToBuyHold:        make(map[string]string),
+		matchToBuyHoldAmount:  make(map[string]int64),
 		assignsByEntry:        make(map[string][]*AssignRecord),
 		assignByID:            make(map[string]*AssignRecord),
 		claimedAssigns:        make(map[string]string),
@@ -98,6 +99,7 @@ func (s *State) Replay(msgs []Message) {
 	s.entryConsumeCount = make(map[string]int)
 	s.entryDeliverCount = make(map[string]int)
 	s.matchToBuyHold = make(map[string]string)
+	s.matchToBuyHoldAmount = make(map[string]int64)
 	s.assignsByEntry = make(map[string][]*AssignRecord)
 	s.assignByID = make(map[string]*AssignRecord)
 	s.claimedAssigns = make(map[string]string)
@@ -206,9 +208,10 @@ func (s *State) recordFoldDenial(reason foldDenialReason, msg *Message) {
 	s.onFoldDenial(reason, msg)
 }
 
-// applyScripBuyHold indexes a scrip-buy-hold message into matchToBuyHold.
-// Enables O(1) lookup in GetBuyHoldReservation, replacing the O(n) log scan
-// in findExistingBuyerAcceptHold.
+// applyScripBuyHold indexes a scrip-buy-hold message into matchToBuyHold (and
+// records the ORIGINAL held amount in matchToBuyHoldAmount). Enables O(1) lookup
+// in GetBuyHoldReservation / GetBuyHoldAmount, replacing the O(n) log scan in
+// findExistingBuyerAcceptHold.
 func (s *State) applyScripBuyHold(msg *Message) {
 	var p scrip.BuyHoldPayload
 	if err := json.Unmarshal(msg.Payload, &p); err != nil {
@@ -218,6 +221,10 @@ func (s *State) applyScripBuyHold(msg *Message) {
 		return
 	}
 	s.matchToBuyHold[p.BuyMsg] = p.ReservationID
+	// Record the original held amount so restoreExistingHold can restore the
+	// EXACT scrip that was decremented at buyer-accept time, rather than
+	// recomputing from a possibly-drifted current price (dontguess-471 MED).
+	s.matchToBuyHoldAmount[p.BuyMsg] = p.Amount
 }
 
 // GetBuyHoldReservation returns the reservation ID for a prior scrip-buy-hold
@@ -229,15 +236,30 @@ func (s *State) GetBuyHoldReservation(matchMsgID string) string {
 	return s.matchToBuyHold[matchMsgID]
 }
 
+// GetBuyHoldAmount returns the ORIGINAL held amount (price + fee) recorded in the
+// scrip-buy-hold event for the given match, and whether one exists. Used by
+// restoreExistingHold to re-hydrate a reservation with the exact amount held at
+// buyer-accept time instead of recomputing from the current dynamic price
+// (dontguess-471). Returns (0, false) when no buy-hold has been recorded.
+func (s *State) GetBuyHoldAmount(matchMsgID string) (int64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	amt, ok := s.matchToBuyHoldAmount[matchMsgID]
+	return amt, ok
+}
+
 // applyConsume processes an exchange:consume message, incrementing the
 // per-entry consume counter. The entry_id is read from the payload and must
 // be non-empty to count. Called from applyLocked.
 //
 // Operator-sender guard: consume messages must originate from the operator.
-// Any non-operator sender is silently rejected to prevent arbitrary campfire
-// members from inflating entryConsumeCount and gaming the behavioral booster.
+// A non-operator sender is rejected to prevent arbitrary campfire members from
+// inflating entryConsumeCount and gaming the behavioral booster — counted +
+// alarmed as an operator-forgery drop rather than dropped silently
+// (dontguess-471 LOCKED-5).
 func (s *State) applyConsume(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	var p struct {

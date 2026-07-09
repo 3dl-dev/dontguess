@@ -104,8 +104,11 @@ func (s *State) applyAssignClaim(msg *Message) {
 	if !ok || rec.Status != AssignOpen {
 		return
 	}
-	// Exclusive sender constraint: if set, only the designated key may claim.
+	// Exclusive sender constraint: if set, only the designated key may claim. A
+	// claim by a non-designated sender is a security-relevant identity drop —
+	// counted + alarmed rather than dropped silently (dontguess-471 LOCKED-5).
 	if rec.ExclusiveSender != "" && msg.Sender != rec.ExclusiveSender {
+		s.recordFoldDenial(foldDenialAssignExclusive, msg)
 		return
 	}
 	// DeadlineAt constraint: standing assigns past their deadline are unclaim-able.
@@ -301,8 +304,10 @@ func (s *State) applyAssignComplete(msg *Message) {
 	if rec == nil || rec.Status != AssignClaimed {
 		return
 	}
-	// Sender must be the claimant.
+	// Sender must be the claimant. A completion by a non-claimant is a
+	// security-relevant identity drop — counted + alarmed (dontguess-471 LOCKED-5).
 	if msg.Sender != rec.ClaimantKey {
+		s.recordFoldDenial(foldDenialAssignClaimant, msg)
 		return
 	}
 	// Defensive expiry check: if the claim has expired (the engine should have

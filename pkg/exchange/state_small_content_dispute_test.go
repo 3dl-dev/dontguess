@@ -817,14 +817,22 @@ func TestSmallContentDispute_ScripRefundPath(t *testing.T) {
 // This is a real production scenario: the operator could remove/expire an entry
 // after deliver but before the buyer files the dispute.
 //
-// Ground-source behavior (from engine.go and state.go):
+// Ground-source behavior (dontguess-471 hardening — the small-content restriction
+// is now MANDATORY):
 //   - State layer (applySettleSmallContentDispute): silently drops — entry absent
-//     means no count increment and no reputation penalty.
+//     means no count increment and no reputation penalty. (Unchanged.)
 //   - Engine layer (handleSettleSmallContentDispute): entryForDeliver() returns nil
-//     when the entry is absent; the scrip check (isSmall guard) is skipped (nil
-//     guard), so the refund path proceeds — buyer is refunded (benefit of doubt).
+//     when the entry is absent. The engine can no longer PROVE the content was
+//     below SmallContentThreshold, so it REFUSES the auto-refund rather than
+//     skipping the restriction. Previously (pre-471) the nil-entry case skipped
+//     the isSmall guard and refunded on benefit-of-doubt — that let a dispute
+//     against an unresolvable/expired (or non-small) entry force a refund on
+//     normal-sized paid content, defeating the reason this path is size-gated.
+//     The reservation is consumed atomically then RESTORED, so the buyer's hold
+//     is preserved (no scrip moved); normal settle(complete) can still proceed.
 //
-// This test asserts the ground-source behavior, not an assumed "all silent" policy.
+// This test asserts the ground-source behavior after the mandatory-restriction
+// fix, not an assumed policy.
 func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 	t.Parallel()
 
@@ -963,17 +971,21 @@ func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 			repBefore, repAfter)
 	}
 
-	// ENGINE LAYER: entry absent → entryForDeliver returns nil → isSmall check skipped →
-	// scrip refund proceeds (benefit of doubt to buyer).
-	// Buyer balance must be restored to pre-buy level.
+	// ENGINE LAYER (dontguess-471): entry absent → entryForDeliver returns nil →
+	// the mandatory small-content restriction cannot be proven → refund REFUSED.
+	// The reservation is consumed then restored, so the buyer's hold is preserved
+	// (no scrip is moved back). Buyer balance stays at the post-hold level, i.e.
+	// buyerBalanceBefore minus the held amount — NOT restored.
 	buyerBalanceAfter := cs.Balance(h.buyer.PublicKeyHex())
-	if buyerBalanceAfter != buyerBalanceBefore {
-		t.Errorf("buyer balance after missing-entry dispute: got %d, want %d (engine refunds when entry absent)",
-			buyerBalanceAfter, buyerBalanceBefore)
+	wantHeld := buyerBalanceBefore - holdAmount
+	if buyerBalanceAfter != wantHeld {
+		t.Errorf("buyer balance after missing-entry dispute: got %d, want %d (engine refuses refund when entry absent; hold preserved)",
+			buyerBalanceAfter, wantHeld)
 	}
-	// scrip-dispute-refund must be emitted (engine issued the refund).
+	// No scrip-dispute-refund may be emitted (engine refused the refund).
 	postRefundMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
-	if len(postRefundMsgs) <= len(preRefundMsgs) {
-		t.Errorf("expected scrip-dispute-refund message for missing-entry dispute (engine refunds when entry absent)")
+	if len(postRefundMsgs) != len(preRefundMsgs) {
+		t.Errorf("expected NO scrip-dispute-refund message for missing-entry dispute (engine refuses refund when entry absent): before=%d after=%d",
+			len(preRefundMsgs), len(postRefundMsgs))
 	}
 }

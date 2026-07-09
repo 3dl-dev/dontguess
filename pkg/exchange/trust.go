@@ -140,6 +140,19 @@ const (
 	// reaching the dispatch trust gate was rejected as an unknown phase. It is
 	// operator-only (docs/design/relay-transport.md §2.4a D3).
 	SettlePhasePreview SettlePhase = "preview"
+	// SettlePhasePreviewRequest is the buyer-authored request for a content
+	// preview (the preview-before-purchase model). It is a fleet-member
+	// (allowlisted) operation. The trust map previously OMITTED it, so
+	// RequiredLevel returned an "unknown settle phase" error and the dispatch
+	// gate silently dropped every preview-request — breaking preview-before-
+	// purchase. Added at TrustAllowlisted (dontguess-471).
+	SettlePhasePreviewRequest SettlePhase = "preview-request"
+	// SettlePhaseSmallContentDispute is the buyer-authored automated auto-refund
+	// dispute for below-threshold content. It is a fleet-member (allowlisted)
+	// operation. Like preview-request it was OMITTED from the trust map, so the
+	// dispatch gate silently dropped it — breaking the automated small-content
+	// refund. Added at TrustAllowlisted (dontguess-471).
+	SettlePhaseSmallContentDispute SettlePhase = "small-content-dispute"
 )
 
 // defaultOperationLevels is the compiled-in default mapping.
@@ -186,6 +199,10 @@ var defaultSettlePhaseLevels = map[SettlePhase]TrustLevel{
 	SettlePhasePutReject:   TrustOperator,
 	SettlePhaseDeliver:     TrustOperator,
 	SettlePhasePreview:     TrustOperator,
+	// Buyer-authored fleet-member phases. Previously omitted → dispatch gate
+	// silently dropped them (dontguess-471).
+	SettlePhasePreviewRequest:      TrustAllowlisted,
+	SettlePhaseSmallContentDispute: TrustAllowlisted,
 }
 
 // TrustLevels configures the minimum trust level required for each exchange
