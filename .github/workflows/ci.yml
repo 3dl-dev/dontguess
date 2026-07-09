@@ -32,7 +32,9 @@ jobs:
       - name: Run tests
         env:
           GOPRIVATE: github.com/campfire-net/campfire
-        run: go test ./...
+        # -race is load-bearing: pkg/exchange dispatch, pkg/relay (intake/outbox/watchdog/conn)
+        # and pkg/scrip run concurrent goroutines with shared state (M2 nostr surface).
+        run: go test -race ./...
 
       - name: Build check
         env:
