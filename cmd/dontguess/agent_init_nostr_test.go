@@ -22,7 +22,7 @@ import (
 func TestAgentInit_IssuesSecp256k1Identity(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	if err := runAgentInitWith(t, dgHome, "alice"); err != nil {
 		t.Fatalf("agent-init alice: %v", err)

@@ -13,12 +13,11 @@ package main
 // re-expressed in nostr terms: distinct identities per agent, idempotent
 // re-init, and the on-disk agent-home layout.
 //
-// scratchExchange still provisions a full campfire-backed exchange config —
-// it is retained as shared test scaffolding for the sibling agent_init_*_test.go
-// files, which use dgHome as an arbitrary scratch DG_HOME regardless of
-// whether a campfire exchange backs it. All tests run against scratch temp
-// dirs — NOT ~/.cf. No ~/.cf mutations occur; all state lives in t.TempDir()
-// paths.
+// scratchExchange is campfire-free (dontguess-69a): it simply hands back an
+// isolated scratch DG_HOME temp dir. The agent-init tests here and in the
+// sibling agent_init_*_test.go files only need dgHome as an arbitrary scratch
+// home to provision per-agent nostr identities under — there is no campfire to
+// back. All state lives in t.TempDir() paths; no ~/.cf mutations occur.
 
 import (
 	"os"
@@ -26,37 +25,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/campfire-net/campfire/cf-protocol/protocol"
-	"github.com/campfire-net/dontguess/pkg/exchange"
 	"github.com/campfire-net/dontguess/pkg/identity"
 )
 
-// scratchExchange initializes a scratch exchange in a temp dir and returns
-// (dgHome, exchangeCampfireID, transportDir). All paths are isolated temp dirs.
-// The returned operatorClient must be closed by the caller (use t.Cleanup).
-//
-// This mirrors newOpTestHarness but is kept minimal and test-local so it
-// does not grow as other tests add harness methods.
-func scratchExchange(t *testing.T) (dgHome string, cfg *exchange.Config) {
+// scratchExchange returns an isolated scratch DG_HOME temp dir. It is retained
+// as shared scaffolding for the sibling agent_init_*_test.go files, which use
+// the returned home as an arbitrary DG_HOME to provision agent identities under.
+func scratchExchange(t *testing.T) (dgHome string) {
 	t.Helper()
-	dgHome = t.TempDir()
-	transportDir := t.TempDir()
-	convDir := conventionDirForOpTest(t)
-
-	var initClient *protocol.Client
-	var err error
-	cfg, initClient, err = exchange.Init(exchange.InitOptions{
-		ConfigDir:         dgHome,
-		Transport:         protocol.FilesystemTransport{Dir: transportDir},
-		BeaconDir:         t.TempDir(),
-		ConventionDir:     convDir,
-		SkipConfigCascade: true,
-	})
-	if err != nil {
-		t.Fatalf("exchange.Init: %v", err)
-	}
-	t.Cleanup(func() { initClient.Close() })
-	return dgHome, cfg
+	return t.TempDir()
 }
 
 // runAgentInitWith provisions <name> as a persistent FLEET MEMBER under dgHome
@@ -88,7 +65,7 @@ func agentNpub(t *testing.T, agentHome string) string {
 func TestAgentInit_GeneratesDistinctIdentity(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	// --- init alice ---
 	if err := runAgentInitWith(t, dgHome, "alice"); err != nil {
@@ -154,7 +131,7 @@ func TestAgentInit_GeneratesDistinctIdentity(t *testing.T) {
 func TestAgentInit_RejectsPathTraversal(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	// No nostr identity exists at DG_HOME root before any agent-init call —
 	// confirms the file we check afterward wasn't already there for other

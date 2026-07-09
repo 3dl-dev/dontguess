@@ -5,65 +5,50 @@ import (
 	"fmt"
 	"os"
 
-	dontguess "github.com/campfire-net/dontguess"
 	"github.com/campfire-net/dontguess/pkg/exchange"
 	"github.com/spf13/cobra"
 )
 
-var (
-	initConventionDir string
-	initAlias         string
-	initDescription   string
-	initDisplayName   string
-	initForce         bool
-	initNamingRoot    string
-)
+var initForce bool
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize an exchange campfire",
-	Long: `Create an exchange campfire, promote convention declarations to its
-registry, register in the naming hierarchy, and publish a discovery beacon.
+	Short: "Initialize the DontGuess operator home (campfire-free)",
+	Long: `Bootstrap this operator's own DontGuess home under $DG_HOME:
 
-If an exchange config already exists at ~/.cf/dontguess-exchange.json,
-this command is a no-op unless --force is given.
+  1. operator identity — a persistent secp256k1 (nostr) key at
+     $DG_HOME/nostr-operator.key, minted on first run and reused thereafter.
+  2. local event store — the append-only log at $DG_HOME/events.jsonl.
+  3. config — records the operator pubkey and the relay URLs the operator
+     serves (from DONTGUESS_RELAY_URLS / DONTGUESS_RELAY_URL).
+
+This is campfire-free: no campfire, beacon, naming registry, or convention
+promotion. init is idempotent — the operator key is never overwritten. Running
+'dontguess serve' also bootstraps the same identity + store on first run, so
+'init' is optional; use it to provision (and inspect) the operator home ahead
+of time.
 
   dontguess init
-  dontguess init --alias home.exchange.dontguess --force
-
-Standalone local-only cache (dontguess-275): if you only need a single-agent,
-campfire-free cache with no relay/identity/scrip network dependency, skip
-this command entirely and run 'dontguess serve --local' — the local operator
-key and event log are bootstrapped on first run.`,
+  DONTGUESS_RELAY_URLS=ws://relay.a:7777,ws://relay.b:7777 dontguess init`,
 	RunE: runInit,
 }
 
 func init() {
-	initCmd.Flags().StringVar(&initConventionDir, "convention-dir", "", "path to convention declarations directory (must contain exchange-core/ and exchange-scrip/)")
-	initCmd.Flags().StringVar(&initAlias, "alias", "", "naming alias for the exchange (default: exchange.dontguess)")
-	initCmd.Flags().StringVar(&initDescription, "description", "", "exchange description for beacon")
-	initCmd.Flags().StringVar(&initDisplayName, "display-name", "", "operator display name on campfire (default: \"DontGuess Exchange\")")
-	initCmd.Flags().BoolVar(&initForce, "force", false, "reinitialize even if config exists")
-	initCmd.Flags().StringVar(&initNamingRoot, "naming-root", "", "campfire ID of the naming registry for globally discoverable registration")
+	initCmd.Flags().BoolVar(&initForce, "force", false, "rewrite the config even if it already exists (never overwrites the operator key)")
 	rootCmd.AddCommand(initCmd)
 }
 
 func runInit(_ *cobra.Command, _ []string) error {
-	opts := exchange.InitOptions{
-		ConventionDir:       initConventionDir,
-		EmbeddedConventions: dontguess.ConventionFS,
-		Alias:               initAlias,
-		Description:         initDescription,
-		DisplayName:         initDisplayName,
-		Force:               initForce,
-		NamingRoot:          initNamingRoot,
-	}
+	dgHome := resolveDGHome()
 
-	cfg, client, err := exchange.Init(opts)
+	cfg, err := exchange.Init(exchange.InitOptions{
+		DGHome:    dgHome,
+		RelayURLs: resolveRelayURLs(),
+		Force:     initForce,
+	})
 	if err != nil {
 		return fmt.Errorf("init failed: %w", err)
 	}
-	defer client.Close()
 
 	if jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
@@ -71,17 +56,16 @@ func runInit(_ *cobra.Command, _ []string) error {
 		return enc.Encode(cfg)
 	}
 
-	fmt.Printf("Exchange initialized\n")
-	fmt.Printf("  campfire: %s\n", cfg.ExchangeCampfireID)
+	fmt.Printf("DontGuess operator home initialized (campfire-free)\n")
+	fmt.Printf("  home:     %s\n", dgHome)
 	fmt.Printf("  operator: %s\n", cfg.OperatorKeyHex)
-	fmt.Printf("  alias:    %s\n", cfg.Alias)
-	fmt.Printf("  version:  %s\n", cfg.ConventionVersion)
-	if cfg.ExchangeBeacon != "" {
-		fmt.Printf("  beacon:   %s\n", cfg.ExchangeBeacon)
-		fmt.Printf("\nNext: cf join %s\n", cfg.ExchangeBeacon)
+	fmt.Printf("  npub:     %s\n", cfg.OperatorNpub)
+	fmt.Printf("  store:    %s\n", cfg.StorePath)
+	if len(cfg.RelayURLs) > 0 {
+		fmt.Printf("  relays:   %v\n", cfg.RelayURLs)
 	} else {
-		fmt.Printf("\nNext: cf join %s...\n", cfg.ExchangeCampfireID[:16])
+		fmt.Printf("  relays:   (none — set DONTGUESS_RELAY_URLS to federate)\n")
 	}
-	fmt.Printf("      cf %s put --help\n", cfg.Alias)
+	fmt.Printf("\nNext: dontguess serve\n")
 	return nil
 }
