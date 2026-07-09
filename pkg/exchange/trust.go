@@ -5,14 +5,14 @@
 // trusted intermediary reintroduced one layer down; see
 // docs/design/convergence-sybil-defense.md §"Family 2 — Attestation Graph"):
 //
-//	1. NIP-42 allowlist — the set of fleet npubs admitted to the team relay.
-//	   Membership secures the pipe: an allowlisted key is a vetted fleet member.
-//	2. Operator write authority — match/settle(put-*)/mint/burn are operator-only.
-//	   The operator key is the single long-lived npub that signs those events.
-//	3. Reputation floor — the EXISTING pkg/exchange behavioral reputation score
-//	   (SellerStats.Reputation) gates sell-side operations: a seller who has
-//	   burned trust (disputes, small-content refunds) is blocked from putting
-//	   more inventory, independent of allowlist membership.
+//  1. NIP-42 allowlist — the set of fleet npubs admitted to the team relay.
+//     Membership secures the pipe: an allowlisted key is a vetted fleet member.
+//  2. Operator write authority — match/settle(put-*)/mint/burn are operator-only.
+//     The operator key is the single long-lived npub that signs those events.
+//  3. Reputation floor — the EXISTING pkg/exchange behavioral reputation score
+//     (SellerStats.Reputation) gates sell-side operations: a seller who has
+//     burned trust (disputes, small-content refunds) is blocked from putting
+//     more inventory, independent of allowlist membership.
 //
 // Three trust tiers replace the former 4-level provenance ladder
 // (anonymous/claimed/contactable/present). The claimed/contactable distinction
@@ -38,12 +38,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // TrustLevel is the authority tier a sender holds for exchange operations.
 // The integer values are stable (0=anonymous … 2=operator) so that the
-// inventory downgrade machinery (AcceptedProvenanceLevel / MarkStaleProvenanceEntries)
-// — which stores levels as plain ints — keeps working unchanged.
+// per-entry provenance level (AcceptedProvenanceLevel), stored as a plain int,
+// keeps working unchanged.
 type TrustLevel int
 
 const (
@@ -98,6 +99,15 @@ const (
 	OperationInventoryRead    Operation = "inventory-read"
 	OperationPriceHistoryRead Operation = "price-history-read"
 
+	// OperationConsume is the trust op for exchange:consume (TagConsume) signals.
+	// Consume signals are operator-authored (emitConsumeSignal) — they feed the
+	// per-entry behavioral booster (entryConsumeCount), so a forged non-operator
+	// consume would let any sender inflate a seller's demand signal. It is
+	// operator-only; tagToTrustOp routes TagConsume through this op so a forged
+	// consume is gated + counted at the dispatch trust gate rather than passing
+	// unchecked (dontguess-9ed).
+	OperationConsume Operation = "consume"
+
 	// Per-sub-op assign operations. The assign(3405) kind is shared: the operator
 	// authors the task post, accept, reject, expire, and auction-close; workers
 	// author claim and complete. Each sub-op carries its own trust level (see
@@ -149,6 +159,7 @@ var defaultOperationLevels = map[Operation]TrustLevel{
 	OperationConventionPromote:   TrustOperator,
 	OperationConventionSupersede: TrustOperator,
 	OperationMatch:               TrustOperator,
+	OperationConsume:             TrustOperator,
 
 	// Assign sub-op axis: operator sub-ops require the operator key; worker sub-ops
 	// (claim/complete) require fleet-member (allowlisted) standing. This mirrors
@@ -204,11 +215,18 @@ type Membership interface {
 	Allowed(hexKey string) bool
 }
 
-// KeySet is a mutable set of admitted fleet-member hex pubkeys. It is the
-// Membership used on the current campfire transport (operator + campfire members)
-// and supports runtime de-allowlisting (Remove), which drives the inventory
-// re-validation downgrade path.
+// KeySet is a mutable, concurrency-safe set of admitted fleet-member hex
+// pubkeys. It is the Membership used on the current campfire transport
+// (operator + campfire members) and supports runtime de-allowlisting (Remove),
+// which the serve membership-refresh loop drives when a member leaves the
+// campfire.
+//
+// The mutex is required, not optional: Allowed runs from the engine's poll-loop
+// dispatch goroutine (and the operator-socket handler goroutine), while
+// Add/Remove run from the serve membership-refresh goroutine. Without the lock
+// those concurrent map reads/writes are a data race (verified under -race).
 type KeySet struct {
+	mu      sync.RWMutex
 	members map[string]struct{}
 }
 
@@ -222,28 +240,58 @@ func NewKeySet(keys ...string) *KeySet {
 	return ks
 }
 
-// Add admits a hex key to the set.
+// Add admits a hex key to the set. Safe for concurrent use.
 func (k *KeySet) Add(hexKey string) {
 	hexKey = strings.ToLower(strings.TrimSpace(hexKey))
 	if hexKey == "" {
 		return
 	}
+	k.mu.Lock()
 	k.members[hexKey] = struct{}{}
+	k.mu.Unlock()
 }
 
 // Remove revokes a hex key from the set (runtime de-allowlisting).
+// Safe for concurrent use.
 func (k *KeySet) Remove(hexKey string) {
-	delete(k.members, strings.ToLower(strings.TrimSpace(hexKey)))
+	hexKey = strings.ToLower(strings.TrimSpace(hexKey))
+	if hexKey == "" {
+		return
+	}
+	k.mu.Lock()
+	delete(k.members, hexKey)
+	k.mu.Unlock()
 }
 
-// Allowed reports whether the hex key is admitted.
+// Allowed reports whether the hex key is admitted. Safe for concurrent use.
 func (k *KeySet) Allowed(hexKey string) bool {
-	_, ok := k.members[strings.ToLower(strings.TrimSpace(hexKey))]
+	hexKey = strings.ToLower(strings.TrimSpace(hexKey))
+	k.mu.RLock()
+	_, ok := k.members[hexKey]
+	k.mu.RUnlock()
 	return ok
 }
 
-// Len returns the number of admitted keys.
-func (k *KeySet) Len() int { return len(k.members) }
+// Len returns the number of admitted keys. Safe for concurrent use.
+func (k *KeySet) Len() int {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return len(k.members)
+}
+
+// Keys returns a snapshot of the admitted (lowercased) hex keys. The serve
+// membership-refresh loop uses this to diff the current allowlist against the
+// live campfire membership and revoke (Remove) keys that have departed. Safe
+// for concurrent use — the returned slice is a copy.
+func (k *KeySet) Keys() []string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	out := make([]string, 0, len(k.members))
+	for key := range k.members {
+		out = append(out, key)
+	}
+	return out
+}
 
 // ErrInsufficientTrust is returned when a sender's trust level does not meet the
 // minimum required for the requested operation.

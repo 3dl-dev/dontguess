@@ -172,29 +172,6 @@ func (s *State) SetEntryProvenanceLevel(entryID string, level int) {
 	}
 }
 
-// MarkStaleProvenanceEntries scans the inventory for entries belonging to
-// sellerKey whose AcceptedProvenanceLevel exceeds currentLevel, and sets
-// NeedsRevalidation=true on each. Returns the entry IDs that were flagged.
-//
-// This should be called whenever the exchange detects that a seller's provenance
-// level has dropped (e.g., attestation expired or revoked). See InventoryEntry
-// for the chosen re-validation semantics.
-func (s *State) MarkStaleProvenanceEntries(sellerKey string, currentLevel int) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var flagged []string
-	for _, entry := range s.inventory {
-		if entry.SellerKey != sellerKey {
-			continue
-		}
-		if entry.AcceptedProvenanceLevel > currentLevel {
-			entry.NeedsRevalidation = true
-			flagged = append(flagged, entry.EntryID)
-		}
-	}
-	return flagged
-}
-
 // EntryNeedsRevalidation returns true if the given entry has been flagged for
 // re-validation due to a seller provenance downgrade.
 func (s *State) EntryNeedsRevalidation(entryID string) bool {

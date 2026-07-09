@@ -9,21 +9,21 @@ import (
 // NewState creates an empty exchange state.
 func NewState() *State {
 	return &State{
-		inventory:          make(map[string]*InventoryEntry),
-		pendingPuts:        make(map[string]*InventoryEntry),
-		activeOrders:       make(map[string]*ActiveOrder),
-		priceHistory:       nil,
-		sellers:            make(map[string]*SellerStats),
-		matchedOrders:      make(map[string]struct{}),
-		putToEntry:         make(map[string]string),
-		matchToBuyer:       make(map[string]string),
-		matchToEntry:       make(map[string]string),
-		matchToResults:     make(map[string][]string),
-		acceptedOrders:     make(map[string]string),
-		buyerAcceptToMatch: make(map[string]string),
-		deliveredOrders:    make(map[string]struct{}),
-		deliverToMatch:     make(map[string]string),
-		deliverTimeByMatch: make(map[string]int64),
+		inventory:             make(map[string]*InventoryEntry),
+		pendingPuts:           make(map[string]*InventoryEntry),
+		activeOrders:          make(map[string]*ActiveOrder),
+		priceHistory:          nil,
+		sellers:               make(map[string]*SellerStats),
+		matchedOrders:         make(map[string]struct{}),
+		putToEntry:            make(map[string]string),
+		matchToBuyer:          make(map[string]string),
+		matchToEntry:          make(map[string]string),
+		matchToResults:        make(map[string][]string),
+		acceptedOrders:        make(map[string]string),
+		buyerAcceptToMatch:    make(map[string]string),
+		deliveredOrders:       make(map[string]struct{}),
+		deliverToMatch:        make(map[string]string),
+		deliverTimeByMatch:    make(map[string]int64),
 		completedEntries:      make(map[string]string),
 		completedSettlements:  make(map[string]struct{}),
 		previewsByEntry:       make(map[string]map[string]string),
@@ -35,25 +35,25 @@ func NewState() *State {
 		entryConversionCount:  make(map[string]int),
 		entryConsumeCount:     make(map[string]int),
 		entryDeliverCount:     make(map[string]int),
-		priceAdjustments:     make(map[string]PriceAdjustment),
-		matchToBuyHold:       make(map[string]string),
-		assignsByEntry:       make(map[string][]*AssignRecord),
-		assignByID:           make(map[string]*AssignRecord),
-		claimedAssigns:       make(map[string]string),
-		pendingAssignResults: make(map[string]*AssignRecord),
-		claimMsgToAssign:     make(map[string]string),
-		completeMsgToAssign:  make(map[string]string),
-		buyMissOffers:        make(map[string]*BuyMissOffer),
-		matchToBuyMsgID:      make(map[string]string),
-		matchGuarantee:       make(map[string][2]int64),
-		brokerAssigns:        make(map[string]string),
-		brokerMatchIDs:       make(map[string]struct{}),
-		debtorScores:         make(map[string]float64),
-		coOccurrence:         make(map[string]*coOccurrenceMap),
-		senderHopDepth:       make(map[string][]int),
-		federationProfiles:   make(map[string]*FederationNodeProfile),
-		heldForReview:        make(map[string]struct{}),
-		contentHashIndex:     make(map[string]struct{}),
+		priceAdjustments:      make(map[string]PriceAdjustment),
+		matchToBuyHold:        make(map[string]string),
+		assignsByEntry:        make(map[string][]*AssignRecord),
+		assignByID:            make(map[string]*AssignRecord),
+		claimedAssigns:        make(map[string]string),
+		pendingAssignResults:  make(map[string]*AssignRecord),
+		claimMsgToAssign:      make(map[string]string),
+		completeMsgToAssign:   make(map[string]string),
+		buyMissOffers:         make(map[string]*BuyMissOffer),
+		matchToBuyMsgID:       make(map[string]string),
+		matchGuarantee:        make(map[string][2]int64),
+		brokerAssigns:         make(map[string]string),
+		brokerMatchIDs:        make(map[string]struct{}),
+		debtorScores:          make(map[string]float64),
+		coOccurrence:          make(map[string]*coOccurrenceMap),
+		senderHopDepth:        make(map[string][]int),
+		federationProfiles:    make(map[string]*FederationNodeProfile),
+		heldForReview:         make(map[string]struct{}),
+		contentHashIndex:      make(map[string]struct{}),
 	}
 }
 
@@ -62,6 +62,13 @@ func NewState() *State {
 func (s *State) Replay(msgs []Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Suppress fold-guard denial counting for the duration of the replay: the
+	// full log is re-applied on every engine restart / state rebuild, so a
+	// forged message already on the log must not re-increment the live alarm
+	// counters each time (dontguess-9ed). Only real-time Apply counts.
+	s.replaying = true
+	defer func() { s.replaying = false }()
 
 	// Reset.
 	s.inventory = make(map[string]*InventoryEntry)
@@ -184,6 +191,19 @@ func (s *State) applyLocked(msg *Message) {
 			s.applyConsume(msg)
 		}
 	}
+}
+
+// recordFoldDenial counts + alarms a security-relevant fold-guard rejection
+// (operator-only settlement guard, or the buyer-identity gate) via the callback
+// wired by NewEngine. It is a no-op during Replay (so a re-applied log does not
+// re-inflate the counters) and when no callback is wired (State built directly
+// in tests). Caller must hold s.mu — the callback only touches atomic counters
+// and the logger, so holding s.mu across it introduces no lock-ordering hazard.
+func (s *State) recordFoldDenial(reason foldDenialReason, msg *Message) {
+	if s.replaying || s.onFoldDenial == nil {
+		return
+	}
+	s.onFoldDenial(reason, msg)
 }
 
 // applyScripBuyHold indexes a scrip-buy-hold message into matchToBuyHold.

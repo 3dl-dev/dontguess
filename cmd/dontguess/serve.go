@@ -48,6 +48,13 @@ var (
 	// Exposed as a package-level variable so tests can shorten it without changing
 	// production behaviour. Default is 5 seconds.
 	operatorConnDeadline = 5 * time.Second
+
+	// fleetRefreshInterval is how often the serve loop re-reads campfire
+	// membership and reconciles the fleet allowlist KeySet — admitting members
+	// who joined and revoking (de-allowlisting) members who left AFTER startup.
+	// Without this, the allowlist was a one-shot snapshot taken at serve start
+	// and never updated (dontguess-1a2). Package-level so tests can shorten it.
+	fleetRefreshInterval = 60 * time.Second
 )
 
 var serveCmd = &cobra.Command{
@@ -186,6 +193,12 @@ func runServe(_ *cobra.Command, _ []string) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+
+	// Keep the fleet allowlist current: re-read campfire membership on an
+	// interval and reconcile the KeySet, admitting joiners and revoking leavers
+	// at runtime (dontguess-1a2). The operator key is never revoked — it holds
+	// write authority independent of campfire membership.
+	go refreshFleetLoop(ctx, fleet, writeClient, cfg.ExchangeCampfireID, operatorKey, fleetRefreshInterval, logger)
 
 	logger.Printf("exchange serving")
 	logger.Printf("  campfire:  %s", cfg.ExchangeCampfireID[:16]+"...")
@@ -383,6 +396,87 @@ func loadOrCreateNostrOperatorIdentity(dgHome string) (*identity.Secp256k1Identi
 // runServe (campfire-backed) and runServeLocal (dontguess-275, campfire-free)
 // so the two entrypoints differ only in how the Engine's ingest/egress are
 // wired (campfire ReadClient/WriteClient vs. LocalStore).
+// fleetMemberSource is the subset of *protocol.Client the fleet-refresh loop
+// needs. Declared as an interface so the loop can be unit-tested against a fake
+// membership source without a live campfire.
+type fleetMemberSource interface {
+	Members(campfireID string) ([]protocol.MemberRecord, error)
+}
+
+// syncFleetMembership reconciles the fleet allowlist against the desired member
+// set read from the campfire: it Adds keys present in desired but absent from
+// the set, and Removes (runtime de-allowlists) keys present in the set but no
+// longer in desired. The operatorKey is never removed even if it is absent from
+// desired — the operator retains write authority independent of campfire
+// membership. Returns the added and removed keys (lowercased) for logging.
+//
+// Comparison is done on lowercased/trimmed keys to match KeySet's normalization
+// (KeySet.Keys already returns lowercased keys).
+func syncFleetMembership(fleet *exchange.KeySet, desired []string, operatorKey string) (added, removed []string) {
+	want := make(map[string]struct{}, len(desired))
+	for _, k := range desired {
+		kk := strings.ToLower(strings.TrimSpace(k))
+		if kk == "" {
+			continue
+		}
+		want[kk] = struct{}{}
+	}
+	have := make(map[string]struct{})
+	for _, k := range fleet.Keys() {
+		have[k] = struct{}{}
+	}
+	// Admit joiners.
+	for k := range want {
+		if _, ok := have[k]; !ok {
+			fleet.Add(k)
+			added = append(added, k)
+		}
+	}
+	// Revoke leavers (never the operator).
+	opKey := strings.ToLower(strings.TrimSpace(operatorKey))
+	for k := range have {
+		if _, ok := want[k]; ok {
+			continue
+		}
+		if k == opKey {
+			continue
+		}
+		fleet.Remove(k)
+		removed = append(removed, k)
+	}
+	return added, removed
+}
+
+// refreshFleetLoop periodically re-reads campfire membership and reconciles the
+// fleet allowlist via syncFleetMembership until ctx is cancelled. A Members()
+// error is logged and the loop continues — a transient read failure must not
+// tear down the exchange, and the previous allowlist snapshot stays in effect.
+func refreshFleetLoop(ctx context.Context, fleet *exchange.KeySet, src fleetMemberSource, campfireID, operatorKey string, interval time.Duration, logger *log.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			members, err := src.Members(campfireID)
+			if err != nil {
+				logger.Printf("fleet refresh: Members(%s) error: %v", campfireID[:min(16, len(campfireID))], err)
+				continue
+			}
+			desired := make([]string, 0, len(members))
+			for _, m := range members {
+				desired = append(desired, m.MemberPubkey)
+			}
+			added, removed := syncFleetMembership(fleet, desired, operatorKey)
+			if len(added) > 0 || len(removed) > 0 {
+				logger.Printf("fleet refresh: admitted %d, revoked %d (allowlist size now %d)",
+					len(added), len(removed), fleet.Len())
+			}
+		}
+	}
+}
+
 func runEngineLoop(ctx context.Context, dgHome string, eng *exchange.Engine, logger *log.Logger) error {
 	// Auto-accept goroutine.
 	//
