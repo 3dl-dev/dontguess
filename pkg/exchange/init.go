@@ -1,140 +1,94 @@
 // Package exchange implements the DontGuess exchange operator lifecycle.
-// An exchange is a campfire with the dontguess-exchange convention declarations
-// promoted to its registry. Operators run Init to bootstrap a new exchange.
+//
+// Nostr-first (docs/design/nostr-first-rebuild-decision.md): an exchange is no
+// longer a campfire. `dontguess init` bootstraps the operator's OWN home under
+// DG_HOME — a persistent secp256k1 (nostr) operator identity, the local
+// append-only event store (pkg/store), and a config file recording the relay
+// URLs the operator federates over. There is no campfire creation, beacon,
+// naming registration, or convention promotion here.
 package exchange
 
 import (
-	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/campfire-net/campfire/cf-conventions/cf-convention"
-	cfencoding "github.com/campfire-net/campfire/cf-protocol/encoding"
-	"github.com/campfire-net/campfire/pkg/naming"
-	"github.com/campfire-net/campfire/cf-protocol/protocol"
+	"github.com/campfire-net/dontguess/pkg/identity"
+	dgstore "github.com/campfire-net/dontguess/pkg/store"
 )
 
-// Config is the local operator config written after init.
+// operatorKeyFile is the on-disk name of the persisted secp256k1 (nostr)
+// operator private key within DG_HOME. It mirrors the name used by the serve
+// path (cmd/dontguess/serve.go loadOrCreateNostrOperatorIdentity) so `init` and
+// `serve` bootstrap the SAME operator identity.
+const operatorKeyFile = "nostr-operator.key"
+
+// storeFile is the DG_HOME-relative name of the local append-only event log.
+const storeFile = "events.jsonl"
+
+// Config is the local operator config written after init. It is campfire-free:
+// it records the operator's nostr identity, the relay URLs the operator serves,
+// and the local store path.
 type Config struct {
-	ExchangeCampfireID string           `json:"exchange_campfire_id"`
-	ExchangeBeacon     string           `json:"exchange_beacon,omitempty"`
-	OperatorKeyHex     string           `json:"operator_key"`
-	ConventionVersion  string           `json:"convention_version"`
-	Alias              string           `json:"alias"`
-	CreatedAt          int64       `json:"created_at"`
-	TrustLevels        TrustLevels `json:"trust_levels,omitempty"`
-	// MinReputation is the sell-side reputation floor. When > 0, the serve path
-	// wires the behavioral reputation source into the trust gate and rejects puts
-	// from sellers scoring below it. 0 (default) disables reputation gating.
+	// OperatorKeyHex is the operator's nostr public key (x-only BIP-340 hex).
+	OperatorKeyHex string `json:"operator_key"`
+	// OperatorNpub is the NIP-19 bech32 encoding of OperatorKeyHex.
+	OperatorNpub string `json:"operator_npub,omitempty"`
+	// RelayURLs are the relay websocket URLs the operator federates over
+	// (the DONTGUESS_RELAY_URLS the operator will serve).
+	RelayURLs []string `json:"relay_urls,omitempty"`
+	// StorePath is the absolute path to the local event log.
+	StorePath string `json:"store_path"`
+	// CreatedAt is the wall-clock nanosecond timestamp of first init.
+	CreatedAt int64 `json:"created_at"`
+	// TrustLevels configures per-operation trust floors (serve-path concern).
+	// Left untouched by init; preserved here for the serve wiring that reads it.
+	TrustLevels TrustLevels `json:"trust_levels,omitempty"`
+	// MinReputation is the sell-side reputation floor. 0 (default) disables
+	// reputation gating.
 	MinReputation int `json:"min_reputation,omitempty"`
 }
 
-// InitOptions controls the Init operation.
+// InitOptions controls the campfire-free Init operation.
 type InitOptions struct {
-	// ConfigDir is the campfire config directory (default: ~/.cf).
-	// protocol.Init is called with this directory to load/generate identity and open store.
-	ConfigDir string
-	// Transport selects and configures the filesystem transport for the exchange campfire.
-	// If nil, FilesystemTransport with fs.DefaultBaseDir() is used.
-	Transport protocol.Transport
-	// BeaconDir overrides the beacon publish directory. If empty, the SDK default is used.
-	BeaconDir string
-	// ConventionDir is the path to the directory containing exchange-core/ and
-	// exchange-scrip/ sub-directories with the .json declaration files.
-	// If empty, EmbeddedConventions is used.
-	ConventionDir string
-	// EmbeddedConventions is an embedded filesystem containing convention
-	// declarations. Used as fallback when ConventionDir is empty. The FS
-	// should contain docs/convention/exchange-core/*.json and
-	// docs/convention/exchange-scrip/*.json.
-	EmbeddedConventions fs.FS
-	// Alias registers this exchange under the given naming alias
-	// (e.g. "home.exchange.dontguess"). Default: "exchange.dontguess".
-	Alias string
-	// Description is posted as the exchange beacon description.
-	Description string
-	// DisplayName is the human-readable name the operator presents with on
-	// campfire messages. Written as identity.display_name in config.toml on
-	// first init. Default: "DontGuess Exchange".
-	DisplayName string
-	// Force overwrites an existing config if present.
+	// DGHome is the operator home directory. If empty, it resolves to the
+	// DG_HOME environment variable, then $HOME/.dontguess.
+	DGHome string
+	// RelayURLs are recorded in the config as the relays the operator serves.
+	RelayURLs []string
+	// Force rewrites the config even if one already exists. The operator key is
+	// NEVER overwritten regardless of Force (identity is load-or-create).
 	Force bool
-	// NamingRoot is the campfire ID of a naming registry. When set, naming.Register
-	// is called after the local alias is set, making the exchange discoverable by
-	// any agent that can read the registry. If empty, only the local alias is set.
-	NamingRoot string
-	// SkipConfigCascade bypasses the config cascade walk (ancestor .cf/config.toml
-	// files, auto_join beacons). Uses protocol.Init directly instead of
-	// protocol.InitWithConfig. Intended for tests where ancestor configs with
-	// auto_join beacons cause expensive campfire syncs during setup.
-	SkipConfigCascade bool
 }
 
-func (o *InitOptions) initClient() (*protocol.Client, *protocol.InitResult, error) {
-	if o.SkipConfigCascade && o.ConfigDir != "" {
-		return protocol.Init(o.ConfigDir)
+// resolveDGHome mirrors cmd/dontguess/dgpath.go: DG_HOME env, then
+// $HOME/.dontguess. Kept package-local so pkg/exchange has no dependency on the
+// cmd package.
+func resolveDGHome(explicit string) string {
+	if explicit != "" {
+		return explicit
 	}
-	if o.ConfigDir != "" {
-		return protocol.InitWithConfig(protocol.WithConfigDir(o.ConfigDir))
-	}
-	return protocol.InitWithConfig()
-}
-
-func (o *InitOptions) transport() protocol.Transport {
-	if o.Transport != nil {
-		return o.Transport
-	}
-	return protocol.FilesystemTransport{Dir: defaultTransportBaseDir()}
-}
-
-func (o *InitOptions) alias() string {
-	if o.Alias != "" {
-		return o.Alias
-	}
-	return "exchange.dontguess"
-}
-
-func (o *InitOptions) description() string {
-	if o.Description != "" {
-		return o.Description
-	}
-	return "DontGuess exchange — token-work marketplace"
-}
-
-func (o *InitOptions) displayName() string {
-	if o.DisplayName != "" {
-		return o.DisplayName
-	}
-	return "DontGuess Exchange"
-}
-
-// defaultTransportBaseDir returns the default filesystem transport base directory.
-// Mirrors fs.DefaultBaseDir() without importing the fs package.
-func defaultTransportBaseDir() string {
-	if env := os.Getenv("CF_TRANSPORT_DIR"); env != "" {
-		return env
+	if dg := os.Getenv("DG_HOME"); dg != "" {
+		return dg
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "/tmp/cf"
+		return ".dontguess"
 	}
-	return filepath.Join(home, ".cf", "transport")
+	return filepath.Join(home, ".dontguess")
 }
 
-// ConfigPath returns the path to the exchange operator config file.
-func ConfigPath(configDir string) string {
-	return filepath.Join(configDir, "dontguess-exchange.json")
+// ConfigPath returns the path to the exchange operator config file within
+// dgHome.
+func ConfigPath(dgHome string) string {
+	return filepath.Join(dgHome, "dontguess-exchange.json")
 }
 
-// LoadConfig reads the exchange config from configDir.
-func LoadConfig(configDir string) (*Config, error) {
-	data, err := os.ReadFile(ConfigPath(configDir))
+// LoadConfig reads the exchange config from dgHome.
+func LoadConfig(dgHome string) (*Config, error) {
+	data, err := os.ReadFile(ConfigPath(dgHome))
 	if err != nil {
 		return nil, fmt.Errorf("reading exchange config: %w", err)
 	}
@@ -145,386 +99,118 @@ func LoadConfig(configDir string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Init creates an exchange campfire via the campfire SDK, promotes convention
-// declarations to its registry, and registers the exchange in the operator's
-// naming hierarchy.
+// Init bootstraps the operator's own DontGuess home campfire-free:
 //
-// Uses protocol.Init(configDir) to obtain a Client (loading/generating identity
-// and opening the store), then client.Create to generate the campfire, initialize
-// the transport, admit the operator as creator, and publish a beacon.
+//	(a) operator identity — a persistent secp256k1 (nostr) key at
+//	    $DG_HOME/nostr-operator.key, minted on first run and REUSED (never
+//	    overwritten) thereafter. Written 0600.
+//	(b) the local event store — the canonical append-only log at
+//	    $DG_HOME/events.jsonl, created if absent.
+//	(c) the config file — records the operator pubkey and the relay URLs the
+//	    operator will serve.
 //
-// Returns the Config written to disk and the open *protocol.Client. The caller
-// is responsible for calling client.Close() when done. If a config already exists
-// and opts.Force is false, returns the existing config without re-initializing
-// (the returned client is still open and must be closed).
-func Init(opts InitOptions) (*Config, *protocol.Client, error) {
-	// Open or create identity and store via SDK — uses config cascade.
-	// CF_HOME env and ~/.cf default are handled by InitWithConfig internally.
-	client, initResult, err := opts.initClient()
+// It is idempotent: re-running Init returns the same operator identity and
+// leaves the store intact. If a config already exists and opts.Force is false,
+// the existing config's CreatedAt is preserved. Returns the Config written to
+// disk.
+func Init(opts InitOptions) (*Config, error) {
+	dgHome := resolveDGHome(opts.DGHome)
+	if err := os.MkdirAll(dgHome, 0700); err != nil {
+		return nil, fmt.Errorf("creating DG_HOME %s: %w", dgHome, err)
+	}
+
+	// (a) Operator identity — load-or-create, never overwrite.
+	id, err := loadOrCreateOperatorIdentity(dgHome)
 	if err != nil {
-		return nil, nil, fmt.Errorf("protocol.InitWithConfig: %w", err)
+		return nil, fmt.Errorf("operator identity: %w", err)
 	}
 
-	// Derive configDir from the resolved store path (same directory).
-	configDir := filepath.Dir(initResult.StorePath)
-	configPath := ConfigPath(configDir)
-
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		client.Close() //nolint:errcheck
-		return nil, nil, fmt.Errorf("creating config dir: %w", err)
+	// (b) Local event store — Open creates the file if absent (O_CREATE) and is
+	// a no-op-open on an existing log. Close immediately: init only ensures it
+	// exists; serve opens it for the engine.
+	storePath := filepath.Join(dgHome, storeFile)
+	st, err := dgstore.Open(storePath)
+	if err != nil {
+		return nil, fmt.Errorf("opening local store %s: %w", storePath, err)
+	}
+	if cerr := st.Close(); cerr != nil {
+		return nil, fmt.Errorf("closing local store %s: %w", storePath, cerr)
 	}
 
-	// Write config.toml with identity.display_name if it doesn't already exist.
-	// This ensures the operator presents with a human-readable name on campfire.
-	if err := ensureDisplayNameConfig(configDir, opts.displayName()); err != nil {
-		// Non-fatal: warn but don't block exchange init.
-		fmt.Fprintf(os.Stderr, "warning: writing display name config: %v\n", err)
-	}
-
-	// Check for existing config (after opening client so we can return it).
+	// (c) Config — preserve CreatedAt across re-init for idempotency unless
+	// Force is set (a forced re-init stamps a fresh CreatedAt).
+	configPath := ConfigPath(dgHome)
+	createdAt := time.Now().UnixNano()
 	if !opts.Force {
-		if data, err := os.ReadFile(configPath); err == nil {
-			var existing Config
-			if jsonErr := json.Unmarshal(data, &existing); jsonErr == nil {
-				return &existing, client, nil
-			}
+		if existing, lerr := LoadConfig(dgHome); lerr == nil && existing.CreatedAt != 0 {
+			createdAt = existing.CreatedAt
 		}
 	}
 
-	// Create exchange campfire (invite-only, threshold=1).
-	// Beacon publishing is handled internally by client.Create.
-	createResult, err := client.Create(protocol.CreateRequest{
-		Transport:    opts.transport(),
-		Description:  opts.description(),
-		JoinProtocol: "invite-only",
-		Threshold:    1,
-		BeaconDir:    opts.BeaconDir,
-	})
-	if err != nil {
-		client.Close() //nolint:errcheck
-		return nil, nil, fmt.Errorf("creating exchange campfire: %w", err)
-	}
-
-	campfireID := createResult.CampfireID
-
-	// Generate portable beacon string (beacon:BASE64) for sharing.
-	// This is the same format produced by `cf share <campfireID>`.
-	var beaconStr string
-	if createResult.Beacon != nil {
-		beaconStr = beaconString(createResult.Beacon)
-	}
-
-	// Promote convention declarations.
-	if err := promoteDeclarations(opts.ConventionDir, opts.EmbeddedConventions, campfireID, client); err != nil {
-		// Non-fatal: log but don't fail init — operator can re-promote later.
-		fmt.Fprintf(os.Stderr, "warning: promoting convention declarations: %v\n", err)
-	}
-
-	// Register in naming hierarchy.
-	aliases := naming.NewAliasStore(configDir)
-	alias := opts.alias()
-	if err := aliases.Set(alias, campfireID); err != nil {
-		// Non-fatal: alias failure doesn't block exchange use.
-		fmt.Fprintf(os.Stderr, "warning: setting alias %q: %v\n", alias, err)
-	}
-
-	// Register in global naming registry if a root is configured.
-	// The naming root is the parent campfire for the alias domain. We register
-	// the first segment of the alias — the leaf name within that parent
-	// (e.g. "exchange" from "exchange.dontguess"). Each naming registry holds
-	// one level of the hierarchy, matching the cf:// name resolution model.
-	if opts.NamingRoot != "" {
-		segment := strings.SplitN(alias, ".", 2)[0]
-		if _, err := naming.Register(context.Background(), client, opts.NamingRoot, segment, campfireID, &naming.RegisterOptions{TTL: naming.MaxTTL}); err != nil {
-			// Non-fatal: naming registry failure doesn't block exchange use.
-			fmt.Fprintf(os.Stderr, "warning: registering name %q in root %s: %v\n", segment, shortCampfireID(opts.NamingRoot), err)
-		} else {
-			fmt.Fprintf(os.Stderr, "registered %q in naming root %s\n", segment, shortCampfireID(opts.NamingRoot))
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: no naming root configured — exchange is not globally discoverable. Use --naming-root to register in a naming registry.\n")
-	}
-
-	// Write config.
 	cfg := &Config{
-		ExchangeCampfireID: campfireID,
-		ExchangeBeacon:     beaconStr,
-		OperatorKeyHex:     client.PublicKeyHex(),
-		ConventionVersion:  "0.1",
-		Alias:              alias,
-		CreatedAt:          time.Now().UnixNano(),
+		OperatorKeyHex: id.PubKeyHex(),
+		OperatorNpub:   id.Npub(),
+		RelayURLs:      opts.RelayURLs,
+		StorePath:      storePath,
+		CreatedAt:      createdAt,
 	}
 	if err := writeConfig(configPath, cfg); err != nil {
-		client.Close() //nolint:errcheck
-		return nil, nil, fmt.Errorf("writing exchange config: %w", err)
+		return nil, fmt.Errorf("writing exchange config: %w", err)
 	}
 
-	return cfg, client, nil
+	return cfg, nil
 }
 
-// declCandidate holds a parsed declaration file ready for promotion.
-type declCandidate struct {
-	path    string
-	name    string
-	payload []byte
-	// key is "convention:operation" — used for deduplication.
-	key string
-	// parsed version components for comparison.
-	major, minor, patch int
-}
+// loadOrCreateOperatorIdentity returns the persisted secp256k1 (nostr) operator
+// identity under dgHome, minting and persisting a fresh one on first run. The
+// private key is stored 32-byte hex at 0600 and is NEVER overwritten once
+// present (idempotent). This mirrors serve.go's loadOrCreateNostrOperatorIdentity
+// so `init` and `serve` converge on the same operator key at
+// $DG_HOME/nostr-operator.key.
+func loadOrCreateOperatorIdentity(dgHome string) (*identity.Secp256k1Identity, error) {
+	keyPath := filepath.Join(dgHome, operatorKeyFile)
+	if data, err := os.ReadFile(keyPath); err == nil {
+		if privHex := trimNewline(string(data)); privHex != "" {
+			id, perr := identity.FromPrivHex(privHex)
+			if perr != nil {
+				return nil, fmt.Errorf("parsing persisted operator key %s: %w", keyPath, perr)
+			}
+			return id, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("reading operator key %s: %w", keyPath, err)
+	}
 
-// promoteDeclarations reads all .json convention files, lints each, and posts
-// them as convention:operation messages to the exchange campfire via client.Send.
-//
-// Source priority: conventionDir (filesystem path) > embeddedFS (go:embed).
-// At least one must provide declarations.
-//
-// When multiple files declare the same convention+operation (e.g. put.json at
-// v0.1 and put-v0.2.json at v0.2), only the highest version is promoted.
-func promoteDeclarations(conventionDir string, embeddedFS fs.FS, campfireID string, client *protocol.Client) error {
-	files, err := collectDeclarationFiles(conventionDir, embeddedFS)
+	id, err := identity.Generate()
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("generating operator identity: %w", err)
 	}
-	if len(files) == 0 {
-		return fmt.Errorf("no convention declaration files found (set --convention-dir or embed conventions)")
+	if err := os.WriteFile(keyPath, []byte(id.PrivHex()+"\n"), 0600); err != nil {
+		return nil, fmt.Errorf("writing operator key %s: %w", keyPath, err)
 	}
+	return id, nil
+}
 
-	// Collect and parse all candidates, deduplicating by convention+operation.
-	winners := make(map[string]*declCandidate)
-	var skipped int
-
-	for _, f := range files {
-		lintResult := convention.Lint(f.payload)
-		if !lintResult.Valid {
-			fmt.Fprintf(os.Stderr, "warning: skipping %s (lint failed): %v\n", f.name, lintResult.Errors)
-			skipped++
+// trimNewline strips a trailing newline and surrounding whitespace from a
+// persisted key file without pulling in the strings package for one call.
+func trimNewline(s string) string {
+	for len(s) > 0 {
+		c := s[len(s)-1]
+		if c == '\n' || c == '\r' || c == ' ' || c == '\t' {
+			s = s[:len(s)-1]
 			continue
 		}
-		cand, parseErr := parseVersionedDecl(f.name, f.name, f.payload)
-		if parseErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: skipping %s (version parse): %v\n", f.name, parseErr)
-			skipped++
+		break
+	}
+	for len(s) > 0 {
+		c := s[0]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			s = s[1:]
 			continue
 		}
-		prev, exists := winners[cand.key]
-		if !exists || declGreater(cand, prev) {
-			if exists {
-				fmt.Fprintf(os.Stderr, "info: %s supersedes %s for %s (v%d.%d.%d > v%d.%d.%d)\n",
-					cand.name, prev.name, cand.key,
-					cand.major, cand.minor, cand.patch,
-					prev.major, prev.minor, prev.patch,
-				)
-			}
-			winners[cand.key] = cand
-		} else {
-			fmt.Fprintf(os.Stderr, "info: skipping %s — %s is a higher version for %s\n",
-				f.name, prev.name, cand.key)
-		}
+		break
 	}
-
-	var promoted int
-	for _, cand := range winners {
-		if err := sendConventionMessage(campfireID, cand.payload, client); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: promoting %s: %v\n", cand.name, err)
-			skipped++
-			continue
-		}
-		promoted++
-	}
-
-	if promoted == 0 && skipped > 0 {
-		return fmt.Errorf("all %d declarations failed to promote", skipped)
-	}
-	return nil
-}
-
-// declFile is a name + payload pair from either the filesystem or an embed.FS.
-type declFile struct {
-	name    string
-	payload []byte
-}
-
-// collectDeclarationFiles gathers .json files from either a filesystem dir or
-// an embedded FS. Filesystem takes priority if conventionDir is non-empty.
-func collectDeclarationFiles(conventionDir string, embeddedFS fs.FS) ([]declFile, error) {
-	if conventionDir != "" {
-		return collectFromDisk(conventionDir)
-	}
-	if embeddedFS != nil {
-		return collectFromEmbed(embeddedFS)
-	}
-	return nil, nil
-}
-
-func collectFromDisk(conventionDir string) ([]declFile, error) {
-	var files []declFile
-	for _, sub := range []string{"exchange-core", "exchange-scrip"} {
-		dir := filepath.Join(conventionDir, sub)
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: reading declaration dir %s: %v\n", dir, err)
-			continue
-		}
-		for _, e := range entries {
-			if filepath.Ext(e.Name()) != ".json" {
-				continue
-			}
-			payload, err := os.ReadFile(filepath.Join(dir, e.Name()))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: reading %s: %v\n", e.Name(), err)
-				continue
-			}
-			files = append(files, declFile{name: e.Name(), payload: payload})
-		}
-	}
-	return files, nil
-}
-
-func collectFromEmbed(embedded fs.FS) ([]declFile, error) {
-	var files []declFile
-	for _, sub := range []string{"docs/convention/exchange-core", "docs/convention/exchange-scrip"} {
-		entries, err := fs.ReadDir(embedded, sub)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if filepath.Ext(e.Name()) != ".json" {
-				continue
-			}
-			payload, err := fs.ReadFile(embedded, sub+"/"+e.Name())
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: reading embedded %s: %v\n", e.Name(), err)
-				continue
-			}
-			files = append(files, declFile{name: e.Name(), payload: payload})
-		}
-	}
-	return files, nil
-}
-
-// parseVersionedDecl extracts the convention, operation, and version from a
-// declaration payload, returning a declCandidate for version comparison.
-func parseVersionedDecl(path, name string, payload []byte) (*declCandidate, error) {
-	var hdr struct {
-		Convention string `json:"convention"`
-		Operation  string `json:"operation"`
-		Version    string `json:"version"`
-	}
-	if err := json.Unmarshal(payload, &hdr); err != nil {
-		return nil, fmt.Errorf("parsing JSON header: %w", err)
-	}
-	if hdr.Convention == "" || hdr.Operation == "" {
-		return nil, fmt.Errorf("missing convention or operation field")
-	}
-	major, minor, patch, err := parseDeclVersion(hdr.Version)
-	if err != nil {
-		return nil, fmt.Errorf("parsing version %q: %w", hdr.Version, err)
-	}
-	return &declCandidate{
-		path:    path,
-		name:    name,
-		payload: payload,
-		key:     hdr.Convention + ":" + hdr.Operation,
-		major:   major,
-		minor:   minor,
-		patch:   patch,
-	}, nil
-}
-
-// parseDeclVersion parses a "major.minor.patch", "major.minor", or "major"
-// version string, returning the components as integers.
-func parseDeclVersion(v string) (major, minor, patch int, err error) {
-	if v == "" {
-		return 0, 0, 0, nil // treat missing version as 0.0.0
-	}
-	parts := strings.SplitN(v, ".", 4)
-	if len(parts) > 3 {
-		return 0, 0, 0, fmt.Errorf("too many components in %q", v)
-	}
-	vals := [3]int{}
-	for i, p := range parts {
-		if p == "" {
-			return 0, 0, 0, fmt.Errorf("empty component in %q", v)
-		}
-		n := 0
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return 0, 0, 0, fmt.Errorf("non-numeric component %q in %q", p, v)
-			}
-			n = n*10 + int(c-'0')
-		}
-		vals[i] = n
-	}
-	return vals[0], vals[1], vals[2], nil
-}
-
-// declGreater reports whether a has a strictly higher version than b.
-func declGreater(a, b *declCandidate) bool {
-	if a.major != b.major {
-		return a.major > b.major
-	}
-	if a.minor != b.minor {
-		return a.minor > b.minor
-	}
-	return a.patch > b.patch
-}
-
-
-// sendConventionMessage sends a convention:operation message to the exchange
-// campfire via client.Send.
-func sendConventionMessage(campfireID string, payload []byte, client *protocol.Client) error {
-	return sendTaggedMessage(campfireID, payload, []string{convention.ConventionOperationTag}, client)
-}
-
-// sendTaggedMessage sends a message with the given tags to the exchange campfire
-// via client.Send. Used by both convention declarations and view creation.
-func sendTaggedMessage(campfireID string, payload []byte, tags []string, client *protocol.Client) error {
-	_, err := client.Send(protocol.SendRequest{
-		CampfireID: campfireID,
-		Payload:    payload,
-		Tags:       tags,
-	})
-	return err
-}
-
-// beaconString encodes a beacon as the portable "beacon:BASE64" string format
-// used by `cf share` and `cf join`. Returns an empty string if b is nil or
-// encoding fails (non-fatal — config is still written without the beacon field).
-func beaconString(b any) string {
-	if b == nil {
-		return ""
-	}
-	data, err := cfencoding.Marshal(b)
-	if err != nil {
-		return ""
-	}
-	return "beacon:" + base64.StdEncoding.EncodeToString(data)
-}
-
-// shortCampfireID safely truncates a campfire ID to at most 12 characters for display.
-func shortCampfireID(id string) string {
-	if len(id) <= 12 {
-		return id
-	}
-	return id[:12]
-}
-
-// ensureDisplayNameConfig writes a config.toml with identity.display_name to
-// configDir if no config.toml already exists there. This lets InitWithConfig
-// pick up the display name from the config cascade so the operator presents
-// with a human-readable name on campfire messages.
-//
-// It is a no-op when config.toml already exists — the operator's existing
-// config is never overwritten.
-func ensureDisplayNameConfig(configDir, displayName string) error {
-	configPath := filepath.Join(configDir, "config.toml")
-	if _, err := os.Stat(configPath); err == nil {
-		// config.toml already exists — leave it alone.
-		return nil
-	}
-	content := fmt.Sprintf("[identity]\ndisplay_name = %q\n", displayName)
-	return os.WriteFile(configPath, []byte(content), 0600)
+	return s
 }
 
 // writeConfig serializes cfg to configPath (mode 0600).

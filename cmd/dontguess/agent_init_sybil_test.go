@@ -31,7 +31,7 @@ import (
 func TestAgentInit_SubagentSignsUnderParent(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	// Fleet member: gets a persistent npub of its own.
 	if err := runAgentInitCore(dgHome, "fleet", "", true); err != nil {
@@ -94,7 +94,7 @@ func TestAgentInit_SubagentSignsUnderParent(t *testing.T) {
 func TestAgentInit_FreshFleetMemberGetsPersistentNpub(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	if err := runAgentInitCore(dgHome, "m1", "", true); err != nil {
 		t.Fatalf("agent-init m1: %v", err)
@@ -135,7 +135,7 @@ func TestAgentInit_FreshFleetMemberGetsPersistentNpub(t *testing.T) {
 func TestAgentInit_OperatorKeyNeverBorrowed(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	// Plant an operator secp256k1 identity at DG_HOME root (as the operator
 	// would have after its own provisioning). If any --parent value could reach
@@ -191,7 +191,7 @@ func TestAgentInit_OperatorKeyNeverBorrowed(t *testing.T) {
 func TestAgentInit_SubagentCannotParentAnotherSubagent(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	if err := runAgentInitCore(dgHome, "fleet", "", true); err != nil {
 		t.Fatalf("agent-init fleet: %v", err)

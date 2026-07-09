@@ -40,7 +40,7 @@ import (
 func TestAgentInit_EphemeralWithoutParentRejected(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	err := runAgentInitCore(dgHome, "orphan", "", false)
 	if err == nil {
@@ -62,7 +62,7 @@ func TestAgentInit_EphemeralWithoutParentRejected(t *testing.T) {
 func TestAgentInit_ParentAndFleetMemberMutuallyExclusive(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	if err := runAgentInitCore(dgHome, "fleet", "", true); err != nil {
 		t.Fatalf("agent-init fleet: %v", err)
@@ -83,7 +83,7 @@ func TestAgentInit_ParentAndFleetMemberMutuallyExclusive(t *testing.T) {
 func TestAgentInit_SymlinkParentEscapeBlocked(t *testing.T) {
 	t.Parallel()
 
-	dgHome, _ := scratchExchange(t)
+	dgHome := scratchExchange(t)
 
 	// Plant the operator identity — the thing a symlink escape would expose.
 	opID, _, err := identity.LoadOrCreate(dgHome)
