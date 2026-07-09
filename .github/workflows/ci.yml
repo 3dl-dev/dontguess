@@ -39,7 +39,7 @@ jobs:
       - name: Build check
         env:
           GOPRIVATE: github.com/campfire-net/campfire
-        run: go build ./cmd/dontguess ./cmd/seller
+        run: go build ./cmd/dontguess
 
       - name: Vet
         run: go vet ./...
