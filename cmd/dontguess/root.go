@@ -17,10 +17,8 @@ var rootCmd = &cobra.Command{
 	Short: "DontGuess — token-work exchange operator CLI",
 	Long: `dontguess — operator CLI for the DontGuess token-work exchange.
 
-The exchange runs as a campfire application: all exchange state (inventory,
-orders, matches, settlements) is derived from the message log.
-
-  dontguess convention supersede  publish a new convention version via registry supersede`,
+Exchange state (inventory, orders, matches, settlements) is derived from
+the message log.`,
 }
 
 var versionCmd = &cobra.Command{

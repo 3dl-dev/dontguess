@@ -1,9 +1,13 @@
 // Package convention provides DontGuess-specific convention utilities: version
-// comparison, breaking-change detection, and declaration diffing helpers used by
-// the dontguess CLI's `convention supersede` command.
+// comparison, breaking-change detection, and declaration diffing helpers for
+// managing DontGuess exchange convention versions.
 //
-// It builds on top of github.com/campfire-net/campfire/cf-conventions/cf-convention, which
-// owns parsing, lint, and registry publication.
+// This file is transport-agnostic (no campfire dependency): it operates purely
+// on the raw JSON convention declaration payloads. It has no current caller —
+// the campfire-only `dontguess convention supersede` admin command that used it
+// was removed in the nostr-first cutover (dontguess-8b6) — but the diff/semver
+// logic is kept because a nostr-native convention-version-management command
+// will need equivalent breaking-change detection.
 package convention
 
 import (
