@@ -172,9 +172,16 @@ func (s *State) applySettleBuyerReject(msg *Message) {
 	matchMsgID := msg.Antecedents[0]
 
 	// Enforce buyer identity: the sender must be the buyer who placed the
-	// original buy order that this match fulfills.
+	// original buy order that this match fulfills. An unknown match (!ok) is a
+	// benign stale-antecedent drop; a KNOWN match with the wrong sender is a
+	// security-relevant buyer-identity forgery — counted + alarmed rather than
+	// dropped silently (dontguess-471 LOCKED-5, same split as applySettleBuyerAccept).
 	expectedBuyer, ok := s.matchToBuyer[matchMsgID]
-	if !ok || msg.Sender != expectedBuyer {
+	if !ok {
+		return
+	}
+	if msg.Sender != expectedBuyer {
+		s.recordFoldDenial(foldDenialBuyerIdentity, msg)
 		return
 	}
 
@@ -262,9 +269,15 @@ func (s *State) applySettleComplete(msg *Message) {
 	}
 
 	// Enforce buyer identity: the sender must be the original buyer.
-	// The match message recorded the expected buyer key in matchToBuyer.
+	// The match message recorded the expected buyer key in matchToBuyer. An
+	// unknown match is a benign drop; a known match with the wrong sender is a
+	// buyer-identity forgery — counted + alarmed (dontguess-471 LOCKED-5).
 	expectedBuyer, ok := s.matchToBuyer[matchMsgID]
-	if !ok || msg.Sender != expectedBuyer {
+	if !ok {
+		return
+	}
+	if msg.Sender != expectedBuyer {
+		s.recordFoldDenial(foldDenialBuyerIdentity, msg)
 		return
 	}
 
@@ -354,9 +367,15 @@ func (s *State) applySettleSmallContentDispute(msg *Message) {
 		return
 	}
 
-	// Sender identity gate: must be the original buyer for this match.
+	// Sender identity gate: must be the original buyer for this match. An unknown
+	// match is a benign drop; a known match with the wrong sender is a
+	// buyer-identity forgery — counted + alarmed (dontguess-471 LOCKED-5).
 	expectedBuyer, ok := s.matchToBuyer[matchMsgID]
-	if !ok || msg.Sender != expectedBuyer {
+	if !ok {
+		return
+	}
+	if msg.Sender != expectedBuyer {
+		s.recordFoldDenial(foldDenialBuyerIdentity, msg)
 		return
 	}
 
@@ -415,8 +434,10 @@ func (s *State) applySettlePreviewRequest(msg *Message) {
 	if !ok {
 		return
 	}
-	// Validate sender is the original buyer.
+	// Validate sender is the original buyer. A known match with the wrong sender
+	// is a buyer-identity forgery — counted + alarmed (dontguess-471 LOCKED-5).
 	if msg.Sender != expectedBuyer {
+		s.recordFoldDenial(foldDenialBuyerIdentity, msg)
 		return
 	}
 

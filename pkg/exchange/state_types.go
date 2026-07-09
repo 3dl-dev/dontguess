@@ -894,6 +894,14 @@ type State struct {
 	// Key: matchMsgID (BuyMsg field from BuyHoldPayload). Value: reservationID.
 	matchToBuyHold map[string]string
 
+	// matchToBuyHoldAmount indexes match message IDs to the ORIGINAL held amount
+	// (price + fee) from the scrip-buy-hold event. Populated alongside
+	// matchToBuyHold by applyScripBuyHold. Used by restoreExistingHold to restore
+	// the exact scrip held at buyer-accept time on restart rather than recomputing
+	// from the current (possibly drifted) dynamic price (dontguess-471).
+	// Key: matchMsgID (BuyMsg field). Value: amount.
+	matchToBuyHoldAmount map[string]int64
+
 	// assignsByEntry maps entry IDs to all assign records for that entry.
 	// Key: entryID. Assigns with no entry use "" as key.
 	assignsByEntry map[string][]*AssignRecord

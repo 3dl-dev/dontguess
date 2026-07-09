@@ -281,15 +281,28 @@ type Engine struct {
 	// marshalFunc overrides json.Marshal for tests that need to inject marshal failures.
 	// Nil means use the standard json.Marshal.
 	marshalFunc func(v any) ([]byte, error)
+	// resvMu guards both matchToReservation and buyerRecentEntries. In local-relay
+	// mode dispatch runs on TWO goroutines concurrently: the poll loop
+	// (pollLocalStore → foldAndDispatchLocalSnapshot → dispatch) and the
+	// operator/auto-accept path (rebuildAndDispatchGapLocal → dispatch, driven by
+	// AutoAcceptPut/RejectPut). localMu only makes the cursor claims atomic — the
+	// dispatch HANDLER bodies (handleSettleBuyerAcceptScrip / handleSettleComplete
+	// → recordBuyerSettlement / performScripSettlement) run outside localMu and
+	// mutate these two maps concurrently. Without resvMu those are unsynchronized
+	// map writes (data race, verified under -race). Lock ordering: resvMu is a
+	// leaf-ish lock — recordBuyerSettlement holds it across State calls (State has
+	// its own lock and never calls back into these maps), and no path takes
+	// State.mu then resvMu, so there is no lock-ordering hazard (dontguess-471).
+	resvMu sync.Mutex
 	// matchToReservation maps a match message ID to the scrip reservation ID created
 	// at buyer-accept time. The settle(complete) handler uses this to locate the
-	// reservation without trusting buyer-supplied payload data.
+	// reservation without trusting buyer-supplied payload data. Guarded by resvMu.
 	matchToReservation map[string]string
 
 	// buyerRecentEntries tracks the last few entries settled per buyer for
 	// co-occurrence recording. Key: buyerKey -> list of (entryID, time) pairs.
 	// Not persisted — rebuilt from settle events observed since engine start.
-	// Engine-private; no lock needed (engine event loop is single-threaded).
+	// Guarded by resvMu (concurrent poll-loop + operator dispatch, dontguess-471).
 	buyerRecentEntries map[string][]buyerSessionEntry
 
 	// localMu guards localMsgByID, localSeen, and localDispatched. These are
@@ -401,12 +414,26 @@ type DegradationMetrics struct {
 	// counted here would be a silent security-relevant drop (dontguess-9ed
 	// LOCKED-5).
 	FoldDenialNotOperator atomic.Int64
-	// FoldDenialBuyerIdentity counts STATE-fold rejections where a
-	// settle(buyer-accept) was dropped because its Sender is not the buyer bound
-	// to the match (applySettleBuyerAccept, convention §5.3 buyer-identity gate).
-	// A forged buyer-accept that reached the fold without being counted would let
-	// a non-buyer bind/redirect another buyer's match silently (dontguess-9ed).
+	// FoldDenialBuyerIdentity counts STATE-fold rejections where a buyer-authored
+	// settlement fold (settle buyer-accept / buyer-reject / complete /
+	// small-content-dispute / preview-request) was dropped because its Sender is
+	// not the buyer bound to the match (convention §5.3 buyer-identity gate).
+	// A forged buyer-side message that reached the fold without being counted
+	// would let a non-buyer bind/redirect/refund another buyer's match silently
+	// (dontguess-9ed; extended to every buyer-identity fold guard in dontguess-471).
 	FoldDenialBuyerIdentity atomic.Int64
+	// FoldDenialAssignExclusive counts STATE-fold rejections where an
+	// assign-claim was dropped because its Sender is not the assign's
+	// ExclusiveSender (applyAssignClaim, state_assign.go). A forged claim on an
+	// exclusively-targeted assign that reached the fold without being counted
+	// would be a silent identity drop (dontguess-471 LOCKED-5).
+	FoldDenialAssignExclusive atomic.Int64
+	// FoldDenialAssignClaimant counts STATE-fold rejections where an
+	// assign-complete was dropped because its Sender is not the ClaimantKey that
+	// holds the claim (applyAssignComplete, state_assign.go). A forged completion
+	// by a non-claimant that reached the fold without being counted would let a
+	// non-worker submit a result for another agent's claim silently (dontguess-471).
+	FoldDenialAssignClaimant atomic.Int64
 }
 
 // DegradationCounts is a plain (non-atomic) point-in-time copy of
@@ -419,6 +446,8 @@ type DegradationCounts struct {
 	TrustDenialOther          int64 `json:"trust_denial_other"`
 	FoldDenialNotOperator     int64 `json:"fold_denial_not_operator"`
 	FoldDenialBuyerIdentity   int64 `json:"fold_denial_buyer_identity"`
+	FoldDenialAssignExclusive int64 `json:"fold_denial_assign_exclusive"`
+	FoldDenialAssignClaimant  int64 `json:"fold_denial_assign_claimant"`
 }
 
 // foldDenialReason identifies which security-relevant State.Apply fold guard
@@ -431,9 +460,16 @@ const (
 	// foldDenialNotOperator: an operator-only settlement fold guard rejected a
 	// non-operator sender (put-accept / put-reject / deliver).
 	foldDenialNotOperator foldDenialReason = iota
-	// foldDenialBuyerIdentity: settle(buyer-accept) rejected because the sender
-	// is not the buyer bound to the match.
+	// foldDenialBuyerIdentity: a buyer-authored settlement fold (buyer-accept /
+	// buyer-reject / complete / small-content-dispute / preview-request) rejected
+	// because the sender is not the buyer bound to the match.
 	foldDenialBuyerIdentity
+	// foldDenialAssignExclusive: assign-claim rejected because the sender is not
+	// the assign's ExclusiveSender.
+	foldDenialAssignExclusive
+	// foldDenialAssignClaimant: assign-complete rejected because the sender is not
+	// the ClaimantKey holding the claim.
+	foldDenialAssignClaimant
 )
 
 // String renders a foldDenialReason for the alarm log line.
@@ -443,6 +479,10 @@ func (r foldDenialReason) String() string {
 		return "not-operator"
 	case foldDenialBuyerIdentity:
 		return "buyer-identity"
+	case foldDenialAssignExclusive:
+		return "assign-exclusive-sender"
+	case foldDenialAssignClaimant:
+		return "assign-claimant"
 	default:
 		return "unknown"
 	}
@@ -500,6 +540,10 @@ func NewEngine(opts EngineOptions) *Engine {
 			e.degradation.FoldDenialNotOperator.Add(1)
 		case foldDenialBuyerIdentity:
 			e.degradation.FoldDenialBuyerIdentity.Add(1)
+		case foldDenialAssignExclusive:
+			e.degradation.FoldDenialAssignExclusive.Add(1)
+		case foldDenialAssignClaimant:
+			e.degradation.FoldDenialAssignClaimant.Add(1)
 		}
 		e.opts.log("engine: fold rejected msg=%s reason=%s sender=%s",
 			msg.ID, reason, shortKey(msg.Sender))
@@ -523,6 +567,8 @@ func (e *Engine) DegradationSnapshot() DegradationCounts {
 		TrustDenialOther:          e.degradation.TrustDenialOther.Load(),
 		FoldDenialNotOperator:     e.degradation.FoldDenialNotOperator.Load(),
 		FoldDenialBuyerIdentity:   e.degradation.FoldDenialBuyerIdentity.Load(),
+		FoldDenialAssignExclusive: e.degradation.FoldDenialAssignExclusive.Load(),
+		FoldDenialAssignClaimant:  e.degradation.FoldDenialAssignClaimant.Load(),
 	}
 }
 
@@ -561,15 +607,16 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.localMu.Unlock()
 	}
 	// Dispatch pending unmatched orders that were already in the log at startup.
-	if err := e.dispatchPendingOrders(); err != nil {
-		e.opts.log("engine: error dispatching pending orders: %v", err)
-	}
+	e.dispatchPendingOrders()
 	return e.run(ctx)
 }
 
 // dispatchPendingOrders processes any active buy orders that have not yet been
-// matched. Called after replay to handle orders that arrived before the engine started.
-func (e *Engine) dispatchPendingOrders() error {
+// matched. Called after replay to handle orders that arrived before the engine
+// started. Per-order fetch/handle failures are logged and skipped; there is no
+// aggregate error to surface, so this returns nothing (dontguess-471 dead-code
+// cleanup — the sole caller's error branch was unreachable).
+func (e *Engine) dispatchPendingOrders() {
 	orders := e.state.ActiveOrders()
 	for _, order := range orders {
 		msg, err := e.fetchMessage(order.OrderID)
@@ -582,7 +629,6 @@ func (e *Engine) dispatchPendingOrders() error {
 			e.opts.log("engine: error handling pending buy %s: %v", order.OrderID, err)
 		}
 	}
-	return nil
 }
 
 // fetchMessage retrieves a single message by ID. When LocalStore is
@@ -1503,11 +1549,46 @@ func hasOverlap(a, b []string) bool {
 	return false
 }
 
+// reservationFor returns the reservation ID recorded for a match at
+// buyer-accept time, and whether one exists. Guarded by resvMu — the poll loop
+// and the operator/auto-accept dispatch goroutine both read this map
+// concurrently in local-relay mode (dontguess-471).
+func (e *Engine) reservationFor(matchMsgID string) (string, bool) {
+	e.resvMu.Lock()
+	defer e.resvMu.Unlock()
+	resID, ok := e.matchToReservation[matchMsgID]
+	return resID, ok
+}
+
+// setReservation records the reservation ID created for a match. Guarded by
+// resvMu (concurrent dispatch goroutines in local-relay mode, dontguess-471).
+func (e *Engine) setReservation(matchMsgID, reservationID string) {
+	e.resvMu.Lock()
+	e.matchToReservation[matchMsgID] = reservationID
+	e.resvMu.Unlock()
+}
+
+// deleteReservation removes the reservation mapping for a settled match.
+// Guarded by resvMu (dontguess-471).
+func (e *Engine) deleteReservation(matchMsgID string) {
+	e.resvMu.Lock()
+	delete(e.matchToReservation, matchMsgID)
+	e.resvMu.Unlock()
+}
+
 // recordBuyerSettlement appends entryID to the buyer's recent-entries list
 // and calls UpdateCoOccurrence for each prior entry in the session window.
 // Entries older than buyerSessionWindow are pruned before pairing.
-// Engine-private: no locking needed (called from the single-threaded event loop).
+//
+// Guarded by resvMu: in local-relay mode this runs from the poll-loop dispatch
+// goroutine AND the operator/auto-accept dispatch goroutine concurrently
+// (dontguess-471). The lock is held across the UpdateCoOccurrence calls; that is
+// safe because State takes its own lock and never calls back into
+// buyerRecentEntries, so no lock-ordering cycle exists.
 func (e *Engine) recordBuyerSettlement(buyerKey, entryID string) {
+	e.resvMu.Lock()
+	defer e.resvMu.Unlock()
+
 	now := time.Now()
 	cutoff := now.Add(-buyerSessionWindow)
 
