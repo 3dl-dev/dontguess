@@ -667,8 +667,21 @@ func TestRelayHotPath_BuyMatchP99_UnderBlockedRelay(t *testing.T) {
 
 	sort.Slice(latencies, func(a, b int) bool { return latencies[a] < latencies[b] })
 	p99 := latencies[(len(latencies)*99)/100]
-	if p99 >= 50*time.Millisecond {
-		t.Fatalf("buy/match p99 = %s, want < 50ms — the hot path is NOT isolated from the blocked relay", p99)
+	// This assertion proves hot-path ISOLATION, not an absolute latency SLA: with
+	// the relay publish fully blocked, a genuinely non-isolated buy would BLOCK on
+	// the dead relay for multiple SECONDS (until the outbox/ctx timeout), whereas
+	// the isolated path completes in single-digit ms (settled: 5.5ms; -race:
+	// 23ms). The ceiling is set to discriminate those two regimes robustly under a
+	// variably-loaded CI runner — the raw p99 is logged below for NFR tracking, so
+	// a real latency regression is still observable (and belongs in a benchmark,
+	// not this isolation gate). A flat 50ms wall-clock threshold false-failed under
+	// ambient load / -race instrumentation (dontguess-7e2).
+	ceiling := 250 * time.Millisecond
+	if raceEnabled {
+		ceiling = 400 * time.Millisecond
+	}
+	if p99 >= ceiling {
+		t.Fatalf("buy/match p99 = %s, want < %s — the hot path is NOT isolated from the blocked relay (a non-isolated buy would block for seconds)", p99, ceiling)
 	}
 	t.Logf("hot-path buy/match p99 = %s over %d buys (relay publish fully blocked, lag=%d)", p99, buyN, w.outbox.PublishLag())
 }
