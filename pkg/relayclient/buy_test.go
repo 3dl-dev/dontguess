@@ -97,6 +97,19 @@ type readItem struct {
 // it can build a response LAZILY from the captured/observed buy id — required
 // because the buy id is the client's own deterministic signed-event id, unknown
 // to the test until the client publishes it.
+//
+// STRFRY LIVE-DELIVERY MODEL (H1 teeth): the fake reproduces the one relay
+// semantic the subscribe-first ordering exists to exploit — a real-time (stream)
+// delivery reaches ONLY a subscription that was LIVE when the event was
+// published. The fake freezes that eligibility at buy-publish time
+// (liveAtPublish = "was a REQ seen strictly before the buy EVENT"); the operator
+// is modelled as folding+publishing the match at that same instant (worst-case
+// H1: an instant Notify-driven response). So a publish-BEFORE-subscribe (or a
+// no-subscribe) regression MISSES the real-time match — the buy then times out
+// AMBIGUOUS — while a re-REQ carrying a `since` covering the buy REPLAYS the
+// stored match exactly as strfry would. Without this gate the buy test would
+// pass identically whether the client subscribed first or not (false H1
+// assurance); TestBuyFake_LiveDeliveryGatesOnSubscribeFirst locks the gate.
 type buyFakeConn struct {
 	mu    sync.Mutex
 	items chan readItem
@@ -107,14 +120,19 @@ type buyFakeConn struct {
 	operator identity.Signer
 
 	// behavior knobs (set before use).
-	okOnBuy      bool                                    // ACK the buy EVENT with OK accepted=true
-	buildResp    func(buyID string) *identity.Event      // the operator response to deliver, built from the buy id
-	respondAfter time.Duration                           // if buildResp set: deliver it this long after the buy OK (0 = immediately)
-	respondOnReq bool                                     // deliver buildResp when a REQ arrives (buy id read from the #e filter) — models a reconnect replaying stored events
-	dropAfterOK  bool                                     // after the buy OK, inject a transport drop instead of a response
+	okOnBuy          bool                               // ACK the buy EVENT with OK accepted=true
+	buildResp        func(buyID string) *identity.Event // the operator response to deliver, built from the buy id
+	respondAfter     time.Duration                      // if buildResp set: deliver it this long after the buy OK (0 = immediately)
+	respondOnReq     bool                               // deliver buildResp when a REQ arrives (buy id read from the #e filter) — models a reconnect replaying stored events on a fresh socket that never saw the buy
+	replayOnSinceREQ bool                               // on THIS conn (that saw the buy), replay buildResp when a REQ carries a `since` covering the buy — models strfry replaying a stored match to a late/re-subscriber
+	dropAfterOK      bool                               // after the buy OK, inject a transport drop instead of a response
 
 	subID string
 	buyID string
+	// sawReq/liveAtPublish/buyCreatedAt implement the live-delivery gate above.
+	sawReq        bool  // a REQ has arrived on this conn
+	liveAtPublish bool  // frozen at buy-publish: was a REQ live when the buy was published (subscribe-first)?
+	buyCreatedAt  int64 // the published buy's created_at (strfry replay floor)
 }
 
 func newBuyFakeConn() *buyFakeConn {
@@ -137,18 +155,35 @@ func (c *buyFakeConn) WriteMessage(_ int, data []byte) error {
 	case relay.LabelREQ:
 		c.mu.Lock()
 		c.subID = f.SubID
+		c.sawReq = true
+		buySeen := c.buyID != ""
+		buyID := c.buyID
 		c.mu.Unlock()
-		if c.respondOnReq && c.buildResp != nil {
-			var buyID string
-			if len(f.Filters) > 0 {
-				if e := f.Filters[0].Tags["e"]; len(e) > 0 {
-					buyID = e[0]
-				}
+
+		var filterBuyID string
+		var sinceSet bool
+		if len(f.Filters) > 0 {
+			if e := f.Filters[0].Tags["e"]; len(e) > 0 {
+				filterBuyID = e[0]
 			}
-			if buyID != "" {
-				frame, _ := relay.EncodeSubEvent(f.SubID, c.buildResp(buyID))
-				c.push(readItem{data: frame})
-			}
+			sinceSet = f.Filters[0].Since != nil
+		}
+
+		// respondOnReq: a fresh relay socket (post-reconnect) that never saw the
+		// buy replays the stored operator response on ANY matching REQ, reading
+		// the buy id from the #e filter. Models the H5 recovery conn.
+		if c.respondOnReq && c.buildResp != nil && filterBuyID != "" {
+			frame, _ := relay.EncodeSubEvent(f.SubID, c.buildResp(filterBuyID))
+			c.push(readItem{data: frame})
+		}
+
+		// replayOnSinceREQ: on the conn that DID see the buy, strfry replays the
+		// stored match to a late/re-subscriber only when its REQ carries a `since`
+		// covering the buy (a bare late subscribe gets nothing — that is the H1
+		// loss window). Requires the buy to have already been published here.
+		if c.replayOnSinceREQ && c.buildResp != nil && buySeen && sinceSet {
+			frame, _ := relay.EncodeSubEvent(f.SubID, c.buildResp(buyID))
+			c.push(readItem{data: frame})
 		}
 	case relay.LabelEVENT:
 		if f.Event == nil {
@@ -156,6 +191,12 @@ func (c *buyFakeConn) WriteMessage(_ int, data []byte) error {
 		}
 		c.mu.Lock()
 		c.buyID = f.Event.ID
+		c.buyCreatedAt = f.Event.CreatedAt
+		// Freeze real-time delivery eligibility at buy-publish time: strfry's live
+		// stream reaches only subscriptions already live here. The operator is
+		// modelled as publishing the match at this same instant (worst-case H1),
+		// so a sub that was not yet live MISSES the real-time match.
+		c.liveAtPublish = c.sawReq
 		c.mu.Unlock()
 		if c.okOnBuy {
 			ok, _ := relay.EncodeOK(f.Event.ID, true, "")
@@ -190,7 +231,17 @@ func (c *buyFakeConn) afterBuy() {
 	}
 	c.mu.Lock()
 	subID, buyID := c.subID, c.buyID
+	live := c.liveAtPublish
 	c.mu.Unlock()
+	if !live {
+		// Subscribe-first was violated (the sub was not live when the buy — and
+		// thus the match — was published): strfry's real-time stream never
+		// carries the match to this sub. The client will time out AMBIGUOUS
+		// unless it re-subscribes with a `since`. This is exactly the H1
+		// regression subscribe-before-publish exists to prevent, so the fake
+		// withholds delivery and the buy test bites.
+		return
+	}
 	frame, _ := relay.EncodeSubEvent(subID, c.buildResp(buyID))
 	c.push(readItem{data: frame})
 }
@@ -238,6 +289,14 @@ func (d *seqDialer) Dial(_ context.Context, _ string) (relay.WSConn, error) {
 // the match EVENT is published one tick AFTER the buy OK, yet the client — having
 // subscribed BEFORE publishing — receives it well within the timeout and surfaces
 // the parsed match (entry id, price, seller) as the ed2-C seam.
+//
+// This has TEETH because buyFakeConn models strfry live-delivery: it delivers the
+// real-time match ONLY if a REQ was live when the buy was published (see the fake's
+// liveAtPublish gate). A publish-before-subscribe regression in Buy() therefore
+// yields NO match and this test fails with an AMBIGUOUS timeout — verified by the
+// ground-truth mutation check in the commit that added the gate (reorder Buy() to
+// publish-then-subscribe → this test fails; revert → it passes). The gate itself is
+// locked by TestBuyFake_LiveDeliveryGatesOnSubscribeFirst.
 func TestBuy_Hit_MatchOneTickLate(t *testing.T) {
 	agent := newSigner(t)
 	operator := newSigner(t)
@@ -269,6 +328,118 @@ func TestBuy_Hit_MatchOneTickLate(t *testing.T) {
 	}
 	if res.MatchMsgID == "" {
 		t.Fatalf("MatchMsgID (the ed2-C settle seam) must be set on a hit")
+	}
+}
+
+// drainForMatch consumes the fake's outbound frames for up to d, reporting
+// whether the buy OK receipt and/or a match EVENT e-tagging buyID were delivered.
+// It reads c.items directly (in-package) — a single synchronous consumer with no
+// background goroutine, so successive calls never race for the same queue.
+func drainForMatch(t *testing.T, ws *buyFakeConn, buyID string, d time.Duration) (sawMatch, sawOK bool) {
+	t.Helper()
+	deadline := time.After(d)
+	for {
+		select {
+		case <-deadline:
+			return
+		case <-ws.closed:
+			return
+		case it := <-ws.items:
+			if it.err != nil {
+				continue
+			}
+			f, err := relay.ParseFrame(it.data)
+			if err != nil {
+				continue
+			}
+			switch f.Type {
+			case relay.LabelOK:
+				if f.EventID == buyID {
+					sawOK = true
+				}
+			case relay.LabelEVENT:
+				if f.Event != nil && f.Event.Kind == nostr.KindMatch && eventHasETag(f.Event, buyID) {
+					sawMatch = true
+				}
+			}
+		}
+	}
+}
+
+// TestBuyFake_LiveDeliveryGatesOnSubscribeFirst locks the H1 teeth of the buy
+// fixture itself, independent of Buy()'s own (correct) ordering. It drives
+// buyFakeConn DIRECTLY in the REGRESSION order — publish the buy EVENT, THEN a
+// bare late subscribe (no `since`) — and asserts the real-time match is WITHHELD
+// (only the buy OK arrives). It then re-subscribes with a `since` covering the
+// buy and asserts the stored match IS replayed, exactly as strfry would. If a
+// future edit ever defangs the fake (delivering regardless of subscribe order),
+// this test fails — which is the guarantee that TestBuy_Hit_MatchOneTickLate is
+// really exercising subscribe-first and not passing vacuously.
+func TestBuyFake_LiveDeliveryGatesOnSubscribeFirst(t *testing.T) {
+	agent := newSigner(t)
+	operator := newSigner(t)
+
+	ws := newBuyFakeConn()
+	ws.okOnBuy = true
+	ws.replayOnSinceREQ = true
+	ws.buildResp = func(buyID string) *identity.Event { return signedMatch(operator, buyID) }
+	defer ws.Close()
+
+	// A real signed buy EVENT (deterministic id), published directly at the fake.
+	buyMsg, err := buildBuyMessage(agent, BuyRequest{Task: "direct-drive H1 probe", Budget: 1000})
+	if err != nil {
+		t.Fatalf("buildBuyMessage: %v", err)
+	}
+	buyEv, err := signAsIdentityEvent(agent, buyMsg)
+	if err != nil {
+		t.Fatalf("sign buy: %v", err)
+	}
+	evFrame, err := relay.EncodeEvent(buyEv)
+	if err != nil {
+		t.Fatalf("encode buy EVENT: %v", err)
+	}
+
+	// REGRESSION ORDER: publish the buy BEFORE any subscription is live.
+	if err := ws.WriteMessage(1, evFrame); err != nil {
+		t.Fatalf("publish buy: %v", err)
+	}
+	// A bare late subscribe (no `since`) — strfry's live stream already passed
+	// the match by, and a since-less REQ does not replay it.
+	bareReq, err := relay.EncodeReq("dg-buy-late", relay.Filter{
+		Kinds: []int{nostr.KindMatch},
+		Tags:  map[string][]string{"e": {buyEv.ID}},
+	})
+	if err != nil {
+		t.Fatalf("encode bare REQ: %v", err)
+	}
+	if err := ws.WriteMessage(1, bareReq); err != nil {
+		t.Fatalf("late subscribe: %v", err)
+	}
+
+	sawMatch, sawOK := drainForMatch(t, ws, buyEv.ID, 250*time.Millisecond)
+	if !sawOK {
+		t.Fatalf("expected the buy OK receipt from the fake")
+	}
+	if sawMatch {
+		t.Fatalf("publish-before-subscribe delivered a real-time match — the fake does NOT model strfry live delivery, so TestBuy_Hit_MatchOneTickLate has no H1 teeth")
+	}
+
+	// Now re-subscribe WITH a `since` covering the buy: strfry replays the stored
+	// match. This is the recovery path the client uses after a conn drop (H5).
+	since := buyEv.CreatedAt - resubscribeSlackSeconds
+	sinceReq, err := relay.EncodeReq("dg-buy-resub", relay.Filter{
+		Kinds: []int{nostr.KindMatch},
+		Tags:  map[string][]string{"e": {buyEv.ID}},
+		Since: &since,
+	})
+	if err != nil {
+		t.Fatalf("encode since REQ: %v", err)
+	}
+	if err := ws.WriteMessage(1, sinceReq); err != nil {
+		t.Fatalf("re-subscribe with since: %v", err)
+	}
+	if sawMatch, _ = drainForMatch(t, ws, buyEv.ID, 500*time.Millisecond); !sawMatch {
+		t.Fatalf("a re-REQ with a `since` covering the buy must replay the stored match (as strfry would)")
 	}
 }
 
