@@ -21,6 +21,7 @@ import (
 	"github.com/campfire-net/dontguess/pkg/identity"
 	"github.com/campfire-net/dontguess/pkg/matching"
 	"github.com/campfire-net/dontguess/pkg/relay"
+	"github.com/campfire-net/dontguess/pkg/scrip"
 	dgstore "github.com/campfire-net/dontguess/pkg/store"
 	"github.com/spf13/cobra"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -181,15 +182,36 @@ func runServeLocal(dgHome string) error {
 	// keys that a non-nil allowlist would brick). Config is best-effort: an absent
 	// config yields an empty allowlist that admits only the operator key.
 	var trustChecker *exchange.TrustChecker
+	// scripStore stays a nil scrip.SpendingStore interface on the individual/
+	// no-relay tier (content moves free — correct: the operator is the sole local
+	// writer and local puts use random per-call sender keys). Declared here (not
+	// assigned inside the branch as a concrete type) so the individual tier hands
+	// NewEngine a true nil interface, not a typed-nil (design §4/§6).
+	var scripStore scrip.SpendingStore
 	minReputation := exchange.DefaultMinReputation
 	if len(relayURLs) > 0 {
 		var fleet []string
+		var cfgOperatorKeyHex string
 		if cfg, cerr := exchange.LoadConfig(dgHome); cerr == nil {
 			fleet = cfg.FleetAllowlist
 			minReputation = cfg.MinReputation
+			cfgOperatorKeyHex = cfg.OperatorKeyHex
 		} else {
 			logger.Printf("  allowlist:  no exchange config (%v); empty allowlist admits only the operator key", cerr)
 		}
+
+		// ed5 HARD PREREQUISITE (design §5): the advertised operator key
+		// (persisted config) MUST equal the relay signing key BEFORE the
+		// ScripStore is constructed. A mismatch silently rebuilds every scrip
+		// balance to zero via the LocalScripStore operator gate (relay_store.go)
+		// and DoS's all buys — so it is a STARTUP HARD ERROR, never a warning,
+		// and is NOT auto-reconciled to the signer (for an already-admitted relay
+		// the config key may be the authoritative one; detect + alarm, let the
+		// operator resolve).
+		if aerr := assertAdvertiseEqualsSign(cfgOperatorKeyHex, relaySigner.PubKeyHex()); aerr != nil {
+			return fmt.Errorf("startup: %w", aerr)
+		}
+
 		allow, aerr := identity.NewAllowlist(fleet...)
 		if aerr != nil {
 			return fmt.Errorf("fleet allowlist: %w", aerr)
@@ -201,6 +223,17 @@ func runServeLocal(dgHome string) error {
 		}
 		trustChecker = tc
 		logger.Printf("  admission:  team tier — %d fleet npub(s) allowlisted, reputation floor %d", ks.Len(), minReputation)
+
+		// Scrip accounting (design §4): payment is enforced on the team/federated
+		// tier. NewLocalScripStore folds the local event log; engineOperatorKey is
+		// the relay signing pubkey (== the advertised key, asserted above), so the
+		// store's operator gate accepts operator-emitted scrip messages.
+		ss, serr := scrip.NewLocalScripStore(localStore, engineOperatorKey)
+		if serr != nil {
+			return fmt.Errorf("scrip store: %w", serr)
+		}
+		scripStore = ss
+		logger.Printf("  scrip:     enabled (LocalScripStore, operator-gated) — payment enforced")
 	}
 
 	// Use dense embeddings if the embed script is available (same as the
@@ -218,9 +251,11 @@ func runServeLocal(dgHome string) error {
 		logger.Printf("  embedder:  tf-idf (set DONTGUESS_EMBED_SCRIPT for dense)")
 	}
 
-	// No ReadClient, no WriteClient, no ScripStore, no TrustChecker —
-	// none of those require a campfire. ScripStore/TrustChecker nil
-	// already means "skip these checks" (see their EngineOptions doc).
+	// No ReadClient, no WriteClient — neither requires a campfire. ScripStore and
+	// TrustChecker are non-nil only on the team/federated tier (relays attached);
+	// on the individual tier they are nil, which means "skip these checks" (see
+	// their EngineOptions doc). Payment enforcement and admission fall out of the
+	// relays-attached branch above.
 	eng := exchange.NewEngine(exchange.EngineOptions{
 		CampfireID:        "local",
 		LocalStore:        localStore,
@@ -228,6 +263,7 @@ func runServeLocal(dgHome string) error {
 		Embedder:          embedder,
 		PollInterval:      servePollInterval,
 		TrustChecker:      trustChecker,
+		ScripStore:        scripStore,
 		Logger: func(format string, args ...any) {
 			logger.Printf(format, args...)
 		},
@@ -439,11 +475,13 @@ func listenOperatorSocket(path string) (net.Listener, error) {
 
 // operatorRequest is the JSON shape received by the socket server.
 type operatorRequest struct {
-	Op       string `json:"op"`
-	PutMsgID string `json:"put_msg_id,omitempty"`
-	Price    int64  `json:"price,omitempty"`
-	Expires  string `json:"expires,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+	Op        string `json:"op"`
+	PutMsgID  string `json:"put_msg_id,omitempty"`
+	Price     int64  `json:"price,omitempty"`
+	Expires   string `json:"expires,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Recipient string `json:"recipient,omitempty"`
+	Amount    int64  `json:"amount,omitempty"`
 }
 
 // serveOperatorSocket accepts connections on ln and handles operator IPC
@@ -591,6 +629,18 @@ func handleOperatorConn(conn net.Conn, eng *exchange.Engine) {
 		// silently dropped (dontguess-388). Read-only, no engine mutation.
 		enc.Encode(map[string]any{"degradation": eng.DegradationSnapshot()}) //nolint:errcheck
 
+	case OpMint:
+		// Operator genesis-funding god-button (design §4). Reaching this socket
+		// is the operator authorization (0700 dir, trust boundary). MintScrip
+		// emits a durable operator-signed scrip-mint and folds it live; it
+		// returns an error on the individual tier (ScripStore=nil) and audit-logs
+		// every mint.
+		if err := eng.MintScrip(req.Recipient, req.Amount); err != nil {
+			writeOperatorResp(conn, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeOperatorResp(conn, map[string]any{"ok": true})
+
 	default:
 		writeOperatorResp(conn, map[string]any{"ok": false, "error": "unknown op: " + req.Op})
 	}
@@ -598,6 +648,24 @@ func handleOperatorConn(conn net.Conn, eng *exchange.Engine) {
 
 func writeOperatorResp(conn net.Conn, v any) {
 	json.NewEncoder(conn).Encode(v) //nolint:errcheck
+}
+
+// assertAdvertiseEqualsSign fails closed (design §5, ed5) when the persisted
+// config's advertised operator key disagrees with the relay signing key. A
+// mismatch silently rebuilds every scrip balance to zero via the
+// LocalScripStore operator gate (relay_store.go) and DoS's all buys, so it MUST
+// be a startup hard error — not a warning, and NOT auto-reconciled to the
+// signer. An empty configOperatorKeyHex (no persisted config yet) is not a
+// mismatch: the config is created on first init with the signer's key.
+func assertAdvertiseEqualsSign(configOperatorKeyHex, signerPubKeyHex string) error {
+	if configOperatorKeyHex != "" && configOperatorKeyHex != signerPubKeyHex {
+		return fmt.Errorf(
+			"operator key mismatch: config advertises %s but the relay signing key is %s — "+
+				"a mismatch silently zeroes every scrip balance (pkg/scrip/relay_store.go operator gate) and DoS's all buys; "+
+				"resolve before serving (docs/design/nostr-admission-scrip-rehome-3b8.md §5)",
+			configOperatorKeyHex, signerPubKeyHex)
+	}
+	return nil
 }
 
 // buildLogDest constructs the io.Writer used for the exchange logger.
