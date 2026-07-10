@@ -319,7 +319,7 @@ func TestRelayRoundTrip_PutBuyMatchSettle_Folds(t *testing.T) {
 
 	relayConn := newFakeRelayConn(true /* echo */)
 	stop, err := attachRelayTransport(ctx, ls, operator, operator.PubKeyHex(),
-		dir+"/events.jsonl.pubcursor", relayConn, relayConn, 5*time.Millisecond, nil)
+		dir+"/events.jsonl.pubcursor", relayConn, relayConn, 5*time.Millisecond, nil, nil)
 	if err != nil {
 		t.Fatalf("attachRelayTransport: %v", err)
 	}
@@ -1157,7 +1157,7 @@ func TestShutdownRelayTransport_NoHangOnCtxCancel(t *testing.T) {
 
 	relayConn := newFakeRelayConn(true /* echo */)
 	stop, err := attachRelayTransport(ctx, ls, operator, operator.PubKeyHex(),
-		dir+"/events.jsonl.pubcursor", relayConn, relayConn, 5*time.Millisecond, nil)
+		dir+"/events.jsonl.pubcursor", relayConn, relayConn, 5*time.Millisecond, nil, nil)
 	if err != nil {
 		t.Fatalf("attachRelayTransport: %v", err)
 	}

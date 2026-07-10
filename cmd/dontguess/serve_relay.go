@@ -57,6 +57,44 @@ type relayWiring struct {
 	metrics *relay.IntakeMetrics
 }
 
+// appendNotifier fans a single engine EngineOptions.OnLocalAppend callback out
+// to every attached relay leg's Outbox.Notify (design §3.8, H1). The engine is
+// constructed with ONE OnLocalAppend before any relay leg exists, and a serve
+// process may attach N legs (one per relay URL), each with its own Outbox; so the
+// callback the engine holds is this notifier's fire, and each attachRelayTransport
+// registers its leg's Notify via add. On an operator record append the engine
+// calls fire, which wakes every leg's publish loop immediately — an operator match
+// reaches every relay sub-second instead of up to a full outbox tick later.
+//
+// add and fire are mutex-guarded because legs are attached (add) while the engine
+// may already be folding and firing. Notify is non-blocking, so fire holding the
+// lock only across a slice-reference read (not the calls) never blocks a fold.
+type appendNotifier struct {
+	mu     sync.Mutex
+	notify []func()
+}
+
+// add registers one leg's Outbox.Notify. Called once per attached relay leg.
+func (a *appendNotifier) add(fn func()) {
+	a.mu.Lock()
+	a.notify = append(a.notify, fn)
+	a.mu.Unlock()
+}
+
+// fire wakes every registered leg's publish loop. It reads the slice header under
+// the lock (append never mutates an existing backing element in place, so the
+// captured header is a stable snapshot) then invokes each Notify OUTSIDE the lock.
+// With no legs registered (individual tier never sets this as OnLocalAppend) it is
+// a no-op, but serve leaves OnLocalAppend nil there anyway.
+func (a *appendNotifier) fire() {
+	a.mu.Lock()
+	fns := a.notify
+	a.mu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+}
+
 // frameReceiver is the subscription read surface the single reader loop drives:
 // one blocking read of the next wire frame. *relay.Conn satisfies it (Recv
 // transparently reconnects on drop); tests inject an in-process fake relay.
@@ -610,11 +648,21 @@ func attachRelayTransport(
 	send frameSender,
 	publishInterval time.Duration,
 	logf func(format string, args ...any),
+	notifier *appendNotifier,
 ) (stop func(), err error) {
 	pub := newDemuxPublisher(send)
 	wiring, watermark, err := buildRelayWiring(ls, signer, operatorKeyHex, cursorPath, pub, 0, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	// Register this leg's Outbox.Notify with the shared fan-out (design §3.8, H1)
+	// so an operator record folded into LocalStore wakes THIS leg's publish loop
+	// immediately. nil notifier (e.g. a test that does not exercise the near-instant
+	// publish path) simply skips registration — the Outbox still publishes on its
+	// interval tick exactly as before.
+	if notifier != nil {
+		notifier.add(wiring.outbox.Notify)
 	}
 
 	// LOW: warn if enabling the relay would re-attribute campfire-era operator

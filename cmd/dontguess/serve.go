@@ -262,6 +262,18 @@ func runServeLocal(dgHome string) error {
 		logger.Printf("  embedder:  tf-idf (set DONTGUESS_EMBED_SCRIPT for dense)")
 	}
 
+	// OnLocalAppend fan-out (design §3.8, H1): on the team/federated tier the
+	// engine wakes every attached relay leg's Outbox the instant an operator record
+	// is folded, so a match publishes sub-second instead of up to a full outbox
+	// tick later. Legs register their Notify below (attachRelayTransport). On the
+	// individual tier (no relays) OnLocalAppend stays nil — byte-for-byte unchanged.
+	var appendNotify *appendNotifier
+	var onLocalAppend func()
+	if len(relayURLs) > 0 {
+		appendNotify = &appendNotifier{}
+		onLocalAppend = appendNotify.fire
+	}
+
 	// No ReadClient, no WriteClient — neither requires a campfire. ScripStore and
 	// TrustChecker are non-nil only on the team/federated tier (relays attached);
 	// on the individual tier they are nil, which means "skip these checks" (see
@@ -276,6 +288,7 @@ func runServeLocal(dgHome string) error {
 		TrustChecker:      trustChecker,
 		ScripStore:        scripStore,
 		MinBuyBalance:     minBuyBalance,
+		OnLocalAppend:     onLocalAppend,
 		Logger: func(format string, args ...any) {
 			logger.Printf(format, args...)
 		},
@@ -305,7 +318,7 @@ func runServeLocal(dgHome string) error {
 	for _, relayURL := range relayURLs {
 		conn := relay.New(relayURL, relaySigner)
 		stop, aerr := attachRelayTransport(ctx, localStore, relaySigner, relaySigner.PubKeyHex(),
-			relayCursorPath(localStorePath, relayURL), conn, conn, 5*time.Second, logger.Printf)
+			relayCursorPath(localStorePath, relayURL), conn, conn, 5*time.Second, logger.Printf, appendNotify)
 		if aerr != nil {
 			return fmt.Errorf("attaching relay transport for %s: %w", relayURL, aerr)
 		}
