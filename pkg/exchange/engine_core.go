@@ -191,6 +191,19 @@ type EngineOptions struct {
 	// there are no scrip balances to check, so behavior is byte-for-byte
 	// unchanged. Zero (the default) disables the bound.
 	MinBuyBalance int64
+
+	// OnLocalAppend, when non-nil, is invoked exactly once after each SUCCESSFUL
+	// operator-record append into LocalStore (appendLocalRecord — the single
+	// operator egress point), AFTER localMu is released. It is the post-emit hook
+	// that lets the relay Outbox publish an operator match the INSTANT it is folded
+	// instead of waiting up to a full outbox tick (design §3.8, H1). serve wires it
+	// to fan out to every attached relay leg's Outbox.Notify().
+	//
+	// It fires ONLY on success (never on an Append error) and runs outside localMu
+	// so the fold-serializing mutex is never held across caller code; the wired
+	// Outbox.Notify is itself non-blocking. Nil (the default — the individual tier
+	// has no outbox) is a strict no-op: behavior is byte-for-byte unchanged.
+	OnLocalAppend func()
 }
 
 func (o *EngineOptions) pollInterval() time.Duration {
@@ -1109,6 +1122,18 @@ func (e *Engine) appendLocalRecord(msg *Message) error {
 		Timestamp:   msg.Timestamp,
 		Instance:    msg.Instance,
 	}
+	// OnLocalAppend post-emit hook (design §3.8, H1). Registered as a defer BEFORE
+	// the localMu.Unlock defer so — defers running LIFO — it fires AFTER the unlock
+	// and ONLY when the append succeeded (appended stays false on any early
+	// return). Firing outside localMu keeps the fold-serializing mutex off the
+	// external callback (the wired Outbox.Notify is non-blocking regardless). Nil
+	// hook => strict no-op, byte-for-byte unchanged on the individual tier.
+	appended := false
+	defer func() {
+		if appended && e.opts.OnLocalAppend != nil {
+			e.opts.OnLocalAppend()
+		}
+	}()
 	// Hold localMu across BOTH the store Append and the cursor increments so the
 	// two are ATOMIC with respect to the concurrent fold path (pollLocalStore /
 	// rebuildAndDispatchGapLocal, via foldAndDispatchLocalSnapshot). Without this,
@@ -1134,6 +1159,7 @@ func (e *Engine) appendLocalRecord(msg *Message) error {
 		return err
 	}
 	e.localMsgByID[msg.ID] = msg
+	appended = true
 	// Operator-emitted messages are applied to State directly by their emitter
 	// and must never be re-dispatched, so advance BOTH cursors. This is correct
 	// because every appendLocalRecord call site holds the invariant
