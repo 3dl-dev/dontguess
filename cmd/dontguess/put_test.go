@@ -12,8 +12,12 @@ package main
 //     server's default behavior — a real operator behaves identically for an
 //     allowlisted seller, per engine_pricing.go autoAcceptPutLocked).
 //   - a non-allowlisted put surfaces the operator's put-reject reason.
-//   - missing config (no relay, no AGENT_CF_HOME) fails loud before any
-//     network I/O.
+//   - missing AGENT_CF_HOME (team tier, --relay explicit) fails loud before
+//     any network I/O.
+//   - no relay configured routes to the individual tier (ed2-E,
+//     dontguess-2b4) instead of erroring, and that path itself fails loud
+//     when no `dontguess serve` is reachable — see individual_ops_test.go
+//     for the individual-tier success path against a real running engine.
 
 import (
 	"encoding/base64"
@@ -41,9 +45,18 @@ func setPutFlags(t *testing.T, cmd *cobra.Command, vals map[string]string) {
 	}
 }
 
-func TestRunPut_NoRelayConfigured(t *testing.T) {
+// TestRunPut_NoRelayConfigured_RoutesIndividualTier proves the ed2-E tier
+// switch (design §3.3): with DONTGUESS_RELAY_URLS unset, runPut no longer
+// errors "no relay configured" — it routes to runPutIndividual
+// (SocketTransport). Here no `dontguess serve` is reachable at the fresh
+// DG_HOME, so the individual-tier path itself must fail loud (never hang,
+// never silently claim success) — see the individual-tier success path
+// (TestOpPut_Individual_ThenOpBuy_ReturnsMatchedContent) against a real
+// running engine.
+func TestRunPut_NoRelayConfigured_RoutesIndividualTier(t *testing.T) {
 	t.Setenv("DONTGUESS_RELAY_URLS", "")
 	t.Setenv("DONTGUESS_RELAY_URL", "")
+	t.Setenv("DG_HOME", t.TempDir()) // no serve running at this fresh DG_HOME
 	cmd := newPutCmd()
 	setPutFlags(t, cmd, map[string]string{
 		"description": "x",
@@ -51,8 +64,11 @@ func TestRunPut_NoRelayConfigured(t *testing.T) {
 		"token_cost":  "1000",
 	})
 	err := runPut(cmd, nil)
-	if err == nil || !strings.Contains(err.Error(), "no relay configured") {
-		t.Fatalf("expected 'no relay configured' error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "dontguess serve") {
+		t.Fatalf("expected an individual-tier dial error mentioning `dontguess serve`, got %v", err)
+	}
+	if strings.Contains(err.Error(), "no relay configured") {
+		t.Fatalf("expected individual-tier routing, not the old no-relay error: %v", err)
 	}
 }
 

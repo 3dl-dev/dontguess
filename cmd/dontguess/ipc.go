@@ -17,4 +17,22 @@ const (
 	// ErrBudgetExceeded. Operator-only (the socket lives in a 0700 dir inside the
 	// trust boundary), audit-logged. Consumed by `dontguess mint`.
 	OpMint = "mint"
+	// OpPut is the individual-tier (zero-relay) put op (design §3.3, item
+	// ed2-E, dontguess-2b4): the client routes a put through the already-running
+	// `serve` over this socket instead of appending to events.jsonl directly
+	// (single-writer invariant, relay-transport.md §0). The engine ingests the
+	// record via exchange.Engine.IngestLocalRecord (localMu-guarded fold), then
+	// auto-accepts it into matchable inventory. ScripStore==nil-only; no mint
+	// path, no scrip movement. Consumed by `dontguess put` when
+	// DONTGUESS_RELAY_URLS is unset.
+	OpPut = "put"
+	// OpBuy is the individual-tier (zero-relay) buy op (design §3.3, item
+	// ed2-E, dontguess-2b4): the client routes a buy through the already-running
+	// `serve` over this socket. The engine ingests+dispatches the buy
+	// (IngestLocalRecord), then the handler blocks SERVER-SIDE up to a bounded
+	// window (a dedicated deadline > operatorConnDeadline) for the e-tagged
+	// match, and returns match + inline content over the socket — no relay, no
+	// settle chain, no scrip. Consumed by `dontguess buy` when
+	// DONTGUESS_RELAY_URLS is unset.
+	OpBuy = "buy"
 )

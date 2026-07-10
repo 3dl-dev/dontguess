@@ -7,10 +7,13 @@ package main
 // ambiguous-timeout) on a bounded, re-subscribing ctx (design
 // docs/design/nostr-first-client-ed2.md §3.2).
 //
-// SCOPE: this command SURFACES a real match (entry id, price, seller) and stops
-// at the seam ed2-C extends — it does NOT yet drive buyer-accept -> deliver ->
-// complete (that pulls full content and moves scrip). Individual tier (zero
-// relay, socket IPC to a local serve) is item ed2-E and out of scope here.
+// SCOPE: on the TEAM tier this command SURFACES a real match (entry id, price,
+// seller) and stops at the seam ed2-C extends — it does NOT yet drive
+// buyer-accept -> deliver -> complete (that pulls full content and moves scrip).
+// On the INDIVIDUAL tier (zero relay, socket IPC to a local serve — item ed2-E,
+// dontguess-2b4) DONTGUESS_RELAY_URLS is unset and runBuy routes through
+// runBuyIndividual, which returns the matched content INLINE in one round trip
+// (no scrip, no settle chain — the engine is the sole trusted local process).
 
 import (
 	"context"
@@ -84,7 +87,10 @@ func runBuy(cmd *cobra.Command, args []string) error {
 	if relayURL == "" {
 		urls := resolveRelayURLs()
 		if len(urls) == 0 {
-			return fmt.Errorf("buy: no relay configured — set DONTGUESS_RELAY_URLS (team tier) or pass --relay. Individual-tier (zero-relay) buy is not yet wired to this command")
+			// Individual tier (design §3.3, ed2-E, dontguess-2b4): zero relay,
+			// zero identity ceremony — route through the already-running `serve`
+			// over the operator unix socket, which returns matched content inline.
+			return runBuyIndividual(cmd, task, budget, contentType, domains, maxResults)
 		}
 		relayURL = urls[0]
 	}
@@ -141,5 +147,46 @@ func runBuy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("buy %s: unexpected brokered assign — not settling", result.BuyID)
 	default:
 		return fmt.Errorf("buy %s: ambiguous timeout — see enumerated causes above", result.BuyID)
+	}
+}
+
+// runBuyIndividual is the individual-tier (zero-relay) buy path (design §3.3,
+// item ed2-E, dontguess-2b4): no agent signing key, no relay dial — it routes
+// the buy through the already-running `dontguess serve` over the operator unix
+// socket via relayclient.SocketTransport. The server ingests+dispatches the buy
+// (localMu-guarded) and blocks server-side for the match, returning the matched
+// content INLINE. On a HIT the raw content is written to stdout (pipeable) and a
+// one-line summary to stderr; a MISS and an (unexpected) TIMEOUT each exit
+// non-zero with a distinct, LOUD message (a timeout is NEVER "no cache exists",
+// design §5.4). No scrip, no settle chain.
+func runBuyIndividual(cmd *cobra.Command, task string, budget int64, contentType string, domains []string, maxResults int) error {
+	t := relayclient.NewSocketTransport(socketPath())
+	result, err := t.Buy(relayclient.SocketBuyRequest{
+		Task:        task,
+		Budget:      budget,
+		ContentType: contentType,
+		Domains:     domains,
+		MaxResults:  maxResults,
+	})
+	if err != nil {
+		return fmt.Errorf("buy failed: %w", err)
+	}
+
+	switch {
+	case result.Matched:
+		fmt.Fprintf(cmd.ErrOrStderr(), "buy %s HIT (individual tier): entry=%s content_type=%s token_cost=%d (%d bytes)\n",
+			result.BuyID, result.EntryID, result.ContentType, result.TokenCost, len(result.Content))
+		if _, werr := cmd.OutOrStdout().Write(result.Content); werr != nil {
+			return fmt.Errorf("buy %s: writing matched content: %w", result.BuyID, werr)
+		}
+		return nil
+	case result.Miss:
+		fmt.Fprintf(cmd.ErrOrStderr(), "buy %s BUY-MISS (individual tier): nobody has cached %q yet — compute it, then `dontguess put` so the next agent hits.\n", result.BuyID, task)
+		return fmt.Errorf("buy %s: no match (buy-miss)", result.BuyID)
+	case result.TimedOut:
+		fmt.Fprintf(cmd.ErrOrStderr(), "buy %s AMBIGUOUS (individual tier): the serve engine did not resolve the buy within the bounded window. This is NOT \"no cache exists\" — the engine may be stalled or overloaded. Check `dontguess serve` is healthy and retry.\n", result.BuyID)
+		return fmt.Errorf("buy %s: ambiguous timeout", result.BuyID)
+	default:
+		return fmt.Errorf("buy %s: unrecognized individual-tier outcome", result.BuyID)
 	}
 }
