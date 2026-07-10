@@ -38,6 +38,7 @@ func NewState() *State {
 		priceAdjustments:      make(map[string]PriceAdjustment),
 		matchToBuyHold:        make(map[string]string),
 		matchToBuyHoldAmount:  make(map[string]int64),
+		settledMatches:        make(map[string]struct{}),
 		assignsByEntry:        make(map[string][]*AssignRecord),
 		assignByID:            make(map[string]*AssignRecord),
 		claimedAssigns:        make(map[string]string),
@@ -100,6 +101,7 @@ func (s *State) Replay(msgs []Message) {
 	s.entryDeliverCount = make(map[string]int)
 	s.matchToBuyHold = make(map[string]string)
 	s.matchToBuyHoldAmount = make(map[string]int64)
+	s.settledMatches = make(map[string]struct{})
 	s.assignsByEntry = make(map[string][]*AssignRecord)
 	s.assignByID = make(map[string]*AssignRecord)
 	s.claimedAssigns = make(map[string]string)
@@ -189,6 +191,8 @@ func (s *State) applyLocked(msg *Message) {
 		switch op {
 		case scrip.TagScripBuyHold:
 			s.applyScripBuyHold(msg)
+		case scrip.TagScripSettle:
+			s.applyScripSettle(msg)
 		case TagConsume:
 			s.applyConsume(msg)
 		}
@@ -246,6 +250,62 @@ func (s *State) GetBuyHoldAmount(matchMsgID string) (int64, bool) {
 	defer s.mu.RUnlock()
 	amt, ok := s.matchToBuyHoldAmount[matchMsgID]
 	return amt, ok
+}
+
+// applyScripSettle folds a durable scrip-settle message (dontguess-400 FIX-M1,
+// design §1.4/§4). It marks the settled match in the durable settledMatches set
+// and RETIRES the match's buy-hold index (matchToBuyHold + matchToBuyHoldAmount)
+// so a replayed/re-sent buyer-accept for an already-settled match can neither
+// re-hydrate the consumed reservation (restoreExistingHold) nor re-settle
+// (performScripSettlement). The match key is SettlePayload.MatchMsg — the match
+// msg ID the settlement is for.
+//
+// Operator-sender guard: scrip-settle is operator-authored egress. A non-operator
+// sender is rejected (mirrors applyConsume / the scrip-ledger operator gate) so a
+// participant cannot forge a settle marker to grief a live match's settlement.
+func (s *State) applyScripSettle(msg *Message) {
+	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
+		return
+	}
+	var p scrip.SettlePayload
+	if err := json.Unmarshal(msg.Payload, &p); err != nil || p.MatchMsg == "" {
+		return
+	}
+	s.markMatchSettledLocked(p.MatchMsg)
+}
+
+// markMatchSettledLocked records matchMsgID as settled and retires its buy-hold
+// index. Caller must hold s.mu. Shared by the durable fold path (applyScripSettle)
+// and the live-mark path (MarkMatchSettled).
+func (s *State) markMatchSettledLocked(matchMsgID string) {
+	if matchMsgID == "" {
+		return
+	}
+	s.settledMatches[matchMsgID] = struct{}{}
+	delete(s.matchToBuyHold, matchMsgID)
+	delete(s.matchToBuyHoldAmount, matchMsgID)
+}
+
+// MarkMatchSettled marks a match settled from the live settlement path
+// (performScripSettlement), so the settled-match guard holds WITHIN the current
+// session — before the durable scrip-settle folds on the next poll. The same set
+// is rebuilt independently on Replay by applyScripSettle. Idempotent.
+func (s *State) MarkMatchSettled(matchMsgID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markMatchSettledLocked(matchMsgID)
+}
+
+// IsMatchSettled reports whether a scrip settlement has already been durably
+// emitted (or live-marked) for the given match msg ID. Used by the engine to
+// gate restoreExistingHold, handleSettleBuyerAcceptScrip and
+// performScripSettlement against a double-settle mint (dontguess-400 FIX-M1).
+func (s *State) IsMatchSettled(matchMsgID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.settledMatches[matchMsgID]
+	return ok
 }
 
 // applyConsume processes an exchange:consume message, incrementing the

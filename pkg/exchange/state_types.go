@@ -902,6 +902,21 @@ type State struct {
 	// Key: matchMsgID (BuyMsg field). Value: amount.
 	matchToBuyHoldAmount map[string]int64
 
+	// settledMatches is the DURABLE settled-match set (dontguess-400 FIX-M1,
+	// design §1.4/§4). A match msg ID is in this set once its scrip settlement
+	// has been durably emitted. It gates BOTH restoreExistingHold (never
+	// re-hydrate a settled match's consumed reservation) and performScripSettlement
+	// (never emit a second scrip-settle for a match). It is rebuilt on Replay by
+	// applyScripSettle folding the durable scrip-settle log, and is also marked
+	// live by performScripSettlement (via MarkMatchSettled) so the guard holds
+	// within a single session — before the scrip-settle folds on the next poll.
+	// Keyed on matchMsgID (SettlePayload.MatchMsg). Reset on Replay, rebuilt from
+	// the log. Unlike completedSettlements (keyed on the complete msg.ID, which a
+	// fresh buyer-accept→complete pair with new msg IDs trivially evades) this is
+	// keyed on the single-use match identity, so a re-accept + re-complete of an
+	// already-settled match cannot mint a second settlement.
+	settledMatches map[string]struct{}
+
 	// assignsByEntry maps entry IDs to all assign records for that entry.
 	// Key: entryID. Assigns with no entry use "" as key.
 	assignsByEntry map[string][]*AssignRecord

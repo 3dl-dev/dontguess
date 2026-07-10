@@ -223,6 +223,18 @@ func (e *Engine) checkDeadlineMiss(ctx context.Context, msg *Message, matchMsgID
 // consumes the reservation, pays residual to seller, credits exchange revenue to
 // operator, emits scrip-settle and scrip-burn convention messages.
 func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, sellerKey, matchMsgID, reservationID string, settledEntry *InventoryEntry) error {
+	// Settled-match guard (dontguess-400 FIX-M1, design §1.4): never emit a second
+	// scrip-settle for a match that has already settled. This is the durable belt
+	// to the buyer-accept-side suspenders: even if a reservation were somehow
+	// re-hydrated, a match settles at most once. The set is rebuilt on Replay from
+	// the scrip-settle log AND marked live below, so the guard holds both across a
+	// restart and within a single session (before the scrip-settle folds).
+	if e.state.IsMatchSettled(matchMsgID) {
+		e.opts.log("engine: settle: match %s already settled — skipping settlement (double-settle guard)",
+			shortKey(matchMsgID))
+		return nil
+	}
+
 	// Atomically retrieve and delete reservation (prevents TOCTOU double-spend).
 	res, err := e.opts.ScripStore.ConsumeReservation(ctx, reservationID)
 	if err != nil {
@@ -245,7 +257,7 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 	operatorKey := e.state.OperatorKey
 
 	// Marshal both convention messages BEFORE mutating scrip state.
-	settlePayload, burnPayload, err := e.marshalSettlePayloads(msg, sellerKey, reservationID, res, residual, fee, exchangeRevenue)
+	settlePayload, burnPayload, err := e.marshalSettlePayloads(msg, matchMsgID, sellerKey, reservationID, res, residual, fee, exchangeRevenue)
 	if err != nil {
 		// Restore reservation so the settle can be retried.
 		if restoreErr := e.opts.ScripStore.SaveReservation(ctx, res); restoreErr != nil {
@@ -293,6 +305,13 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 	//     (double-mint). Such a failure is a LOUD hard error; the missing live
 	//     credit is reconciled from the durable log on the next Replay.
 	e.deleteReservation(matchMsgID)
+
+	// Mark the match settled LIVE (dontguess-400 FIX-M1). The scrip-settle is now
+	// durable and authoritative; retire the match so no re-accept can re-hold and
+	// no retry can re-settle it within this session. The same marker is rebuilt on
+	// Replay by applyScripSettle folding the durable scrip-settle just emitted, so
+	// this is a session-local fast path, not the source of truth.
+	e.state.MarkMatchSettled(matchMsgID)
 
 	if len(burnPayload) > 0 {
 		if _, emitErr := e.sendOperatorMessage(burnPayload,
@@ -351,15 +370,20 @@ func (e *Engine) nextMonotonicTimestamp() int64 {
 
 // marshalSettlePayloads marshals the scrip-settle and scrip-burn payloads
 // before any balance mutation. Returns an error if either marshal fails.
-func (e *Engine) marshalSettlePayloads(msg *Message, sellerKey, reservationID string, res scrip.Reservation, residual, fee, exchangeRevenue int64) (settlePayload, burnPayload []byte, err error) {
+func (e *Engine) marshalSettlePayloads(msg *Message, matchMsgID, sellerKey, reservationID string, res scrip.Reservation, residual, fee, exchangeRevenue int64) (settlePayload, burnPayload []byte, err error) {
 	settlePayload, err = e.marshal(scrip.SettlePayload{
 		ReservationID:   reservationID,
 		Seller:          sellerKey,
 		Residual:        residual,
 		FeeBurned:       fee,
 		ExchangeRevenue: exchangeRevenue,
-		MatchMsg:        msg.ID,
-		ResultHash:      "",
+		// MatchMsg is the MATCH msg ID (its documented meaning) — the durable key
+		// the State fold (applyScripSettle) uses to rebuild the settled-match set
+		// on Replay (dontguess-400 FIX-M1). Previously this carried the complete
+		// msg.ID, which no consumer read; it is now the match identity so the
+		// settled-match set survives a cold rebuild.
+		MatchMsg:   matchMsgID,
+		ResultHash: "",
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("scrip: marshal settle payload: %w", err)
@@ -498,6 +522,19 @@ func (e *Engine) handleSettleBuyerAcceptScrip(msg *Message) error {
 		return nil
 	}
 
+	// Settled-match guard (dontguess-400 FIX-M1, design §1.4): a match is a
+	// single-use identity — once its scrip settlement is durable it must never
+	// accept a new buyer-accept. Without this, a re-sent buyer-accept for an
+	// already-settled match would either re-hydrate the consumed reservation
+	// (restoreExistingHold) or re-decrement the buyer (decAndSaveHold) and let a
+	// following complete emit a SECOND scrip-settle — the double-settle mint. A
+	// legitimate re-purchase is a NEW buy → NEW match msg ID, unaffected.
+	if e.state.IsMatchSettled(matchMsgID) {
+		e.opts.log("engine: buyer-accept scrip: match %s already settled — ignoring re-accept (double-settle guard)",
+			shortKey(matchMsgID))
+		return nil
+	}
+
 	// Idempotency: if a hold already exists for this match, skip.
 	if existingResID := e.findExistingBuyerAcceptHold(matchMsgID); existingResID != "" {
 		return e.restoreExistingHold(msg, matchMsgID, existingResID)
@@ -533,6 +570,15 @@ func (e *Engine) handleSettleBuyerAcceptScrip(msg *Message) error {
 // somehow unavailable (defensive — the reservation existed, so the event should
 // too).
 func (e *Engine) restoreExistingHold(msg *Message, matchMsgID, existingResID string) error {
+	// Settled-match guard (dontguess-400 FIX-M1): never re-hydrate the reservation
+	// of a match that has already settled. Re-saving a consumed reservation with no
+	// recharge is exactly the defeat of performScripSettlement's "reservation
+	// missing → already settled" guard that produced the double-settle mint.
+	if e.state.IsMatchSettled(matchMsgID) {
+		e.opts.log("engine: buyer-accept scrip: match %s already settled — refusing to re-hydrate reservation %s (double-settle guard)",
+			shortKey(matchMsgID), shortKey(existingResID))
+		return nil
+	}
 	ctx := e.engineCtx()
 	_, currentETag, _ := e.opts.ScripStore.GetBudget(ctx, msg.Sender, scrip.BalanceKey)
 	holdAmount, ok := e.state.GetBuyHoldAmount(matchMsgID)
@@ -597,9 +643,34 @@ func (e *Engine) decAndSaveHold(msg *Message, matchMsgID string, holdAmount, bes
 		return fmt.Errorf("scrip: marshal buyer-accept buy-hold payload: %w", err)
 	}
 
+	// EMIT-DURABLE-THEN-MUTATE (dontguess-400 FIX-M2, design §4; mirrors the
+	// hardened settle path at performScripSettlement). The scrip-buy-hold record
+	// must land in the durable log BEFORE the buyer's balance is decremented. The
+	// previous ordering decremented first and emitted best-effort (warning on
+	// failure): an emit failure left a LIVE debit with NO durable record, so
+	// Replay (applyBuyHold folds the durable log) never reconstructs the debit —
+	// the buyer's balance rebuilds HIGHER than it should, a net mint. Emitting
+	// first makes emit failure a hard error with the balance untouched (no debit
+	// without a durable hold). The balance-affecting decrement runs only after the
+	// hold is durably recorded, and applyBuyHold re-applies it on every Replay.
+	if _, emitErr := e.sendOperatorMessage(holdPayload,
+		[]string{scrip.TagScripBuyHold}, []string{msg.ID}); emitErr != nil {
+		return fmt.Errorf("scrip: buyer-accept: emit scrip-buy-hold (durable) for buyer %s: %w",
+			shortKey(buyerKey), emitErr)
+	}
+
+	// PAST THE POINT OF NO RETURN: the scrip-buy-hold is durably recorded and is
+	// AUTHORITATIVE — applyBuyHold decrements the buyer on every Replay. The live
+	// DecrementBudget below merely keeps the in-memory balance in sync; a failure
+	// here is a LOUD hard error, reconciled from the log on the next Replay. It
+	// must NOT be treated as "no hold happened" — the durable record already
+	// commits the debit.
 	_, newETag, err := e.opts.ScripStore.DecrementBudget(ctx, buyerKey, scrip.BalanceKey, holdAmount, etag)
 	if err != nil {
-		return fmt.Errorf("scrip: buyer-accept: DecrementBudget for buyer %s: %w", shortKey(buyerKey), err)
+		e.opts.log("engine: buyer-accept scrip: CRITICAL: DecrementBudget(buyer %s) FAILED after durable scrip-buy-hold emit: %v — durable hold is authoritative; live debit deferred to next Replay",
+			shortKey(buyerKey), err)
+		return fmt.Errorf("scrip: buyer-accept: DecrementBudget for buyer %s after durable emit (hold recorded in log, reconciled on Replay): %w",
+			shortKey(buyerKey), err)
 	}
 
 	// Save reservation so settle(complete) and dispute handlers can reference it.
@@ -620,12 +691,6 @@ func (e *Engine) decAndSaveHold(msg *Message, matchMsgID string, holdAmount, bes
 
 	e.opts.log("engine: buyer-accept scrip: pre-decremented buyer=%s hold=%d reservation=%s match=%s",
 		shortKey(buyerKey), holdAmount, shortKey(reservationID), shortKey(matchMsgID))
-
-	// Emit scrip-buy-hold convention message so CampfireScripStore can replay it.
-	if _, emitErr := e.sendOperatorMessage(holdPayload,
-		[]string{scrip.TagScripBuyHold}, []string{msg.ID}); emitErr != nil {
-		e.opts.log("engine: warning: emit scrip-buy-hold (buyer-accept): %v", emitErr)
-	}
 
 	return nil
 }
