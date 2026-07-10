@@ -262,24 +262,16 @@ func runServeLocal(dgHome string) error {
 // operator messages attributed to a Sender that no longer matches
 // state.OperatorKey.
 func loadOrCreateLocalOperatorKey(dgHome string) (string, error) {
-	keyPath := filepath.Join(dgHome, "local-operator.key")
-	if data, err := os.ReadFile(keyPath); err == nil {
-		if key := strings.TrimSpace(string(data)); key != "" {
-			return key, nil
+	// Atomic create-or-load (dontguess-ed5): concurrent first-runs converge on
+	// ONE local operator key instead of racing WriteFile (last-writer-wins).
+	// The key is an opaque 16-byte random hex identifier — no secp256k1 identity.
+	return identity.LoadOrCreateRawKey(filepath.Join(dgHome, "local-operator.key"), func() (string, error) {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			return "", fmt.Errorf("generating local operator key: %w", err)
 		}
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("reading local operator key %s: %w", keyPath, err)
-	}
-
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generating local operator key: %w", err)
-	}
-	key := hex.EncodeToString(b)
-	if err := os.WriteFile(keyPath, []byte(key+"\n"), 0600); err != nil {
-		return "", fmt.Errorf("writing local operator key %s: %w", keyPath, err)
-	}
-	return key, nil
+		return hex.EncodeToString(b), nil
+	})
 }
 
 // loadOrCreateNostrOperatorIdentity returns the persisted secp256k1 (nostr)
@@ -290,27 +282,11 @@ func loadOrCreateLocalOperatorKey(dgHome string) (string, error) {
 // match (docs/design/relay-transport.md §2.2/§D). The private key is stored
 // 32-byte hex at 0600 — handle only inside DG_HOME.
 func loadOrCreateNostrOperatorIdentity(dgHome string) (*identity.Secp256k1Identity, error) {
-	keyPath := filepath.Join(dgHome, "nostr-operator.key")
-	if data, err := os.ReadFile(keyPath); err == nil {
-		if privHex := strings.TrimSpace(string(data)); privHex != "" {
-			id, err := identity.FromPrivHex(privHex)
-			if err != nil {
-				return nil, fmt.Errorf("parsing persisted nostr operator key %s: %w", keyPath, err)
-			}
-			return id, nil
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("reading nostr operator key %s: %w", keyPath, err)
-	}
-
-	id, err := identity.Generate()
-	if err != nil {
-		return nil, fmt.Errorf("generating nostr operator identity: %w", err)
-	}
-	if err := os.WriteFile(keyPath, []byte(id.PrivHex()+"\n"), 0600); err != nil {
-		return nil, fmt.Errorf("writing nostr operator key %s: %w", keyPath, err)
-	}
-	return id, nil
+	// Atomic create-or-load (dontguess-ed5): init and serve converge on the SAME
+	// operator key even under a concurrent first-run race, so config's advertised
+	// pubkey can never diverge from the on-disk signing key. See
+	// pkg/identity/keyfile.go §5.
+	return identity.LoadOrCreatePrivHexKey(filepath.Join(dgHome, "nostr-operator.key"))
 }
 
 // runEngineLoop wires the operator-facing plumbing shared by both serve

@@ -168,49 +168,10 @@ func Init(opts InitOptions) (*Config, error) {
 // so `init` and `serve` converge on the same operator key at
 // $DG_HOME/nostr-operator.key.
 func loadOrCreateOperatorIdentity(dgHome string) (*identity.Secp256k1Identity, error) {
-	keyPath := filepath.Join(dgHome, operatorKeyFile)
-	if data, err := os.ReadFile(keyPath); err == nil {
-		if privHex := trimNewline(string(data)); privHex != "" {
-			id, perr := identity.FromPrivHex(privHex)
-			if perr != nil {
-				return nil, fmt.Errorf("parsing persisted operator key %s: %w", keyPath, perr)
-			}
-			return id, nil
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("reading operator key %s: %w", keyPath, err)
-	}
-
-	id, err := identity.Generate()
-	if err != nil {
-		return nil, fmt.Errorf("generating operator identity: %w", err)
-	}
-	if err := os.WriteFile(keyPath, []byte(id.PrivHex()+"\n"), 0600); err != nil {
-		return nil, fmt.Errorf("writing operator key %s: %w", keyPath, err)
-	}
-	return id, nil
-}
-
-// trimNewline strips a trailing newline and surrounding whitespace from a
-// persisted key file without pulling in the strings package for one call.
-func trimNewline(s string) string {
-	for len(s) > 0 {
-		c := s[len(s)-1]
-		if c == '\n' || c == '\r' || c == ' ' || c == '\t' {
-			s = s[:len(s)-1]
-			continue
-		}
-		break
-	}
-	for len(s) > 0 {
-		c := s[0]
-		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
-			s = s[1:]
-			continue
-		}
-		break
-	}
-	return s
+	// Atomic create-or-load (dontguess-ed5): concurrent first-run init+serve on
+	// a pristine DG_HOME converge on ONE operator key, and a loser never parses
+	// a torn/empty file. See pkg/identity/keyfile.go §5.
+	return identity.LoadOrCreatePrivHexKey(filepath.Join(dgHome, operatorKeyFile))
 }
 
 // writeConfig serializes cfg to configPath (mode 0600).
