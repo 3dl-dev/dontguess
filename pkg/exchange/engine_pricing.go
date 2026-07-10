@@ -2,6 +2,7 @@ package exchange
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -237,6 +238,34 @@ func (e *Engine) autoAcceptPutLocked(putMsgID string, price int64, expiresAt tim
 		return fmt.Errorf("put %s is not pending", putMsgID)
 	}
 
+	// SEAM A (dontguess-d53, LOAD-BEARING). The poll-loop fold already staged this
+	// put into pendingPuts via state_put.go applyPut, which runs with ZERO trust
+	// filter; the dispatch trust gate (engine_core.go) only gates handlePut and is
+	// BYPASSED on this promotion path (it reads .Level for provenance below, never
+	// .Check). So auto-accept promotion is the real choke: without this gate a
+	// non-admitted seller's put would become operator-blessed, matchable inventory.
+	// Check the seller BEFORE emitting any operator put-accept or touching the
+	// match index; a non-admitted seller is counted into a DISTINCT promotion-gate
+	// counter, LOUDLY alarmed (never a silent nil-drop, LOCKED-5), and the put is
+	// rejected so it leaves pendingPuts (the ticker does not re-alarm every second).
+	if e.opts.TrustChecker != nil {
+		if terr := e.opts.TrustChecker.Check(putSellerKey, OperationPut, ""); terr != nil {
+			reason := "dropped_unlisted"
+			if errors.Is(terr, ErrLowReputation) {
+				e.degradation.DroppedLowReputation.Add(1)
+				reason = "dropped_low_reputation"
+			} else {
+				e.degradation.DroppedUnlisted.Add(1)
+			}
+			e.opts.log("SECURITY ALARM: auto-accept promotion BLOCKED for non-admitted seller: put=%s sender=%s reason=%s: %v",
+				shortKey(putMsgID), shortKey(putSellerKey), reason, terr)
+			if rerr := e.rejectPutLocked(putMsgID, "trust-gate: "+reason); rerr != nil {
+				e.opts.log("engine: put-reject after trust block failed put=%s err=%v", shortKey(putMsgID), rerr)
+			}
+			return fmt.Errorf("auto-accept trust-gate rejected put %s (%s): %w", putMsgID, reason, terr)
+		}
+	}
+
 	var expiresAtStr string
 	if !expiresAt.IsZero() {
 		expiresAtStr = expiresAt.UTC().Format(time.RFC3339)
@@ -311,7 +340,16 @@ func (e *Engine) RejectPut(putMsgID string, reason string) error {
 	if err := e.refreshBeforeOperatorOp(); err != nil {
 		return fmt.Errorf("refresh before put-reject: %w", err)
 	}
+	return e.rejectPutLocked(putMsgID, reason)
+}
 
+// rejectPutLocked emits a settle(put-reject) for a pending put and applies it.
+// Callers must hold e.opMu AND must have refreshed state (refreshBeforeOperatorOp)
+// beforehand. RejectPut is the public entrypoint (refresh + this); the Seam-A
+// promotion gate in autoAcceptPutLocked calls this directly (it has already
+// refreshed and holds opMu) so a trust-blocked put is removed from pendingPuts
+// without a nested opMu acquisition or a redundant second refresh.
+func (e *Engine) rejectPutLocked(putMsgID string, reason string) error {
 	_, pending := e.state.GetPendingPut(putMsgID)
 	if !pending {
 		return fmt.Errorf("put %s is not pending", putMsgID)

@@ -371,6 +371,20 @@ type DegradationMetrics struct {
 	// into a silent nil-return while its bucket is added.
 	TrustDenialOther atomic.Int64
 
+	// DroppedUnlisted and DroppedLowReputation count SEAM-A promotion-gate
+	// rejections (dontguess-d53, autoAcceptPutLocked): a put that the poll-loop
+	// fold already staged into pendingPuts (state_put.go applyPut runs with ZERO
+	// trust filter) is blocked at auto-accept promotion — the real choke, since
+	// the dispatch trust gate never runs on the promotion path. These are DISTINCT
+	// from the dispatch-gate TrustDenial* counters above: those bucket messages
+	// rejected at dispatch (handlePut); these bucket puts rejected at promotion
+	// into matchable inventory. DroppedUnlisted = seller not on the fleet
+	// allowlist; DroppedLowReputation = allowlisted seller below the reputation
+	// floor. Every increment is paired with a LOUD alarm + a put-reject (never a
+	// silent nil-drop; LOCKED-5).
+	DroppedUnlisted      atomic.Int64
+	DroppedLowReputation atomic.Int64
+
 	// FoldDenialNotOperator counts STATE-fold rejections where an operator-only
 	// settlement fold guard (applySettlePutAccept / applySettlePutReject /
 	// applySettleDeliver in state_settle.go) dropped a message whose Sender is
@@ -412,6 +426,8 @@ type DegradationCounts struct {
 	TrustDenialNotOperator    int64 `json:"trust_denial_not_operator"`
 	TrustDenialLowReputation  int64 `json:"trust_denial_low_reputation"`
 	TrustDenialOther          int64 `json:"trust_denial_other"`
+	DroppedUnlisted           int64 `json:"dropped_unlisted"`
+	DroppedLowReputation      int64 `json:"dropped_low_reputation"`
 	FoldDenialNotOperator     int64 `json:"fold_denial_not_operator"`
 	FoldDenialBuyerIdentity   int64 `json:"fold_denial_buyer_identity"`
 	FoldDenialAssignExclusive int64 `json:"fold_denial_assign_exclusive"`
@@ -530,11 +546,37 @@ func (e *Engine) DegradationSnapshot() DegradationCounts {
 		TrustDenialNotOperator:    e.degradation.TrustDenialNotOperator.Load(),
 		TrustDenialLowReputation:  e.degradation.TrustDenialLowReputation.Load(),
 		TrustDenialOther:          e.degradation.TrustDenialOther.Load(),
+		DroppedUnlisted:           e.degradation.DroppedUnlisted.Load(),
+		DroppedLowReputation:      e.degradation.DroppedLowReputation.Load(),
 		FoldDenialNotOperator:     e.degradation.FoldDenialNotOperator.Load(),
 		FoldDenialBuyerIdentity:   e.degradation.FoldDenialBuyerIdentity.Load(),
 		FoldDenialAssignExclusive: e.degradation.FoldDenialAssignExclusive.Load(),
 		FoldDenialAssignClaimant:  e.degradation.FoldDenialAssignClaimant.Load(),
 	}
+}
+
+// DeAllowlistSeller revokes a seller's fleet membership at runtime (dontguess-d53
+// Seam C driver). It (1) removes the key from the live allowlist KeySet so every
+// subsequent put promotion (Seam A) and index re-gate (Seam D) rejects it, (2)
+// flags the seller's already-accepted inventory NeedsRevalidation so
+// findCandidates withholds those entries immediately (engine_buy.go), and (3)
+// rebuilds the match index so Seam D drops the now-anonymous seller's entries out
+// of the searchable index in the same call. No-op when no TrustChecker is
+// configured (individual/no-relay tier). Returns the number of entries withheld.
+//
+// Acquires opMu so it serializes against the auto-accept ticker and the operator
+// socket handler (matchIndex mutations are also internally locked).
+func (e *Engine) DeAllowlistSeller(sellerKey string) int {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	if e.opts.TrustChecker != nil {
+		e.opts.TrustChecker.RemoveMember(sellerKey)
+	}
+	n := e.state.FlagSellerEntriesForRevalidation(sellerKey)
+	e.rebuildMatchIndex()
+	e.opts.log("SECURITY: de-allowlisted seller %s — %d inventory entr(y/ies) withheld pending re-validation (Seam C/D)",
+		shortKey(sellerKey), n)
+	return n
 }
 
 // MatchIndexLen returns the number of entries currently in the semantic match index.

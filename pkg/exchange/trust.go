@@ -424,6 +424,17 @@ func (c *TrustChecker) SetReputationFloor(source func(key string) int, min int) 
 	c.minReputation = min
 }
 
+// RemoveMember revokes a key from the live fleet allowlist when the underlying
+// Membership is a mutable *KeySet (runtime de-allowlisting, dontguess-d53 Seam
+// C). It is a no-op for an immutable Membership (e.g. *identity.Allowlist) and
+// never affects the operator key — operator authority comes from operatorKey,
+// not membership. Safe for concurrent use (KeySet.Remove is locked).
+func (c *TrustChecker) RemoveMember(key string) {
+	if ks, ok := c.members.(*KeySet); ok {
+		ks.Remove(key)
+	}
+}
+
 // Level returns the trust tier for a sender key: operator if it is the operator
 // key, allowlisted if it is on the allowlist, anonymous otherwise.
 func (c *TrustChecker) Level(key string) TrustLevel {

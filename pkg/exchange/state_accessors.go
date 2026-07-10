@@ -172,6 +172,33 @@ func (s *State) SetEntryProvenanceLevel(entryID string, level int) {
 	}
 }
 
+// FlagEntryForRevalidation marks a single inventory entry NeedsRevalidation so
+// findCandidates withholds it (dontguess-d53 Seam D). No-op if the entry is not
+// in live inventory. Thread-safe.
+func (s *State) FlagEntryForRevalidation(entryID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry, ok := s.inventory[entryID]; ok {
+		entry.NeedsRevalidation = true
+	}
+}
+
+// FlagSellerEntriesForRevalidation marks every live inventory entry belonging to
+// sellerKey NeedsRevalidation (dontguess-d53 Seam C — runtime de-allowlisting).
+// Returns the number of entries flagged. Thread-safe.
+func (s *State) FlagSellerEntriesForRevalidation(sellerKey string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, entry := range s.inventory {
+		if entry.SellerKey == sellerKey {
+			entry.NeedsRevalidation = true
+			n++
+		}
+	}
+	return n
+}
+
 // EntryNeedsRevalidation returns true if the given entry has been flagged for
 // re-validation due to a seller provenance downgrade.
 func (s *State) EntryNeedsRevalidation(entryID string) bool {

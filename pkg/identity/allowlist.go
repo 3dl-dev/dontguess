@@ -91,3 +91,18 @@ func (a *Allowlist) Allowed(pubkeyHex string) bool {
 
 // Len returns the number of admitted identities.
 func (a *Allowlist) Len() int { return len(a.members) }
+
+// HexKeys returns the admitted pubkeys in lowercase hex form — the on-wire nostr
+// event pubkey form a relay leg presents as the message Sender. The team-tier
+// serve path materializes these into a mutable exchange.KeySet so a runtime
+// de-allowlist (Remove) works and so npub-form allowlist entries compare equal to
+// the hex Sender on incoming events. The returned slice is a fresh copy; order is
+// unspecified. Returns nil for an OpenAllowlist (it admits everyone, so an
+// explicit member set is meaningless).
+func (a *Allowlist) HexKeys() []string {
+	out := make([]string, 0, len(a.members))
+	for hexKey := range a.members {
+		out = append(out, hexKey)
+	}
+	return out
+}

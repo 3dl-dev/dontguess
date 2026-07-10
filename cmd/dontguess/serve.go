@@ -171,6 +171,38 @@ func runServeLocal(dgHome string) error {
 	}
 	logger := log.New(logDest, "[exchange] ", log.LstdFlags|log.Lmsgprefix)
 
+	// Team/federated-tier admission (dontguess-d53, design §3): when relays are
+	// attached, build ONE TrustChecker from the operator-maintained fleet
+	// allowlist. It gates the dispatch trust gate (Seam B) and the auto-accept
+	// promotion gate (Seam A); the reputation floor source is the engine State,
+	// so it is wired via SetReputationFloor AFTER NewEngine, before Start. The
+	// individual/no-relay tier keeps trustChecker nil (fail-open is correct — the
+	// operator is the sole local writer and local puts use random per-call sender
+	// keys that a non-nil allowlist would brick). Config is best-effort: an absent
+	// config yields an empty allowlist that admits only the operator key.
+	var trustChecker *exchange.TrustChecker
+	minReputation := exchange.DefaultMinReputation
+	if len(relayURLs) > 0 {
+		var fleet []string
+		if cfg, cerr := exchange.LoadConfig(dgHome); cerr == nil {
+			fleet = cfg.FleetAllowlist
+			minReputation = cfg.MinReputation
+		} else {
+			logger.Printf("  allowlist:  no exchange config (%v); empty allowlist admits only the operator key", cerr)
+		}
+		allow, aerr := identity.NewAllowlist(fleet...)
+		if aerr != nil {
+			return fmt.Errorf("fleet allowlist: %w", aerr)
+		}
+		ks := exchange.NewKeySet(allow.HexKeys()...)
+		tc, terr := exchange.NewTrustChecker(engineOperatorKey, ks)
+		if terr != nil {
+			return fmt.Errorf("trust checker: %w", terr)
+		}
+		trustChecker = tc
+		logger.Printf("  admission:  team tier — %d fleet npub(s) allowlisted, reputation floor %d", ks.Len(), minReputation)
+	}
+
 	// Use dense embeddings if the embed script is available (same as the
 	// campfire-backed path — the matching engine has no campfire dependency
 	// either way).
@@ -195,10 +227,19 @@ func runServeLocal(dgHome string) error {
 		OperatorPublicKey: engineOperatorKey,
 		Embedder:          embedder,
 		PollInterval:      servePollInterval,
+		TrustChecker:      trustChecker,
 		Logger: func(format string, args ...any) {
 			logger.Printf(format, args...)
 		},
 	})
+
+	// Wire the reputation floor now that the engine State exists (design §3:
+	// AFTER NewEngine, BEFORE Start). The source is the engine's behavioral
+	// SellerReputation; the floor gates sell-side (put) promotion in Seam A.
+	// Individual/no-relay tier (trustChecker nil) skips this — no floor.
+	if trustChecker != nil {
+		trustChecker.SetReputationFloor(eng.State().SellerReputation, minReputation)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
