@@ -23,7 +23,6 @@ package main
 // campfire-free pkg/store event log (dontguess-657). No mocks.
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -31,7 +30,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/campfire-net/dontguess/pkg/exchange"
 	store "github.com/campfire-net/dontguess/pkg/store"
@@ -162,23 +160,18 @@ func TestOperatorSocket_Metrics_TrustDenialProbe(t *testing.T) {
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator,
 		TrustChecker:      checker,
-		PollInterval:      20 * time.Millisecond,
 		Logger: func(format string, args ...any) {
 			t.Logf("[engine] "+format, args...)
 		},
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	engDone := make(chan struct{})
-	go func() {
-		defer close(engDone)
-		_ = eng.Start(ctx)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		<-engDone
-	})
-
+	// The harness store is empty here, so the engine's fold/dispatch cursors both
+	// start at 0 and the put we inject next is unambiguously the first record the
+	// poll dispatches. This test used to launch eng.Start and then poll a 20ms
+	// ticker against a 5s wall-clock deadline, which FALSE-failed under full-package
+	// CPU saturation (dontguess-c12): the ticker + socket round-trip slipped past 5s
+	// while starved of CPU. We drive the REAL poll-loop dispatch synchronously below
+	// instead (PollLocalStoreForTest) — no ticker, no wall clock, no goroutine.
 	sockPath, _ := startSocketServer(t, eng)
 
 	// Sanity: no rejection has happened yet.
@@ -217,19 +210,20 @@ func TestOperatorSocket_Metrics_TrustDenialProbe(t *testing.T) {
 		t.Fatalf("AddMessage: %v", err)
 	}
 
-	// Poll the socket until the poll loop has dispatched the rejection (or
-	// time out). PollInterval is 20ms; allow generous headroom for CI.
-	deadline := time.Now().Add(5 * time.Second)
+	// Drive the fold+dispatch synchronously — this is the EXACT body the run-loop
+	// ticker calls (runLocal → pollLocalStore): a full Replay, then dispatch of the
+	// injected put through the REAL dispatch path (trust gate → recordTrustDenial).
+	// Calling it directly exercises the real poll-loop trust denial with zero
+	// wall-clock/ticker dependence, so CPU saturation cannot slip it past a deadline
+	// (dontguess-c12). After it returns, the rejection has been counted.
+	if err := eng.PollLocalStoreForTest(); err != nil {
+		t.Fatalf("PollLocalStoreForTest: %v", err)
+	}
+
 	var after struct {
 		Degradation exchange.DegradationCounts `json:"degradation"`
 	}
-	for time.Now().Before(deadline) {
-		dialAndRequest(t, sockPath, map[string]any{"op": OpMetrics}, &after)
-		if after.Degradation.TrustDenialNotAllowlisted > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	dialAndRequest(t, sockPath, map[string]any{"op": OpMetrics}, &after)
 
 	if after.Degradation.TrustDenialNotAllowlisted != 1 {
 		t.Errorf("TrustDenialNotAllowlisted = %d, want 1 (real poll-loop trust denial, surfaced over the operator socket)",

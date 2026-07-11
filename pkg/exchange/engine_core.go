@@ -822,6 +822,21 @@ func (e *Engine) pollLocalStore() error {
 	return nil
 }
 
+// PollLocalStoreForTest runs exactly ONE poll cycle synchronously — the identical
+// body the run-loop ticker invokes (runLocal → pollLocalStore): a full LocalStore
+// Replay, an incremental fold of newly-appended records into State, and a
+// dispatch of every not-yet-dispatched record through the real dispatch path
+// (trust gate → handler → operator emit). It exists so cross-package tests
+// (cmd/dontguess) can drive the real ingest/fold/dispatch synchronously instead of
+// racing a wall-clock deadline against the 5–20ms background ticker, which
+// FALSE-fails under CPU saturation. It is test-support only: purely additive, it
+// changes no production behavior (production drives pollLocalStore off the ticker),
+// and it is safe to call concurrently with a running poll loop because
+// pollLocalStore's cursors are monotonic and dispatch-exactly-once under localMu.
+func (e *Engine) PollLocalStoreForTest() error {
+	return e.pollLocalStore()
+}
+
 // foldAndDispatchLocalSnapshot folds any newly-appended records in the given
 // LocalStore snapshot into State and dispatches any not-yet-dispatched records.
 // It is split out of pollLocalStore so the snapshot passed to fold/dispatch is

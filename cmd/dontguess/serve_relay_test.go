@@ -629,11 +629,23 @@ func TestRelayHotPath_BuyMatchP99_UnderBlockedRelay(t *testing.T) {
 	go w.runReader(ctx, relayConn, pub)
 	go w.outbox.Run(ctx, 2*time.Millisecond)
 
-	engDone := make(chan struct{})
-	go func() { defer close(engDone); _ = eng.Start(ctx) }()
-	t.Cleanup(func() { cancel(); <-engDone })
+	// The engine fold loop is driven SYNCHRONOUSLY below (PollLocalStoreForTest)
+	// instead of by eng.Start's background ticker. The original test appended each
+	// buy and then spun a 5s wall-clock waitFor against the 2ms fold ticker; under
+	// full-package CPU saturation the ticker goroutine was starved past 5s and the
+	// test FALSE-failed even though the buy WOULD have matched given CPU
+	// (dontguess-c12). Driving the exact same fold body inline removes all
+	// ticker/wall-clock dependence and turns buy->match latency into a real,
+	// deterministic measurement of the isolated hot path. The relay publish leg
+	// (Outbox + reader) still runs async against the BLOCKED relay, so the isolation
+	// assertions below remain live.
+	t.Cleanup(func() { cancel() })
 
-	// Stream buys through the LOCAL fold, serially, timing each buy->match.
+	// Stream buys through the LOCAL fold, serially, timing each SYNCHRONOUS
+	// buy->match+emit. The timed call is the exact body the run-loop ticker runs
+	// (Replay → fold → handleBuy → operator match emit). If that emit were NOT
+	// isolated from the blocked relay it would block for SECONDS inside the poll;
+	// it returns in ms — that latency IS the isolation proof.
 	const buyN = 50
 	latencies := make([]time.Duration, 0, buyN)
 	for i := 0; i < buyN; i++ {
@@ -641,41 +653,55 @@ func TestRelayHotPath_BuyMatchP99_UnderBlockedRelay(t *testing.T) {
 			[]string{exchange.TagBuy}, nil,
 			localBuyPayload("Generate unit tests for a Go HTTP handler", 50000))
 		buyMsg, _ := nostr.FromNostrEvent(identityToNostrEvent(buyEv))
-		start := time.Now()
 		if err := ls.Append(dgstore.Record{
 			ID: buyMsg.ID, CampfireID: "local", Sender: buyMsg.Sender,
 			Payload: buyMsg.Payload, Tags: buyMsg.Tags, Timestamp: buyMsg.Timestamp,
 		}); err != nil {
 			t.Fatalf("append buy %d: %v", i, err)
 		}
-		want := i + 1
-		waitFor(t, 5*time.Second, "buy matches off the local fold", func() bool {
-			recs, _ := ls.ReadAll()
-			return countTag(recs, exchange.TagMatch) >= want
-		})
+		start := time.Now()
+		if err := eng.PollLocalStoreForTest(); err != nil {
+			t.Fatalf("poll+fold buy %d: %v", i, err)
+		}
 		latencies = append(latencies, time.Since(start))
+		// The synchronous fold guarantees the match is emitted before the poll
+		// returns, so assert it deterministically rather than waiting on a ticker.
+		recs, _ := ls.ReadAll()
+		if got := countTag(recs, exchange.TagMatch); got < i+1 {
+			t.Fatalf("buy %d matched off the local fold: match count = %d, want >= %d", i, got, i+1)
+		}
 	}
 
 	// ISOLATION: the relay publish leg is provably stalled — zero events
-	// published+ACKed — yet every buy matched.
+	// published+ACKed — yet every buy matched (asserted above).
 	if got := w.outbox.Cursor(); got != 0 {
 		t.Fatalf("Outbox cursor = %d, want 0 — the relay was supposed to be fully blocked (publish must not have progressed)", got)
 	}
-	if lag := w.outbox.PublishLag(); lag == 0 {
-		t.Fatalf("Outbox publish_lag = 0 under a blocked relay, want > 0 — the publish leg was not actually exercised/stalled")
-	}
+	// publish_lag = local-log-length − cursor, refreshed by the async Outbox tick
+	// (outbox.go Tick: refreshLag runs BEFORE the blocking publish, so the first
+	// tick after any match is emitted latches lag > 0 and — with the relay dead — it
+	// never drains). The matches are already durably in the log, so this WILL become
+	// true; the bounded wait only caps a genuine wedge under scheduler starvation.
+	// The Outbox is the one component here with no synchronous seam past the blocked
+	// relay, so a poll-until is unavoidable — this is a SAFETY cap, not an SLA
+	// (dontguess-c12, per the fix's robust-wait principle).
+	waitFor(t, 10*time.Second, "Outbox observes the un-ACKed publish backlog (publish_lag > 0)", func() bool {
+		return w.outbox.PublishLag() > 0
+	})
 
 	sort.Slice(latencies, func(a, b int) bool { return latencies[a] < latencies[b] })
 	p99 := latencies[(len(latencies)*99)/100]
 	// This assertion proves hot-path ISOLATION, not an absolute latency SLA: with
 	// the relay publish fully blocked, a genuinely non-isolated buy would BLOCK on
 	// the dead relay for multiple SECONDS (until the outbox/ctx timeout), whereas
-	// the isolated path completes in single-digit ms (settled: 5.5ms; -race:
-	// 23ms). The ceiling is set to discriminate those two regimes robustly under a
-	// variably-loaded CI runner — the raw p99 is logged below for NFR tracking, so
-	// a real latency regression is still observable (and belongs in a benchmark,
-	// not this isolation gate). A flat 50ms wall-clock threshold false-failed under
-	// ambient load / -race instrumentation (dontguess-7e2).
+	// the isolated synchronous fold+match+emit (incl. a full local-log Replay)
+	// completes in single-digit-to-tens-of-ms. The ceiling discriminates those two
+	// regimes robustly under a variably-loaded CI runner — the raw p99 is logged
+	// below for NFR tracking, so a real latency regression is still observable (and
+	// belongs in a benchmark, not this isolation gate). It is deliberately ORDERS OF
+	// MAGNITUDE below the multi-second blocked regime, so CPU saturation cannot push
+	// the isolated path across it (dontguess-c12); a flat 50ms threshold previously
+	// false-failed under ambient load / -race instrumentation (dontguess-7e2).
 	ceiling := 250 * time.Millisecond
 	if raceEnabled {
 		ceiling = 400 * time.Millisecond
