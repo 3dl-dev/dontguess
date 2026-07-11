@@ -8,7 +8,8 @@ package main
 // put-reject reason LOUD when the seller is not allowlisted.
 //
 // Individual tier (zero-relay, socket IPC to a local `serve`) is item ed2-E
-// and is out of scope here; this command requires DONTGUESS_RELAY_URLS.
+// (dontguess-2b4): when DONTGUESS_RELAY_URLS is unset, runPut routes through
+// runPutIndividual instead, below.
 
 import (
 	"context"
@@ -85,7 +86,10 @@ func runPut(cmd *cobra.Command, args []string) error {
 	if relayURL == "" {
 		urls := resolveRelayURLs()
 		if len(urls) == 0 {
-			return fmt.Errorf("put: no relay configured — set DONTGUESS_RELAY_URLS (team tier) or pass --relay. Individual-tier (zero-relay) put is not yet wired to this command")
+			// Individual tier (design §3.3, ed2-E, dontguess-2b4): zero relay,
+			// zero identity ceremony — route through the already-running `serve`
+			// over the operator unix socket instead of a relay.
+			return runPutIndividual(cmd, description, content, tokenCost, contentType, domains)
 		}
 		relayURL = urls[0]
 	}
@@ -128,6 +132,29 @@ func runPut(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("put %s: relay did not accept the event: %s", result.PutID, result.OKMessage)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "put %s accepted by relay; no put-reject observed within %s\n", result.PutID, timeout)
+	return nil
+}
+
+// runPutIndividual is the individual-tier (zero-relay) put path (design §3.3,
+// item ed2-E, dontguess-2b4): no agent signing key, no relay dial — it routes
+// the put through the already-running `dontguess serve` over the operator unix
+// socket via relayclient.SocketTransport, which ingests+folds it as the sole
+// local writer (localMu-guarded) and immediately promotes it into matchable
+// inventory (individual_ops.go's handleOpPut). ScripStore==nil-only; no mint
+// path, no scrip.
+func runPutIndividual(cmd *cobra.Command, description string, content []byte, tokenCost int64, contentType string, domains []string) error {
+	t := relayclient.NewSocketTransport(socketPath())
+	result, err := t.Put(relayclient.SocketPutRequest{
+		Description: description,
+		Content:     content,
+		TokenCost:   tokenCost,
+		ContentType: contentType,
+		Domains:     domains,
+	})
+	if err != nil {
+		return fmt.Errorf("put failed: %w", err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "put %s accepted (individual tier, zero relay)\n", result.PutID)
 	return nil
 }
 

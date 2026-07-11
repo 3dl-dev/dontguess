@@ -507,6 +507,19 @@ type operatorRequest struct {
 	Reason    string `json:"reason,omitempty"`
 	Recipient string `json:"recipient,omitempty"`
 	Amount    int64  `json:"amount,omitempty"`
+
+	// OpPut/OpBuy fields (individual tier, zero-relay — design §3.3,
+	// dontguess-2b4). Description/Content/TokenCost/ContentType/Domains mirror
+	// pkg/relayclient.PutRequest's shape; Task/Budget/MaxResults mirror the
+	// exchange:buy payload shape (state_buy.go parseBuyPayload).
+	Description string   `json:"description,omitempty"`
+	Content     string   `json:"content,omitempty"` // base64-encoded
+	TokenCost   int64    `json:"token_cost,omitempty"`
+	ContentType string   `json:"content_type,omitempty"`
+	Domains     []string `json:"domains,omitempty"`
+	Task        string   `json:"task,omitempty"`
+	Budget      int64    `json:"budget,omitempty"`
+	MaxResults  int      `json:"max_results,omitempty"`
 }
 
 // serveOperatorSocket accepts connections on ln and handles operator IPC
@@ -665,6 +678,19 @@ func handleOperatorConn(conn net.Conn, eng *exchange.Engine) {
 			return
 		}
 		writeOperatorResp(conn, map[string]any{"ok": true})
+
+	case OpPut:
+		// Individual tier only (design §3.3, dontguess-2b4): zero relay, zero
+		// identity ceremony, ScripStore==nil, no mint path. The write is routed
+		// through eng.IngestLocalRecord (localMu-guarded fold), never a raw
+		// store.Append. See individual_ops.go for the full doc.
+		writeOperatorResp(conn, handleOpPut(eng, req))
+
+	case OpBuy:
+		// Individual tier only (design §3.3, dontguess-2b4). Extends conn's
+		// deadline itself (opBuyConnDeadline) before its bounded server-side
+		// await — see individual_ops.go.
+		writeOperatorResp(conn, handleOpBuy(eng, conn, req))
 
 	default:
 		writeOperatorResp(conn, map[string]any{"ok": false, "error": "unknown op: " + req.Op})

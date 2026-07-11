@@ -576,6 +576,100 @@ func (e *Engine) State() *State {
 	return e.state
 }
 
+// LocalStore returns the engine's campfire-free append-only event log
+// (EngineOptions.LocalStore), or nil when the engine was not configured with
+// one. READ-ONLY accessor — callers (e.g. the individual-tier IPC handler,
+// cmd/dontguess OpPut/OpBuy, dontguess-2b4) use it to ReadAll the log to
+// locate a folded response record. Callers MUST NOT call Append on it: the
+// only correct external-record write seam is IngestLocalRecord, which
+// serializes the append+fold with the poll loop under localMu. The store's
+// own internal mutex makes concurrent ReadAll safe against the engine's poll
+// loop.
+func (e *Engine) LocalStore() *dgstore.Store {
+	return e.opts.LocalStore
+}
+
+// IngestLocalRecord appends an EXTERNAL (client-originated) record — an
+// individual-tier OpPut/OpBuy routed through the running `serve` over the
+// operator socket (design docs/design/nostr-first-client-ed2.md §3.3,
+// dontguess-2b4) — into LocalStore and folds+dispatches it EXACTLY ONCE,
+// serialized with the poll loop and appendLocalRecord via localMu.
+//
+// This is the counterpart of appendLocalRecord, and deliberately NOT the same
+// method: an OPERATOR record is applied to State by its own emitter and must
+// NEVER be dispatched, so appendLocalRecord advances BOTH cursors to suppress
+// re-fold and dispatch. An EXTERNAL record is the opposite — it has no
+// in-engine emitter, so it MUST be folded into State AND dispatched (e.g. a
+// buy has to reach handleBuy to produce a match). Routing an external write
+// through appendLocalRecord would silently drop its dispatch; routing it
+// through a raw LocalStore.Append (no localMu) corrupts the fold cursor (see
+// below).
+//
+// FOLD-CURSOR CORRECTNESS (dontguess-2b4 — the veracity blocker). The append,
+// the fold, and the cursor claim are ALL performed under a SINGLE localMu hold.
+// Holding localMu across the fold is load-bearing: appendLocalRecord advances
+// localSeen/localDispatched with a RELATIVE `++` that is only correct when
+// localSeen == len(store) at append time (it assumes the record it just
+// appended landed at the tail index == pre-increment localSeen). If this method
+// released localMu after appending but BEFORE folding, the store would briefly
+// carry an un-folded record (len(store) > localSeen); a concurrent poll-loop
+// dispatch handler's appendLocalRecord would then `++` over the wrong index —
+// marking THIS external record as folded (it is not: a LOST fold, the record is
+// never dispatched) while leaving that handler's own operator record beyond
+// localSeen (re-folded on the next poll: a DUPLICATED fold, e.g.
+// emitConsumeSignal's durable append double-applied). Folding under the same
+// lock as the append restores localSeen == len(store) before the unlock, so
+// every subsequent appendLocalRecord `++` lands on the correct tail index.
+//
+// The dispatch cursor is claimed under the lock (monotonic, exactly as the poll
+// loop does via claimDispatchGap) and the actual dispatch runs OUTSIDE the lock
+// (dispatch handlers re-enter localMu through appendLocalRecord). Because the
+// runtime invariant localSeen == localDispatched holds at every localMu
+// boundary, the claim covers exactly this one record; a concurrent poll that
+// observes localDispatched already advanced claims an empty gap and never
+// re-dispatches it. lock-ordering is safe: State.Apply takes State.mu, and no
+// path holds State.mu while acquiring localMu, so localMu -> State.mu never
+// cycles.
+//
+// Individual tier only (ScripStore==nil / TrustChecker==nil): no scrip, no
+// mint. Returns after the record has been folded and dispatched.
+func (e *Engine) IngestLocalRecord(rec dgstore.Record) error {
+	if e.opts.LocalStore == nil {
+		return fmt.Errorf("engine: IngestLocalRecord: no local store configured")
+	}
+	if rec.ID == "" {
+		return fmt.Errorf("engine: IngestLocalRecord: record ID must not be empty")
+	}
+	msg := rec.ToMessage()
+
+	e.localMu.Lock()
+	if err := e.opts.LocalStore.Append(rec); err != nil {
+		e.localMu.Unlock()
+		return fmt.Errorf("engine: IngestLocalRecord: append %s: %w", shortKey(rec.ID), err)
+	}
+	e.localMsgByID[msg.ID] = &msg
+	// Fold THIS record into State under localMu (see the FOLD-CURSOR note): this
+	// closes the un-folded window that would otherwise corrupt a concurrent
+	// appendLocalRecord's relative cursor increment.
+	e.state.Apply(&msg)
+	e.localSeen++
+	// Claim the dispatch of exactly this record, monotonically. At runtime
+	// localDispatched == localSeen at every localMu boundary, so dispatchStart is
+	// this record's index and the increment restores the equality
+	// appendLocalRecord relies on. A concurrent poll claiming after us sees the
+	// advanced cursor and skips the record (dispatch-exactly-once).
+	e.localDispatched++
+	e.localMu.Unlock()
+
+	// Dispatch OUTSIDE localMu — dispatch handlers append operator records via
+	// appendLocalRecord, which re-takes localMu. This is the same
+	// fold-under-lock / dispatch-outside-lock split the poll loop uses.
+	if err := e.dispatch(&msg); err != nil {
+		return fmt.Errorf("engine: IngestLocalRecord: dispatch %s: %w", shortKey(msg.ID), err)
+	}
+	return nil
+}
+
 // DegradationSnapshot returns a point-in-time copy of the trust-denial
 // counters (docs/design/relay-transport.md §2.4a D4 + §3) for reporting —
 // the CLI status/observability path (cmd/dontguess/status.go) and tests.
@@ -921,6 +1015,17 @@ func (e *Engine) claimDispatchGap(total int) int {
 // appendLocalRecord relies on. The gap is claimed under localMu before dispatch
 // runs outside the lock, so a record is dispatched exactly once even when this
 // races the poll loop.
+//
+// Monotonic single-point-of-truth discipline (dontguess-5f0): the fold cursor
+// (localSeen), the folded State (state.Replay), and the match index all advance
+// TOGETHER, under a single localMu hold, and ONLY when this snapshot grows the
+// log (total > localSeen). A rebuild that captured a stale snapshot OUTSIDE the
+// lock — one a concurrent poll/ingest has already superseded — must never
+// regress localSeen or overwrite State with the older log, or the fold cursor
+// inverts against the poll-advanced dispatch cursor (the [54:39] inversion) and
+// entries fold away without ever matching. claimDispatchGap stays under the same
+// lock so the dispatch gap remains monotonic even when the grow branch is
+// skipped; a skipped grow simply leaves State/cursor at the newer poll-set value.
 func (e *Engine) rebuildAndDispatchGapLocal() error {
 	msgs, err := e.opts.LocalStore.Replay()
 	if err != nil {
@@ -929,17 +1034,20 @@ func (e *Engine) rebuildAndDispatchGapLocal() error {
 	total := len(msgs)
 
 	e.localMu.Lock()
-	e.indexLocalMessages(msgs)
-	e.localSeen = total
+	if total > e.localSeen {
+		// Grow branch only: advance fold cursor + State + index together,
+		// atomically under localMu, from this (fresher-than-localSeen) snapshot.
+		e.indexLocalMessages(msgs) // FULL msgs slice — not a tail slice
+		e.localSeen = total
+		e.state.Replay(msgs)   // under localMu + inside the grow guard (5f0)
+		e.rebuildMatchIndex()  // under localMu + inside the grow guard (5f0)
+	}
 	// Claim the dispatch gap monotonically (same discipline as the poll loop):
 	// a rebuild holding a stale snapshot must not regress a dispatch cursor a
 	// concurrent poll already advanced, or the gap reopens and records
 	// re-dispatch. See claimDispatchGap (dontguess-b84 residual fix).
 	dispatchStart := e.claimDispatchGap(total)
 	e.localMu.Unlock()
-
-	e.state.Replay(msgs)
-	e.rebuildMatchIndex()
 
 	for i := dispatchStart; i < total; i++ {
 		msg := &msgs[i]
