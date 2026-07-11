@@ -1015,6 +1015,17 @@ func (e *Engine) claimDispatchGap(total int) int {
 // appendLocalRecord relies on. The gap is claimed under localMu before dispatch
 // runs outside the lock, so a record is dispatched exactly once even when this
 // races the poll loop.
+//
+// Monotonic single-point-of-truth discipline (dontguess-5f0): the fold cursor
+// (localSeen), the folded State (state.Replay), and the match index all advance
+// TOGETHER, under a single localMu hold, and ONLY when this snapshot grows the
+// log (total > localSeen). A rebuild that captured a stale snapshot OUTSIDE the
+// lock — one a concurrent poll/ingest has already superseded — must never
+// regress localSeen or overwrite State with the older log, or the fold cursor
+// inverts against the poll-advanced dispatch cursor (the [54:39] inversion) and
+// entries fold away without ever matching. claimDispatchGap stays under the same
+// lock so the dispatch gap remains monotonic even when the grow branch is
+// skipped; a skipped grow simply leaves State/cursor at the newer poll-set value.
 func (e *Engine) rebuildAndDispatchGapLocal() error {
 	msgs, err := e.opts.LocalStore.Replay()
 	if err != nil {
@@ -1023,17 +1034,20 @@ func (e *Engine) rebuildAndDispatchGapLocal() error {
 	total := len(msgs)
 
 	e.localMu.Lock()
-	e.indexLocalMessages(msgs)
-	e.localSeen = total
+	if total > e.localSeen {
+		// Grow branch only: advance fold cursor + State + index together,
+		// atomically under localMu, from this (fresher-than-localSeen) snapshot.
+		e.indexLocalMessages(msgs) // FULL msgs slice — not a tail slice
+		e.localSeen = total
+		e.state.Replay(msgs)   // under localMu + inside the grow guard (5f0)
+		e.rebuildMatchIndex()  // under localMu + inside the grow guard (5f0)
+	}
 	// Claim the dispatch gap monotonically (same discipline as the poll loop):
 	// a rebuild holding a stale snapshot must not regress a dispatch cursor a
 	// concurrent poll already advanced, or the gap reopens and records
 	// re-dispatch. See claimDispatchGap (dontguess-b84 residual fix).
 	dispatchStart := e.claimDispatchGap(total)
 	e.localMu.Unlock()
-
-	e.state.Replay(msgs)
-	e.rebuildMatchIndex()
 
 	for i := dispatchStart; i < total; i++ {
 		msg := &msgs[i]
