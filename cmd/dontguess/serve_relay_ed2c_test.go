@@ -477,46 +477,46 @@ func TestEd2C_RunBuy_UnderfundedBuyer_ReceivesRejectViaPerPhaseFilter(t *testing
 	}
 }
 
-// --- (3) PREVIEW path via the client Settle against the full stack ------------
+// --- (3) PREVIEW path END-TO-END via the client Settle against the full stack -
 
-// TestEd2C_PreviewPath_RequestPreviewThenBuyerAccept drives the real client
-// relayclient.Buy + Settle{Preview:true} against the full operator stack and proves
-// item requirement (4) — the "preview-request -> preview -> buyer-accept" path:
+// TestEd2C_PreviewPath_SettlesContentAndMovesScripViaPreviewBranch drives the real
+// client relayclient.Buy + Settle{Preview:true} against the full operator stack and
+// proves item requirement (4) END TO END through the PREVIEW branch:
 //
 //  1. the client publishes settle(preview-request) e-tagging the match WIRE id;
 //  2. it RECEIVES the FREE operator settle(preview) via its per-phase
-//     #e:[preview-request] subscription (SettleResult.PreviewMsgID is populated —
-//     a real operator round-trip, no scrip charged); and
-//  3. it publishes settle(buyer-accept) e-tagging the PREVIEW WIRE id per design §3.5
-//     (SettleResult.BuyerAcceptID is populated).
+//     #e:[preview-request] subscription (SettleResult.PreviewMsgID populated — a real
+//     operator round-trip);
+//  3. it publishes settle(buyer-accept) e-tagging the PREVIEW WIRE id per §3.5
+//     (SettleResult.BuyerAcceptID populated);
+//  4. the operator AUTO-DELIVERS against that preview-based buyer-accept and the
+//     client RECEIVES settle(deliver) (SettleResult.DeliverMsgID populated); and
+//  5. it verifies the content byte-exact + hash and publishes settle(complete)
+//     (SettleResult.CompleteMsgID populated), which moves REAL scrip: buyer debited
+//     a price+fee hold, seller credited the residual, IsMatchSettled flips durably.
 //
-// KNOWN OPERATOR BOUNDARY (flagged upstream, NOT this item's scope): the operator's
-// AUTO-DELIVER on a buyer-accept that e-tags the PREVIEW wire id does not fire
-// in-session, so the chain does not reach settle(deliver) here. Root cause is
-// OPERATOR-side and outside ed2-C's "client-only, do not touch the engine" scope:
-// the operator's own settle(preview) response is NOT applied to state in-session
-// (engine sendPreviewResponse lacks the send-then-Apply that emitMatchResponse /
-// autoDeliverOnBuyerAccept / emitConsumeSignal all perform), so previewToMatch stays
-// unpopulated within the session and ResolveMatchFromAntecedent(previewWire) misses
-// (empirically: found=false for the preview wire id, found=true for the match wire
-// id). 55c fixed the MATCH-wire-id auto-deliver path (proven by the happy-path test
-// above) but never covered the PREVIEW-wire-id path. This test therefore asserts the
-// client milestones requirement (4) names and deliberately does NOT assert the
-// operator-blocked deliver; it stays forward-compatible (still passes once the
-// one-line operator send-then-Apply lands). See the escalation/followup in the
-// item's structured output.
-func TestEd2C_PreviewPath_RequestPreviewThenBuyerAccept(t *testing.T) {
+// THIS IS THE OPERATOR-FIX PROOF (engine send-then-Apply in sendPreviewResponse).
+// Before the fix, the operator's own settle(preview) was NOT applied to state
+// in-session, so previewToMatch stayed empty and a buyer-accept e-tagging the PREVIEW
+// wire id resolved ResolveMatchFromAntecedent(previewWire) = found=false — no hold,
+// no auto-deliver — and this chain stalled at the preview. The one-line send-then-Apply
+// (mirroring emitConsumeSignal / autoDeliverOnBuyerAccept) populates previewToMatch
+// live, so the PREVIEW-wire-id buyer-accept now resolves found=true and the chain
+// settles end-to-end. What distinguishes this from the match-wire-id happy path
+// (test 1) is the NON-EMPTY PreviewMsgID: the buyer-accept here e-tagged the preview,
+// not the match, so the ONLY resolution route was previewToMatch.
+func TestEd2C_PreviewPath_SettlesContentAndMovesScripViaPreviewBranch(t *testing.T) {
 	fx := newEd2cFixture(t)
 	buyer := newBuyerAgent(t)
 	fx.st.mintBuyer(t, buyer)
+	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got != wireIDBuyerMint {
+		t.Fatalf("buyer balance before buy = %d, want minted %d", got, wireIDBuyerMint)
+	}
+	if got := fx.st.scrip.Balance(fx.seller.PubKeyHex()); got != 0 {
+		t.Fatalf("seller balance before buy = %d, want 0", got)
+	}
 
-	// One bounded ctx for the whole buy->settle (the watchdog that unblocks a
-	// stalled Recv is bound to the dial ctx of the first Send). The buy + preview
-	// round (preview-request -> preview -> buyer-accept) complete in well under a
-	// second; the remainder is the operator-blocked deliver the client awaits (the
-	// known boundary above), so this bound doubles as the test duration. The
-	// asserted milestones (PreviewMsgID / BuyerAcceptID) are set before it expires.
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	conn := newClientConn(t, fx.hub.wsURL(), buyer)
@@ -532,16 +532,106 @@ func TestEd2C_PreviewPath_RequestPreviewThenBuyerAccept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("relayclient.Settle(preview): %v", err)
 	}
-	// (2) the FREE operator preview was RECEIVED via #e:[preview-request].
+
+	// The chain went THROUGH the preview branch: the free preview round happened and
+	// the buyer-accept e-tagged the PREVIEW wire id (its only resolution route is
+	// previewToMatch — the map the engine send-then-Apply now populates live).
 	if settleRes.PreviewMsgID == "" {
 		t.Fatalf("preview path did not record a preview wire id — the free preview round did not happen")
 	}
-	// (3) the client published buyer-accept e-tagging the PREVIEW wire id (§3.5).
 	if settleRes.BuyerAcceptID == "" {
 		t.Fatalf("preview path did not publish a buyer-accept after the preview")
 	}
-	// The FREE preview must not have moved any scrip.
-	if got := fx.st.scrip.Balance(fx.seller.PubKeyHex()); got != 0 {
-		t.Fatalf("seller credited %d after a FREE preview — the preview must charge nothing", got)
+	// The operator AUTO-DELIVERED against the preview-based buyer-accept: the client
+	// received deliver + completed. Before the engine fix this outcome was Ambiguous.
+	if settleRes.Outcome != relayclient.SettleOutcomeSettled {
+		t.Fatalf("preview-branch outcome = %s, want settled (operator auto-deliver via previewToMatch); reject=%q",
+			settleRes.Outcome, settleRes.RejectReason)
+	}
+	if settleRes.DeliverMsgID == "" {
+		t.Fatalf("preview path did not receive settle(deliver) — operator auto-deliver did not fire on the PREVIEW-wire-id buyer-accept (previewToMatch unpopulated?)")
+	}
+	if settleRes.CompleteMsgID == "" {
+		t.Fatalf("preview path did not publish settle(complete)")
+	}
+	// (a) content IN HAND, byte-exact + hash-verified, delivered via the preview branch.
+	if !bytes.Equal(settleRes.Content, ed2cContent) {
+		t.Fatalf("delivered content mismatch via preview branch.\n got (%d bytes): %q\nwant (%d bytes): %q",
+			len(settleRes.Content), string(settleRes.Content), len(ed2cContent), string(ed2cContent))
+	}
+
+	// (b) REAL scrip moved through the engine via the PREVIEW branch (the operator
+	// folds the client's buyer-accept/complete asynchronously after Settle returns).
+	waitFor(t, 8*time.Second, "buyer debited a real price+fee hold via the preview branch", func() bool {
+		return fx.st.scrip.Balance(buyer.PubKeyHex()) < wireIDBuyerMint
+	})
+	matchStore := fx.matchStoreID(t)
+	waitFor(t, 8*time.Second, "match settles (durable scrip-settle) on the preview-branch complete", func() bool {
+		return fx.st.eng.State().IsMatchSettled(matchStore)
+	})
+	waitFor(t, 8*time.Second, "seller credited the residual via the preview branch", func() bool {
+		return fx.st.scrip.Balance(fx.seller.PubKeyHex()) > 0
+	})
+	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got >= wireIDBuyerMint {
+		t.Fatalf("buyer not debited via preview branch: balance=%d, want < %d", got, wireIDBuyerMint)
+	}
+}
+
+// --- (4) PREVIEW flag END-TO-END via the ACTUAL `dontguess buy --preview` RunE ---
+
+// TestEd2C_RunBuy_PreviewFlag_SettlesContentAndMovesScrip drives the ACTUAL `dontguess
+// buy --preview` RunE on a MINTED buyer against the full stack — the command-level
+// proof that the --preview cobra flag (buy.go) flows through to the client settle
+// chain and settles END TO END: buy -> match -> preview-request -> FREE preview ->
+// buyer-accept (e-tag PREVIEW wire id) -> operator auto-deliver -> complete, ending
+// with the content IN HAND (byte-exact on stdout) and REAL scrip moved. It is the
+// same end state as test 1 (the non-preview happy path) but reached THROUGH the
+// preview branch, and it is the ONLY test exercising the --preview flag via cobra.
+func TestEd2C_RunBuy_PreviewFlag_SettlesContentAndMovesScrip(t *testing.T) {
+	fx := newEd2cFixture(t)
+	buyer := newBuyerAgent(t)
+	fx.st.mintBuyer(t, buyer)
+	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got != wireIDBuyerMint {
+		t.Fatalf("buyer balance before buy = %d, want minted %d", got, wireIDBuyerMint)
+	}
+
+	cmd := newBuyCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	setBuyFlags(t, cmd, map[string]string{
+		"task":    ed2cBuyTask,
+		"budget":  "1000000",
+		"relay":   fx.hub.wsURL(),
+		"timeout": "30s",
+		"preview": "true",
+	})
+	if err := runBuy(cmd, nil); err != nil {
+		t.Fatalf("runBuy (team hit, --preview) returned error: %v\nstderr:\n%s", err, stderr.String())
+	}
+
+	// (a) content IN HAND, byte-exact, on the pipeable stdout channel — reached via
+	// the preview branch (the RunE drove the free preview round before buyer-accept).
+	if !bytes.Equal(stdout.Bytes(), ed2cContent) {
+		t.Fatalf("delivered content mismatch via --preview.\n got (%d bytes): %q\nwant (%d bytes): %q",
+			stdout.Len(), stdout.String(), len(ed2cContent), string(ed2cContent))
+	}
+	if !strings.Contains(stderr.String(), "SETTLED") {
+		t.Fatalf("stderr does not surface the SETTLED outcome via --preview:\n%s", stderr.String())
+	}
+
+	// (b) REAL scrip moved through the engine via the --preview branch.
+	waitFor(t, 8*time.Second, "buyer debited a real price+fee hold via --preview", func() bool {
+		return fx.st.scrip.Balance(buyer.PubKeyHex()) < wireIDBuyerMint
+	})
+	matchStore := fx.matchStoreID(t)
+	waitFor(t, 8*time.Second, "match settles (durable scrip-settle) on the --preview complete", func() bool {
+		return fx.st.eng.State().IsMatchSettled(matchStore)
+	})
+	waitFor(t, 8*time.Second, "seller credited the residual via --preview", func() bool {
+		return fx.st.scrip.Balance(fx.seller.PubKeyHex()) > 0
+	})
+	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got >= wireIDBuyerMint {
+		t.Fatalf("buyer not debited via --preview: balance=%d, want < %d", got, wireIDBuyerMint)
 	}
 }
