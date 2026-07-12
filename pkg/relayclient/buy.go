@@ -137,6 +137,12 @@ type BuyResult struct {
 	BuyID   string
 	Outcome BuyOutcome
 
+	// BuyerPubKey is the hex npub that SIGNED the buy — recorded so ed2-C's Settle
+	// can enforce the SAME-KEY invariant (§3.5): every buyer-side settle phase must
+	// be signed by the exact key that signed the buy, or the engine silently drops
+	// it. Set by Buy from the signer; empty only on a caller-constructed result.
+	BuyerPubKey string
+
 	// MatchMsgID is the 3403 match event id — set on BuyOutcomeMatch. This is
 	// the CLEAN SEAM for ed2-C: the buyer-accept settle message e-tags this id.
 	MatchMsgID string
@@ -231,7 +237,13 @@ func Buy(ctx context.Context, conn *relay.Conn, signer identity.Signer, req BuyR
 	}
 
 	// 3. AWAIT — bounded, re-subscribing on drop.
-	return awaitBuyResponse(ctx, conn, subID, baseFilter, buyID, buyCreatedAt, req.OperatorPubKey)
+	res, err := awaitBuyResponse(ctx, conn, subID, baseFilter, buyID, buyCreatedAt, req.OperatorPubKey)
+	if res != nil {
+		// Record the signing key so ed2-C's Settle can enforce the SAME-KEY
+		// invariant across the whole buy->settle chain (§3.5).
+		res.BuyerPubKey = signer.PubKeyHex()
+	}
+	return res, err
 }
 
 // awaitBuyResponse runs the bounded Recv loop that discriminates the buy

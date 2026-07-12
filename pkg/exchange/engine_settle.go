@@ -910,9 +910,24 @@ func (e *Engine) sendPreviewResponse(msg *Message, matchMsgID string, entry *Inv
 	}
 	antecedents := []string{msg.ID}
 
-	_, err = e.sendOperatorMessage(previewPayload, tags, antecedents)
+	previewMsg, err := e.sendOperatorMessage(previewPayload, tags, antecedents)
 	if err != nil {
 		return fmt.Errorf("engine: preview-request: send preview response: %w", err)
+	}
+	// send-then-Apply: fold the operator's own preview into live state NOW so
+	// previewToMatch[preview_store] is populated for the buyer's preview-based
+	// buyer-accept without waiting on a replay/restart (mirrors emitConsumeSignal
+	// engine_settle.go:476-485 and autoDeliverOnBuyerAccept engine_settle.go:650-658).
+	// In the live team-tier relay flow the operator's preview is appended via
+	// appendLocalRecord, which advances the local cursors WITHOUT re-folding the
+	// record — so applySettlePreview would never run in-session and a buyer-accept
+	// e-tagging the PREVIEW wire id would resolve found=false (no hold, no
+	// auto-deliver). Applying here populates previewToMatch live. applySettlePreview
+	// preserves its own operator-gate + previewRequestToMatch antecedent check, so
+	// this is additive: a nil message is a no-op and the in-process suite /
+	// individual tier (which also re-fold via replay) stay byte-for-byte unchanged.
+	if previewMsg != nil {
+		e.state.Apply(previewMsg)
 	}
 
 	e.opts.log("engine: preview-request: sent preview for entry=%s match=%s buyer=%s",
