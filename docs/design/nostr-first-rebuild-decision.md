@@ -150,6 +150,7 @@ Organized by the four tiers. The frame holds: **the authoritative-operator footp
 | `match` | 3403 | regular, immutable | `["e", <buy-id>, "", "reply"]` — direct equivalent of `Antecedents[0]` |
 | `settle` | 3404 | regular, immutable | `phase` tag (mirrors today's `exchange:phase:*`); `e`-tag chains to prior phase |
 | `assign*` (7 sub-ops) | 3405 | regular, immutable | single kind + `["op", <sub-op>]` discriminator (a bare `phase` tag cannot distinguish 7 assign sub-ops — see below) |
+| `consume` | 3406 | regular, immutable | operator-authored behavioral signal (`emitConsumeSignal`); `["e", <complete-id>, "", "reply"]`; dedicated kind fully determines the op (no discriminator), like the base ops. Operator-only on ingest (dontguess-d52) — feeds the per-entry consume booster, so it MUST publish for a relay reader to recompute the Layer metrics |
 | scrip ops (mint/burn/pay/loan) | 3411 | regular, immutable | single kind + `["op", <sub-op>]` discriminator; **team-tier, on the authed relay** |
 | **inventory + dynamic price projection** | **30401** | **addressable** (`d`-tag = `content_hash`) | operator-republished *projection*, latest-wins |
 
