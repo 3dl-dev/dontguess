@@ -53,8 +53,9 @@ yet wired to this command.`,
 	cmd.Flags().Int("max_results", 0, "max ranked results to return (0 = operator default)")
 	cmd.Flags().String("relay", "", "relay websocket URL (default: first of DONTGUESS_RELAY_URLS)")
 	cmd.Flags().String("operator-npub", "", "operator npub to require as response author (optional, belt-and-suspenders)")
-	cmd.Flags().Duration("timeout", relayclient.DefaultBuyTimeout, "bounded end-to-end timeout (dial, subscribe, publish, await)")
+	cmd.Flags().Duration("timeout", relayclient.DefaultBuyTimeout, "bounded end-to-end timeout for the whole buy->settle chain (dial, subscribe, publish, await)")
 	cmd.Flags().Bool("relay-auth", false, "opt into the NIP-42 client AUTH handshake (default: WithoutClientAuth)")
+	cmd.Flags().Bool("preview", false, "on a hit, request a FREE content preview before buyer-accept (preview-request -> preview -> buyer-accept)")
 	return cmd
 }
 
@@ -76,6 +77,7 @@ func runBuy(cmd *cobra.Command, args []string) error {
 	operatorNpub, _ := cmd.Flags().GetString("operator-npub")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	relayAuth, _ := cmd.Flags().GetBool("relay-auth")
+	preview, _ := cmd.Flags().GetBool("preview")
 
 	if task == "" {
 		return fmt.Errorf("buy: --task is required")
@@ -133,20 +135,49 @@ func runBuy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("buy failed: %w", err)
 	}
 
-	relayclient.WriteOutcome(cmd.OutOrStdout(), result)
+	// Non-hit outcomes carry no content: render the LOUD outcome to stderr (so
+	// stdout stays a clean, pipeable content channel) and exit non-zero so a
+	// wrapping script/agent can branch on the exit code.
+	if result.Outcome != relayclient.BuyOutcomeMatch {
+		relayclient.WriteOutcome(cmd.ErrOrStderr(), result)
+		switch result.Outcome {
+		case relayclient.BuyOutcomeMiss:
+			return fmt.Errorf("buy %s: no match (buy-miss) — see demand-signal guide above", result.BuyID)
+		case relayclient.BuyOutcomeBrokered:
+			return fmt.Errorf("buy %s: unexpected brokered assign — not settling", result.BuyID)
+		default:
+			return fmt.Errorf("buy %s: ambiguous timeout — see enumerated causes above", result.BuyID)
+		}
+	}
 
-	// A hit is the only success; every other outcome exits non-zero so a script
-	// or agent wrapping `dontguess buy` can branch on the exit code, while the
-	// human-facing detail is already printed above.
-	switch result.Outcome {
-	case relayclient.BuyOutcomeMatch:
+	// HIT (ed2-C): drive the per-phase settle chain over the SAME conn under the
+	// SAME identity to move scrip + receive content in this one invocation. The
+	// match summary and settle diagnostics go to stderr; only the verified content
+	// goes to stdout (pipeable).
+	relayclient.WriteOutcome(cmd.ErrOrStderr(), result)
+	settleRes, serr := relayclient.Settle(ctx, conn, signer, result, relayclient.SettleOptions{
+		Budget:         budget,
+		Preview:        preview,
+		OperatorPubKey: operatorPubKey,
+	})
+	if serr != nil {
+		return fmt.Errorf("buy %s: settle: %w", result.BuyID, serr)
+	}
+	relayclient.WriteSettleOutcome(cmd.ErrOrStderr(), result.BuyID, settleRes)
+
+	switch settleRes.Outcome {
+	case relayclient.SettleOutcomeSettled:
+		if _, werr := cmd.OutOrStdout().Write(settleRes.Content); werr != nil {
+			return fmt.Errorf("buy %s: writing delivered content: %w", result.BuyID, werr)
+		}
 		return nil
-	case relayclient.BuyOutcomeMiss:
-		return fmt.Errorf("buy %s: no match (buy-miss) — see demand-signal guide above", result.BuyID)
-	case relayclient.BuyOutcomeBrokered:
-		return fmt.Errorf("buy %s: unexpected brokered assign — not settling", result.BuyID)
+	case relayclient.SettleOutcomeUnderfunded:
+		return fmt.Errorf("buy %s: underfunded — operator rejected buyer-accept (%s); ask the operator to run: dontguess mint <your-npub> <amount>",
+			result.BuyID, settleRes.RejectReason)
+	case relayclient.SettleOutcomeBudgetExceeded:
+		return fmt.Errorf("buy %s: match price %d scrip exceeds budget %d — not purchased", result.BuyID, settleRes.Price, budget)
 	default:
-		return fmt.Errorf("buy %s: ambiguous timeout — see enumerated causes above", result.BuyID)
+		return fmt.Errorf("buy %s: settle ambiguous timeout — matched but content was not delivered in the bound", result.BuyID)
 	}
 }
 
