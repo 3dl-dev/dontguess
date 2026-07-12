@@ -77,11 +77,29 @@ func newIndividualTierEngine(t *testing.T) *exchange.Engine {
 		},
 	})
 
+	// Drive the DESTRUCTIVE startup replay SYNCHRONOUSLY on the (currently empty)
+	// store BEFORE any op runs, then launch ONLY the additive poll loop in a
+	// goroutine. Launching eng.Start(ctx) in a goroutine instead races Start's
+	// replayAll — a full, destructive state.Replay of the startup snapshot — against
+	// the test's synchronous socket ops: under CPU load replayAll captures an empty
+	// snapshot at launch and its later state.Replay([]) + `localSeen = 0` overwrite
+	// the State and cursor a concurrently-completed OpPut already built, wiping the
+	// just-put entry out of inventory + match index so a following OpBuy
+	// false-misses (dontguess-c8b, observed as inv=0/indexLen=0 at buy time). The
+	// synchronous StartupReplayForTest folds the empty log and seeds the cursors
+	// once, up front; the only remaining concurrent folder is the poll loop
+	// (foldAndDispatchLocalSnapshot), which is additive and monotonic — it can never
+	// wipe State. This preserves a genuinely concurrent poll loop for the fold-cursor
+	// storm test while removing the startup-replay race.
+	if err := eng.StartupReplayForTest(); err != nil {
+		t.Fatalf("StartupReplayForTest: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = eng.Start(ctx)
+		_ = eng.RunPollLoopForTest(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()

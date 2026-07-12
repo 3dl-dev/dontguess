@@ -980,6 +980,27 @@ func (e *Engine) StartupReplayForTest() error {
 	return nil
 }
 
+// RunPollLoopForTest runs ONLY the blocking poll loop — the exact post-startup
+// portion of Start (its e.run(ctx) tail), WITHOUT the leading replayAll. It is
+// the counterpart of StartupReplayForTest: a test drives the destructive startup
+// replay synchronously first (StartupReplayForTest), then launches this in a
+// goroutine for a live, concurrent poll loop — instead of `go eng.Start(ctx)`,
+// whose replayAll folds the whole log with a full, destructive state.Replay in a
+// goroutine that RACES the test's synchronous socket ops. Under CPU saturation
+// that race widens: replayAll captures an empty startup snapshot, then its
+// state.Replay(emptySnapshot) + `localSeen = len(snapshot)` overwrite the State
+// and cursor a concurrently-completed OpPut already built, wiping the just-put
+// entry out of inventory and the match index (a following OpBuy then false-misses
+// — dontguess-c8b). Splitting startup (synchronous) from the poll loop
+// (goroutine) removes that window while keeping a genuinely concurrent poll loop
+// for tests that need one. Test-support only: purely additive, it runs the
+// identical body Start's tail runs (production reaches it via Start), and the
+// poll loop's cursors are monotonic / dispatch-exactly-once under localMu, so it
+// is safe to run concurrently with socket ops.
+func (e *Engine) RunPollLoopForTest(ctx context.Context) error {
+	return e.run(ctx)
+}
+
 // foldAndDispatchLocalSnapshot folds any newly-appended records in the given
 // LocalStore snapshot into State and dispatches any not-yet-dispatched records.
 // It is split out of pollLocalStore so the snapshot passed to fold/dispatch is
