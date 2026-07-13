@@ -24,6 +24,7 @@ package exchange_test
 // removal.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -33,6 +34,7 @@ import (
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 	"github.com/3dl-dev/dontguess/pkg/store"
 )
 
@@ -122,8 +124,8 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 	const v2Desc = "kubernetes operator reconcile loop backoff jitter tuning recipe"
 	v2Plain := []byte("SECRET-3C3-V2-" + strings.Repeat("reconcile-backoff-jitter-", 8) + "END")
 	sum := sha256.Sum256(v2Plain)
-	v2HashHex := hex.EncodeToString(sum[:])          // the load-bearing 64-char oracle value
-	v2HashPrefixed := "sha256:" + v2HashHex          // the on-entry ContentHash form
+	v2HashHex := hex.EncodeToString(sum[:]) // the load-bearing 64-char oracle value
+	v2HashPrefixed := "sha256:" + v2HashHex // the on-entry ContentHash form
 	v2PutPayload, _ := buildV2PutPayload(t, seller, operator.PubKeyHex(), v2Desc, v2Plain, 9000)
 	v2Put := h.sendMessage(h.seller, v2PutPayload,
 		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
@@ -226,4 +228,111 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 	if !sawLegacyAssign {
 		t.Fatal("expected a compression assign for the legacy entry — the v2 gate must not disable compression for individual-tier entries (assertion would be vacuous otherwise)")
 	}
+}
+
+// TestBuyMissScripPay_V2_UsesCiphertextHashNotPlaintext is the second dontguess-3c3
+// leak site the audit found: paySellerForBuyMiss emits a scrip-put-pay (kind 3411,
+// a PUBLIC relay event) carrying result_hash = pending.ContentHash. On the team
+// tier (ScripStore != nil && OperatorSigner != nil ⇒ encryptedRequired) every
+// folded put is v2, so ContentHash = sha256(plaintext) — the §4.4 A1/P1 oracle
+// would leak on every buy-miss payout. The fix uses the already-public
+// CiphertextHash instead (sha256(ciphertext), random per entry). The scrip ledger
+// fold (applyPutPay) reads only Seller+Amount, so result_hash is audit metadata —
+// changing it cannot affect balances.
+func TestBuyMissScripPay_V2_UsesCiphertextHashNotPlaintext(t *testing.T) {
+	t.Parallel()
+	h := newTestHarness(t)
+	operator, _, buyer := useSecpIdentities(t, h)
+
+	cs := newCampfireScripStore(t, h)
+	eng := h.newEngineWithOpts(func(o *exchange.EngineOptions) {
+		o.OperatorPublicKey = operator.PubKeyHex()
+		o.OperatorSigner = operator
+		o.ScripStore = cs
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	h.startEngine(eng, ctx, cancel)
+
+	// The buyer requests a task the exchange has no inventory for ⇒ buy-miss offer.
+	const task = "postgres logical replication slot lag alerting runbook with worked queries"
+	_ = h.sendMessage(h.buyer, buyPayload(task, 500000), []string{exchange.TagBuy}, nil)
+
+	taskHash := exchange.TaskDescriptionHash(task)
+	waitForCond3c3(t, 3*time.Second, "buy-miss offer recorded", func() bool {
+		return eng.State().GetBuyMissOffer(taskHash) != nil
+	})
+
+	// The buyer computed the result themselves and PUTs it as a v2 confidential
+	// entry (description == task so the offer's task-hash matches; wrapped from the
+	// buyer, the put sender, to the operator).
+	v2Plain := []byte("SECRET-3C3-BUYMISS-" + strings.Repeat("replication-slot-lag-", 6) + "END")
+	sum := sha256.Sum256(v2Plain)
+	plaintextHashHex := hex.EncodeToString(sum[:])
+	putPayload3c3, _ := buildV2PutPayload(t, buyer, operator.PubKeyHex(), task, v2Plain, 40000)
+	put := h.sendMessage(h.buyer, putPayload3c3,
+		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
+
+	// Wait for the operator's scrip-put-pay for this fulfillment.
+	var payMsg *store.MessageRecord
+	waitForCond3c3(t, 4*time.Second, "scrip-put-pay emitted", func() bool {
+		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripPutPay}})
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Sender == operator.PubKeyHex() {
+				m := msgs[i]
+				payMsg = &m
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+
+	// Locate the folded v2 entry to read its two DISTINCT hashes.
+	all, _ := h.st.ListMessages(h.cfID, 0)
+	eng.State().Replay(exchange.FromStoreRecords(all))
+	var entry *exchange.InventoryEntry
+	for _, e := range eng.State().Inventory() {
+		if e.PutMsgID == put.ID {
+			ee := e
+			entry = ee
+		}
+	}
+	if entry == nil {
+		t.Fatalf("v2 buy-miss put %s did not fold into inventory", put.ID[:8])
+	}
+	if entry.WrappedCEKOperator == "" {
+		t.Fatal("folded entry is not v2 — the leak-path precondition is not met (test vacuous)")
+	}
+	if entry.ContentHash != "sha256:"+plaintextHashHex {
+		t.Fatalf("entry.ContentHash = %q, want sha256(plaintext) %q", entry.ContentHash, "sha256:"+plaintextHashHex)
+	}
+	if entry.CiphertextHash == "" || entry.CiphertextHash == entry.ContentHash {
+		t.Fatalf("entry.CiphertextHash = %q must be non-empty and distinct from ContentHash", entry.CiphertextHash)
+	}
+
+	var pp scrip.PutPayPayload
+	if err := json.Unmarshal(payMsg.Payload, &pp); err != nil {
+		t.Fatalf("unmarshal scrip-put-pay: %v", err)
+	}
+	if strings.Contains(string(payMsg.Payload), plaintextHashHex) {
+		t.Fatalf("CONFIDENTIALITY LEAK: sha256(plaintext) hex appeared on the public scrip-put-pay (kind 3411) — §4.4 A1/P1 oracle reopened on the buy-miss payout path")
+	}
+	if pp.ResultHash != entry.CiphertextHash {
+		t.Fatalf("scrip-put-pay result_hash = %q, want the public ciphertext_hash %q for a v2 entry", pp.ResultHash, entry.CiphertextHash)
+	}
+}
+
+// waitForCond3c3 polls cond until true or the deadline elapses, failing the test
+// with label on timeout.
+func waitForCond3c3(t *testing.T, d time.Duration, label string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timeout after %s waiting for: %s", d, label)
 }

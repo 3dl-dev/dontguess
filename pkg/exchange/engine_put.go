@@ -160,13 +160,26 @@ func (e *Engine) paySellerForBuyMiss(msg *Message, pending *InventoryEntry, offe
 	if _, _, err := e.opts.ScripStore.AddBudget(ctx, pending.SellerKey, scrip.BalanceKey, offeredPrice, ""); err != nil {
 		e.opts.log("engine: buy-miss put-accept: AddBudget for seller %s: %v", shortKey(pending.SellerKey), err)
 	}
+	// result_hash is audit metadata only — the scrip ledger fold (applyPutPay)
+	// reads Seller + Amount and IGNORES it. For a v2 confidential entry
+	// (WrappedCEKOperator != "") pending.ContentHash is sha256(plaintext), the
+	// operator-local dedup key; the scrip-put-pay (kind 3411) is a PUBLIC relay
+	// event, so carrying it here re-broadcasts the §4.4 A1/P1 guess-confirmation
+	// oracle. On the team tier every buy-miss fulfillment IS v2 (encryptedRequired
+	// drops plaintext puts), so this path would leak on every payout. Use the
+	// already-public CiphertextHash (sha256(ciphertext), random per entry — NOT an
+	// oracle, §4.4 A7) instead. Individual-tier entries keep the plaintext hash.
+	resultHash := pending.ContentHash
+	if pending.WrappedCEKOperator != "" {
+		resultHash = pending.CiphertextHash
+	}
 	// Emit scrip-put-pay so CampfireScripStore can replay the payment.
 	payPayload, marshalErr := e.marshal(scrip.PutPayPayload{
 		Seller:      pending.SellerKey,
 		Amount:      offeredPrice,
 		TokenCost:   tokenCost,
 		DiscountPct: 100 - BuyMissOfferRate,
-		ResultHash:  pending.ContentHash,
+		ResultHash:  resultHash,
 		PutMsg:      msg.ID,
 	})
 	if marshalErr == nil {

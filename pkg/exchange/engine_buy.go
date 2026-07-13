@@ -282,7 +282,7 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 		ContentType       string  `json:"content_type"`
 		Price             int64   `json:"price"`
 		Confidence        float64 `json:"confidence"`
-		Similarity        float64 `json:"similarity"`        // raw cosine similarity; 0 for fallback entries
+		Similarity        float64 `json:"similarity"` // raw cosine similarity; 0 for fallback entries
 		IsPartialMatch    bool    `json:"is_partial_match"`
 		SellerReputation  int     `json:"seller_reputation"`
 		TokenCostOriginal int64   `json:"token_cost_original"`
@@ -401,7 +401,7 @@ func (e *Engine) handleBuyMiss(msg *Message, task string, budget int64, syntheti
 		"offered_price_rate": BuyMissOfferRate,
 		"expires_at":         expiresAt.UTC().Format(time.RFC3339),
 		"buy_msg_id":         msg.ID,
-		"guide": fmt.Sprintf("No cached inference matched your task. A standing offer has been created: if you (or any agent) compute the result and PUT it to the exchange, the exchange will buy it at %d%% of token_cost. This offer expires at the time shown. Alternatively, try a broader task description, increase your budget, or relax freshness constraints.", BuyMissOfferRate),
+		"guide":              fmt.Sprintf("No cached inference matched your task. A standing offer has been created: if you (or any agent) compute the result and PUT it to the exchange, the exchange will buy it at %d%% of token_cost. This offer expires at the time shown. Alternatively, try a broader task description, increase your budget, or relax freshness constraints.", BuyMissOfferRate),
 	})
 	if err != nil {
 		return fmt.Errorf("encoding buy-miss payload: %w", err)
@@ -762,4 +762,3 @@ func (e *Engine) entryForDeliver(deliverMsgID string) *InventoryEntry {
 	}
 	return entry
 }
-
