@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/campfire-net/dontguess/pkg/matching"
 	"github.com/campfire-net/dontguess/pkg/scrip"
 )
 
@@ -271,6 +272,43 @@ const minHighReuseContextWords = 2
 // are excluded from the context count anyway, so this floor does not penalize them.
 const minContentTokenLen = 4
 
+// minHighReuseCoherence is the minimum cosine similarity, between the description's
+// content-bearing context nouns and the put's actual content, required to grant §4
+// high-reuse-artifact status (Gate 6, dontguess-5f5).
+//
+// WHY: Gates 2-5 are purely STRUCTURAL — they count content-bearing tokens
+// (isContentBearingToken) but cannot tell whether those tokens MEAN anything relative
+// to the content. A crafted description with exactly minHighReuseContextWords plausible
+// ≥4-char nouns plus the trigger phrase ("widget gadget test pattern go", "abcd efgh
+// test pattern go") clears every structural gate even though the padding nouns are
+// unrelated to the bytes actually sold — extracting the 85% accept price + 20% residual
+// that §4 reserves for genuine reusable artifacts.
+//
+// FIX: embed the description's content-bearing context nouns (the tokens Gate 5 counts,
+// i.e. the ones OUTSIDE the trigger cluster) and the put's content, and require their
+// cosine similarity to clear this floor. A genuine artifact names domain nouns that
+// actually appear in / relate to its content ("flock contention race detector" vs Go
+// code that mentions flock/contention/race). A keyword-stuff's padding nouns are
+// disconnected from the content and score ~0.
+//
+// Threshold selection (measured with the pure-Go TF-IDF embedder used here): genuine
+// §4 artifacts whose content contains the claimed nouns score ≥0.59; crafted stuffs
+// whose padding nouns are absent from content score exactly 0.0, EVEN when the attacker
+// stuffs the trigger words ("test pattern go") into the content — because the coherence
+// check embeds only the CONTEXT nouns, not the trigger cluster. 0.10 sits comfortably
+// between the two populations: well above the disconnected-noun floor (0.0), well below
+// the genuine floor (~0.59). Consistent with the class's conservative posture — false
+// negatives (genuine entries that miss the premium) are acceptable and settle at the
+// standard rate; false positives (ephemera earning the premium) undermine the incentive.
+const minHighReuseCoherence = 0.10
+
+// coherenceContentSampleBytes bounds how much content the coherence gate embeds. The
+// gate is called in the auto-accept and settle paths, so it must stay cheap. A genuine
+// artifact's claimed nouns appear throughout its content; sampling the leading bytes is
+// sufficient for a "not disconnected" check. For Blossom-offloaded entries entry.Content
+// is already only the inline preview slice, typically below this cap.
+const coherenceContentSampleBytes = 8192
+
 // highReuseStopwords are common English function words that never constitute the
 // descriptive context of a distilled artifact. They are excluded from the
 // content-bearing context count so padding with stopwords cannot satisfy the floor.
@@ -391,6 +429,31 @@ func tokenizeDescription(desc string) []string {
 // rate. False positives (ephemera classified as high-reuse) undermine the incentive
 // mechanism and seller trust in pricing fairness.
 func IsHighReuseArtifact(entry *InventoryEntry) bool {
+	matched, contextNouns := highReuseStructuralMatch(entry)
+	if !matched {
+		return false
+	}
+	// Gate 6 (semantic coherence, dontguess-5f5): the structural gates (2-5) count
+	// content-bearing tokens but cannot tell whether those tokens MEAN anything relative
+	// to the bytes actually sold. Require the description's content-bearing context nouns
+	// to be semantically coherent with the put's content. This rejects a crafted stuff
+	// whose padding nouns clear Gate 5's structural floor but are disconnected from the
+	// content ("widget gadget test pattern go" over unrelated bytes), while genuine
+	// artifacts — whose claimed nouns actually appear in / relate to their content — pass.
+	return descriptionContentCoherent(contextNouns, entry.Content)
+}
+
+// highReuseStructuralMatch runs the FIVE structural §4 gates and, when they all hold,
+// returns true plus the description's content-bearing context nouns — the tokens Gate 5
+// counts (content-bearing per isContentBearingToken, OUTSIDE the matched primary+co-signal
+// trigger cluster). Those nouns are the description's *claimed* domain terms; the coherence
+// gate (descriptionContentCoherent) checks they are not disconnected from the put's content.
+//
+// Returns (false, nil) if any structural gate fails. On a match it returns the context
+// nouns of the FIRST cluster that satisfies the content-bearing floor (the same cluster
+// the pre-5f5 code short-circuited to true on), so classification behavior for existing
+// callers is unchanged for content-less entries.
+func highReuseStructuralMatch(entry *InventoryEntry) (bool, []string) {
 	// Gate 1: content_type filter.
 	// High-reuse artifacts are code, analysis, or summary. Review, data, and other
 	// types carry session-specific content that rarely generalizes across projects.
@@ -398,7 +461,7 @@ func IsHighReuseArtifact(entry *InventoryEntry) bool {
 	case "code", "analysis", "summary":
 		// passes gate 1 — continue
 	default:
-		return false
+		return false, nil
 	}
 
 	tokens := tokenizeDescription(entry.Description)
@@ -406,7 +469,7 @@ func IsHighReuseArtifact(entry *InventoryEntry) bool {
 	// Gate 2: length floor. Keyword-stuffs are short by nature — they are the trigger
 	// words and nothing else. Genuine artifacts carry descriptive context.
 	if len(tokens) < minHighReuseWords {
-		return false
+		return false, nil
 	}
 
 	// Gates 3 & 4: primary keyword present AND a co-signal adjacent to it.
@@ -451,7 +514,7 @@ func IsHighReuseArtifact(entry *InventoryEntry) bool {
 				// trigger cluster and require at least minHighReuseContextWords. This
 				// rejects the filler-padding bypass (single chars, stopwords, 3-char
 				// stubs, punctuation-glue garbage) regardless of the specific pad.
-				context := 0
+				contextNouns := make([]string, 0, len(tokens))
 				for j, tok := range tokens {
 					if j >= pStart && j <= pEnd { // skip primary tokens
 						continue
@@ -460,16 +523,45 @@ func IsHighReuseArtifact(entry *InventoryEntry) bool {
 						continue
 					}
 					if isContentBearingToken(tok) {
-						context++
+						contextNouns = append(contextNouns, tok)
 					}
 				}
-				if context >= minHighReuseContextWords {
-					return true
+				if len(contextNouns) >= minHighReuseContextWords {
+					return true, contextNouns
 				}
 			}
 		}
 	}
-	return false
+	return false, nil
+}
+
+// descriptionContentCoherent reports whether the description's content-bearing context
+// nouns are semantically coherent with the put's content (Gate 6, dontguess-5f5).
+//
+// It embeds the context nouns and a leading sample of the content with the pure-Go TF-IDF
+// embedder (deterministic, no external process — safe in the auto-accept/settle hot paths)
+// and requires their cosine similarity to reach minHighReuseCoherence. Embedding ONLY the
+// context nouns (not the trigger cluster) is what defeats the trigger-stuffing bypass: an
+// attacker who repeats "test pattern go" in the content still scores ~0 because the check
+// never looks at the trigger words — only whether the CLAIMED domain nouns ("widget
+// gadget") relate to the content.
+//
+// Fail-open when there is nothing to compare: an entry with no content (e.g. the
+// content-less entries used in structural unit tests) or no context nouns is governed by
+// the structural gates alone. Production puts always carry content, so the gate is active
+// where the economic incentive is granted.
+func descriptionContentCoherent(contextNouns []string, content []byte) bool {
+	if len(contextNouns) == 0 || len(content) == 0 {
+		return true
+	}
+	sample := content
+	if len(sample) > coherenceContentSampleBytes {
+		sample = sample[:coherenceContentSampleBytes]
+	}
+	emb := matching.NewTFIDFEmbedder()
+	nounEmb := emb.Embed(strings.Join(contextNouns, " "))
+	contentEmb := emb.Embed(string(sample))
+	return emb.Similarity(nounEmb, contentEmb) >= minHighReuseCoherence
 }
 
 // tokensMatchAt reports whether the sub-slice of tokens beginning at index start
