@@ -922,6 +922,7 @@ func (e *Engine) runLocal(ctx context.Context) error {
 			}
 			e.sweepExpiredClaims()
 			e.sweepExpiredAuctions()
+			e.sweepStalePredictionAssigns()
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -1615,6 +1616,46 @@ func (e *Engine) sweepExpiredClaims() {
 		// the next subscribe loop iteration to pick it up.
 		e.state.Apply(expireMsg)
 		e.opts.log("engine: sweep: claim expired, task reopened claim=%s", shortKey(claimMsgID))
+	}
+}
+
+// sweepStalePredictionAssigns detects unclaimed AssignOpen standing
+// (brokered-match) assigns whose DeadlineAt has passed and emits an
+// operator-authored exchange:assign-expire message for each one, with the ASSIGN
+// id as the antecedent. State.Apply (applyAssignExpire, standing-deadline path)
+// transitions the record to the terminal AssignExpired state so it can no longer
+// be claimed.
+//
+// This is the off-fold enforcement of standing-assign deadlines that replaced the
+// removed wall-clock DeadlineAt guard in applyAssignClaim (event-sourced-pure
+// ruling 2026-07-08): the operator observes the deadline off-fold (wall clock is
+// fine here — this is the operator authoring an event, not the fold) and records
+// the closure as an operator-authored message so the fold transition is
+// deterministic on replay.
+//
+// Called on every poll tick (backstop). No-op when LocalStore is not configured.
+func (e *Engine) sweepStalePredictionAssigns() {
+	if e.opts.LocalStore == nil {
+		return
+	}
+	stale := e.state.StalePredictionAssignsTS()
+
+	for _, assignID := range stale {
+		payload, err := json.Marshal(map[string]string{
+			"assign_id":   assignID,
+			"detected_at": time.Now().UTC().Format(time.RFC3339),
+		})
+		if err != nil {
+			e.opts.log("engine: sweep stale: marshal assign-expire payload: %v", err)
+			continue
+		}
+		expireMsg, err := e.sendOperatorMessage(payload, []string{TagAssignExpire}, []string{assignID})
+		if err != nil {
+			e.opts.log("engine: sweep stale: emit assign-expire for assign=%s: %v", shortKey(assignID), err)
+			continue
+		}
+		e.state.Apply(expireMsg)
+		e.opts.log("engine: sweep stale: standing assign deadline passed, closed assign=%s", shortKey(assignID))
 	}
 }
 

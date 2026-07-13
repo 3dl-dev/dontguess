@@ -794,3 +794,13 @@ func (s *State) PendingAuctionCloseTS() []string {
 	defer s.mu.RUnlock()
 	return s.PendingAuctionClose()
 }
+
+// StalePredictionAssignsTS is the thread-safe wrapper around
+// StalePredictionAssigns. It acquires a read lock and returns the assign IDs of
+// AssignOpen standing (brokered-match) assigns whose DeadlineAt has passed.
+// Callers must NOT hold s.mu when calling this method.
+func (s *State) StalePredictionAssignsTS() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.StalePredictionAssigns()
+}
