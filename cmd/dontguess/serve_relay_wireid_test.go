@@ -165,6 +165,39 @@ func newWireIDStack(t *testing.T, ctx context.Context, ls *dgstore.Store, operat
 	return s
 }
 
+// pump drives the engine's fold+dispatch and put auto-accept SYNCHRONOUSLY, on
+// the caller's own (already-scheduled) goroutine — the same style fix as
+// dontguess-c12's Engine.PollLocalStoreForTest: it removes this harness's
+// dependence on the background poll ticker (10ms) and the separate auto-accept
+// ticker (15ms) actually getting OS-scheduled promptly to make forward
+// progress. Under CPU-hog scheduler pressure those two ticker-driven goroutines
+// can each stall independently, and — chained with the outbox's own 25ms
+// ticker and the reader goroutine's scheduling — the compounded delay can slip
+// a fixed 8s waitFor deadline even though every step WOULD have completed given
+// CPU (dontguess-2e9, reproduced 3/30 at exactly 8.02s under 20 CPU hogs on
+// nproc=16). pump replaces that wall-clock chain for the two hops that have a
+// synchronous seam (engine fold/dispatch, put auto-accept); a caller's waitFor
+// predicate that calls pump() on every poll iteration makes progress on ITS
+// OWN goroutine instead of waiting for a separate goroutine's ticker to fire.
+//
+// pump does NOT drive the Outbox's publish (Tick) synchronously: Tick is
+// documented single-goroutine-owned ("Run owns one" — pkg/relay/outbox.go), and
+// this harness's background outbox.Run(ctx, 25ms) goroutine (started by
+// attachRelayTransport) is still live, so a concurrent direct Tick() call here
+// would race it (a real hazard under -race, and a risk of double-publish). The
+// outbox's single 25ms-interval ticker is deliberately left as the one
+// remaining wall-clock hop a caller still waits on — it is a single hop with no
+// preceding chain, unlike the pre-fix compounded 4-stage chain, so it stays
+// comfortably inside the existing (unraised) 8s waitFor budget even under
+// scheduler pressure. Safe to call concurrently with the running background
+// poll/auto-accept goroutines: PollLocalStoreForTest's cursors are monotonic
+// and dispatch-exactly-once under localMu, and RunAutoAccept is opMu-guarded.
+func (s *wireIDStack) pump() {
+	_ = s.eng.PollLocalStoreForTest()
+	s.eng.RunAutoAccept(1_000_000, time.Now(), map[string]struct{}{})
+	_ = s.eng.PollLocalStoreForTest()
+}
+
 // mintBuyer credits the buyer enough scrip to cover any price+fee hold.
 func (s *wireIDStack) mintBuyer(t *testing.T, buyer identity.Signer) {
 	t.Helper()
@@ -184,6 +217,7 @@ func (s *wireIDStack) driveToMatch(t *testing.T, seller, buyer identity.Signer, 
 		localPutPayload("Go HTTP handler unit test generator", 8000))
 	s.conn.inject(putEv)
 	waitFor(t, 8*time.Second, "put folds + auto-accepts into inventory", func() bool {
+		s.pump()
 		return len(s.eng.State().Inventory()) == 1
 	})
 
@@ -193,6 +227,7 @@ func (s *wireIDStack) driveToMatch(t *testing.T, seller, buyer identity.Signer, 
 	s.conn.inject(buyEv)
 
 	waitFor(t, 8*time.Second, "operator match published OUT to the relay", func() bool {
+		s.pump()
 		return len(s.conn.receivedByKind(nostr.KindMatch)) >= 1
 	})
 	matchWire = s.conn.receivedByKind(nostr.KindMatch)[0].ID
@@ -446,6 +481,7 @@ func TestRelayAutoDeliverExactlyOnce(t *testing.T) {
 	st.conn.inject(mkAccept())
 	var deliverWire string
 	waitFor(t, 8*time.Second, "first buyer-accept auto-delivers exactly one deliver", func() bool {
+		st.pump()
 		recs, _ := st.ls.ReadAll()
 		if countLocalRecordsWithTags(recs, exchange.TagSettle, deliverPhaseTag) != 1 {
 			return false
@@ -477,6 +513,7 @@ func TestRelayAutoDeliverExactlyOnce(t *testing.T) {
 		[]string{deliverWire}, completePayload)
 	st.conn.inject(completeEv)
 	waitFor(t, 8*time.Second, "match settles after the pre-settlement re-accept", func() bool {
+		st.pump()
 		return st.eng.State().IsMatchSettled(matchStore)
 	})
 	recs, _ := st.ls.ReadAll()
