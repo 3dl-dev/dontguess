@@ -501,6 +501,7 @@ func (s *State) applySettlePreviewRequest(msg *Message) {
 // Silently ignored on any validation failure.
 func (s *State) applySettlePreview(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	if len(msg.Antecedents) == 0 {

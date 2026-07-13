@@ -29,9 +29,10 @@ type memSpendingStore struct {
 	balances     map[string]int64
 	reservations map[string]scrip.Reservation
 
-	addCalls  int
-	saveCalls int
-	lastSaved *scrip.Reservation
+	addCalls     int
+	saveCalls    int
+	consumeCalls int
+	lastSaved    *scrip.Reservation
 
 	failAdd     bool
 	failSave    bool
@@ -105,6 +106,7 @@ func (s *memSpendingStore) DeleteReservation(_ context.Context, id string) error
 func (s *memSpendingStore) ConsumeReservation(_ context.Context, id string) (scrip.Reservation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.consumeCalls++
 	if s.failConsume {
 		return scrip.Reservation{}, errInjected
 	}
@@ -127,6 +129,18 @@ func (s *memSpendingStore) addBudgetCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.addCalls
+}
+
+func (s *memSpendingStore) consumeReservationCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.consumeCalls
+}
+
+func (s *memSpendingStore) saveReservationCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveCalls
 }
 
 // hardeningEngine builds an engine wired to the given ScripStore with a test
@@ -180,8 +194,9 @@ func smallDisputeMsg(id, sender, deliverID, reservationID, buyerKey string) *Mes
 // unauthenticated-refund fix (dontguess-471 fix #1): a settle(small-content-
 // dispute) whose SIGNED sender is not the reservation owner is rejected even
 // when the attacker sets buyer_key to the victim's own key (which satisfied the
-// old payload-only check). The reservation is consumed then RESTORED (no scrip
-// moved), and no refund (AddBudget) is issued.
+// old payload-only check). Post dontguess-35c the reservation is never consumed
+// (ownership is peeked with a non-consuming read first), so it remains intact and
+// no refund (AddBudget) is issued.
 func TestSmallContentDispute_NonBuyer_RejectedNoScripLoss(t *testing.T) {
 	store := newMemSpendingStore()
 	eng := hardeningEngine(t, store)
@@ -213,6 +228,64 @@ func TestSmallContentDispute_NonBuyer_RejectedNoScripLoss(t *testing.T) {
 	}
 	if got := store.balances[buyerA]; got != 0 {
 		t.Errorf("victim balance must be untouched, got %d", got)
+	}
+}
+
+// TestSmallContentDispute_NonOwner_NeverTouchesReservation verifies the
+// dontguess-35c timing-griefing fix: a non-owner's forged small-content-dispute
+// must NEVER consume (and therefore never need to restore) the victim's live
+// reservation. The prior consume->restore shape deleted the reservation for the
+// duration of the ownership check, opening a window in which a concurrent legit
+// settle(complete) for the SAME reservation observed not-found and no-op'd,
+// leaving the seller unpaid until expiry. The fix peeks ownership with a
+// non-consuming GetReservation first, so an unauthorized dispute performs ZERO
+// ConsumeReservation and ZERO SaveReservation calls — the live reservation is
+// wholly untouched and a racing settle(complete) can still find it.
+func TestSmallContentDispute_NonOwner_NeverTouchesReservation(t *testing.T) {
+	store := newMemSpendingStore()
+	eng := hardeningEngine(t, store)
+
+	const (
+		deliverID = "deliver-nt"
+		matchID   = "match-nt"
+		entryID   = "entry-nt"
+		victim    = "buyer-victim-nt"
+		attacker  = "buyer-attacker-nt"
+		resID     = "res-nt"
+	)
+	seedSmallDisputeChain(eng, deliverID, matchID, entryID, victim, resID, 300, store)
+
+	// Attacker forges the dispute with buyer_key set to the victim's own key.
+	msg := smallDisputeMsg("dispute-nt", attacker, deliverID, resID, victim)
+
+	err := eng.handleSettleSmallContentDispute(msg)
+	if err == nil {
+		t.Fatal("expected error for non-owner small-content-dispute, got nil")
+	}
+	// The core assertion: the live reservation is never consumed, so it never has
+	// to be restored — a concurrent settle(complete) would still find it.
+	if got := store.consumeReservationCalls(); got != 0 {
+		t.Errorf("non-owner dispute must NEVER consume the victim's reservation; ConsumeReservation called %d times", got)
+	}
+	if got := store.saveReservationCalls(); got != 0 {
+		t.Errorf("non-owner dispute must NEVER restore (SaveReservation) the reservation — it was never consumed; called %d times", got)
+	}
+	if !store.hasReservation(resID) {
+		t.Error("victim reservation must remain intact after an unauthorized dispute")
+	}
+	if store.addBudgetCalls() != 0 {
+		t.Errorf("no refund may be issued for an unauthorized dispute; AddBudget called %d times", store.addBudgetCalls())
+	}
+
+	// Ground-source the race property: after the rejected dispute, the legit owner's
+	// settle(complete)-style consume of the SAME reservation still succeeds and
+	// returns the intact reservation (owner unpaid griefing window is closed).
+	res, cErr := store.ConsumeReservation(context.Background(), resID)
+	if cErr != nil {
+		t.Fatalf("owner's post-dispute consume must succeed (griefing window closed), got: %v", cErr)
+	}
+	if res.AgentKey != victim || res.Amount != 300 {
+		t.Errorf("owner's reservation must be intact: got agent=%s amount=%d, want %s/300", res.AgentKey, res.Amount, victim)
 	}
 }
 

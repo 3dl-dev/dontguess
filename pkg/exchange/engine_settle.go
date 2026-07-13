@@ -1173,14 +1173,6 @@ func (e *Engine) handleSettleSmallContentDispute(msg *Message) error {
 
 	ctx := e.engineCtx()
 
-	// Atomically retrieve and delete reservation (prevents TOCTOU double-spend).
-	res, err := e.opts.ScripStore.ConsumeReservation(ctx, payload.ReservationID)
-	if err != nil {
-		e.opts.log("engine: small-content-dispute: reservation %s not found: %v",
-			shortKey(payload.ReservationID), err)
-		return nil // reservation missing or already settled
-	}
-
 	// Security: the refund may be triggered ONLY by the reservation's own owner —
 	// the buyer whose scrip is held. reservation_id is PUBLIC (it is emitted in the
 	// scrip-buy-hold event on the relay log), so any allowlisted member can read a
@@ -1188,20 +1180,38 @@ func (e *Engine) handleSettleSmallContentDispute(msg *Message) error {
 	// identity to the attacker-controlled payload alone (the pre-dontguess-471
 	// check, res.AgentKey != payload.BuyerKey, which an attacker satisfies by
 	// setting buyer_key = the victim's own key) let such a member force-consume +
-	// refund a victim's live reservation: griefing + ledger corruption (the
-	// victim's in-flight purchase is destroyed without consent; a later
-	// settle(complete) finds no reservation). Bind to msg.Sender — the signed,
-	// unforgeable message author. Restore the reservation on mismatch so the
-	// legitimate buyer's hold is not lost.
+	// refund a victim's live reservation. Bind to msg.Sender — the signed,
+	// unforgeable message author.
+	//
+	// PEEK the owner with a non-consuming GetReservation BEFORE ConsumeReservation
+	// (dontguess-35c timing-griefing fix). The prior consume->restore shape
+	// (dontguess-471) still deleted the reservation for the duration of the
+	// ownership check: a concurrent legit settle(complete) for the SAME reservation
+	// observed not-found inside that window and no-op'd, leaving the seller unpaid
+	// until expiry. A non-owner's forged dispute must NEVER touch the live
+	// reservation at all — so we validate ownership against a read-only peek and
+	// only the confirmed owner proceeds to consume.
+	res, err := e.opts.ScripStore.GetReservation(ctx, payload.ReservationID)
+	if err != nil {
+		e.opts.log("engine: small-content-dispute: reservation %s not found: %v",
+			shortKey(payload.ReservationID), err)
+		return nil // reservation missing or already settled
+	}
 	if msg.Sender != res.AgentKey {
-		if restoreErr := e.opts.ScripStore.SaveReservation(ctx, res); restoreErr != nil {
-			e.opts.log("engine: small-content-dispute: CRITICAL: failed to restore reservation %s after sender/owner mismatch: %v",
-				shortKey(payload.ReservationID), restoreErr)
-			return fmt.Errorf("scrip: small-content-dispute reservation %s: sender is not reservation owner AND restore failed (reservation lost): %w",
-				shortKey(payload.ReservationID), restoreErr)
-		}
 		return fmt.Errorf("scrip: small-content-dispute reservation %s: sender %s is not reservation owner %s (unauthorized refund attempt)",
 			shortKey(payload.ReservationID), shortKey(msg.Sender), shortKey(res.AgentKey))
+	}
+
+	// Owner confirmed. Atomically consume (delete) the reservation — this closes the
+	// double-spend window against a concurrent settle(complete). If the reservation
+	// was consumed between the peek and here (the owner's own settle(complete) won
+	// the race), ConsumeReservation returns not-found and we no-op rather than
+	// double-refund.
+	res, err = e.opts.ScripStore.ConsumeReservation(ctx, payload.ReservationID)
+	if err != nil {
+		e.opts.log("engine: small-content-dispute: reservation %s consumed concurrently: %v",
+			shortKey(payload.ReservationID), err)
+		return nil
 	}
 
 	// Marshal the convention refund message BEFORE mutating scrip state.
