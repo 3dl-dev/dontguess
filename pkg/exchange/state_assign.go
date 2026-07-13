@@ -20,6 +20,7 @@ import (
 // in assignsByEntry and assignByID.
 func (s *State) applyAssign(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	// Idempotency guard: skip re-application on replay.
@@ -214,6 +215,7 @@ func (s *State) applyAssignClaim(msg *Message) {
 // finalization (docs/design/relay-transport.md §2.4a D3).
 func (s *State) applyAssignAuctionClose(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	if len(msg.Antecedents) == 0 {
@@ -348,6 +350,7 @@ func (s *State) applyAssignComplete(msg *Message) {
 // pendingAssignResults.
 func (s *State) applyAssignAccept(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	if len(msg.Antecedents) == 0 {
@@ -376,6 +379,7 @@ func (s *State) applyAssignAccept(msg *Message) {
 // back to AssignOpen so a different agent may claim the task.
 func (s *State) applyAssignReject(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	if len(msg.Antecedents) == 0 {
@@ -411,6 +415,7 @@ func (s *State) applyAssignReject(msg *Message) {
 // removed, and the record transitions back to AssignOpen.
 func (s *State) applyAssignExpire(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
+		s.recordFoldDenial(foldDenialNotOperator, msg)
 		return
 	}
 	if len(msg.Antecedents) == 0 {
