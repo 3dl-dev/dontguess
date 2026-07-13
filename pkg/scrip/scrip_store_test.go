@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/proto"
-	"github.com/campfire-net/dontguess/pkg/scrip"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/proto"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 const (

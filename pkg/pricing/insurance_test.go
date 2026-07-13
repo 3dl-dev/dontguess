@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/pricing"
+	"github.com/3dl-dev/dontguess/pkg/pricing"
 )
 
 // TestInsurancePremium_LowRisk verifies the low-risk branch (latencyRatio <= 0.5)

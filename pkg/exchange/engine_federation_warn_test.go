@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // TestEngine_FederationGuardWarning verifies that starting an engine with

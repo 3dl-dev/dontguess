@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/matching"
-	"github.com/campfire-net/dontguess/pkg/scrip"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // MatchingFeeRate is the fraction of the sale price charged as a matching fee.

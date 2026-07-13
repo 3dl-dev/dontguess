@@ -41,9 +41,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/identity"
-	"github.com/campfire-net/dontguess/pkg/nostr"
-	"github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/nostr"
+	"github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // localLog is the subset of *store.Store the Outbox tails. It is an interface so

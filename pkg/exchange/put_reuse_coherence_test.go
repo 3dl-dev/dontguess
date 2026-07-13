@@ -36,7 +36,7 @@ package exchange_test
 import (
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // unrelatedContent is prose that shares NO domain nouns with the crafted attack

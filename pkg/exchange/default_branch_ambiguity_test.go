@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // TestDefaultBranchRespectsOpAmbiguity is the dontguess-5be regression: the

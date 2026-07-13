@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // handlePut processes an incoming exchange:put message.

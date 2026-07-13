@@ -32,9 +32,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/nostr"
-	"github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/nostr"
+	"github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // recordAppender is the store surface the Intake needs: the single-fsync,

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // newLogCapture returns an EngineOptions Logger that writes formatted lines to buf.

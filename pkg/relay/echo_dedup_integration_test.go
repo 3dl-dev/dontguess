@@ -21,10 +21,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/identity"
-	"github.com/campfire-net/dontguess/pkg/nostr"
-	"github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/nostr"
+	"github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // identityToWireEvent copies a signed identity.Event into the wire nostr.Event a

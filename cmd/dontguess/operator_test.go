@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	store "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	store "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // ---- minimal in-package test harness ----

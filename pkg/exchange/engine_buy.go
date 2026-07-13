@@ -6,9 +6,9 @@ import (
 	"math"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/demand"
-	"github.com/campfire-net/dontguess/pkg/matching"
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/demand"
+	"github.com/3dl-dev/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // handleBuy responds to an exchange:buy request with an exchange:match message.

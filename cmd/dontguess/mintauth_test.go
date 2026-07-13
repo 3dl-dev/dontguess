@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/identity"
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // newMintTierEngine builds a team-tier engine (ScripStore != nil) whose operator

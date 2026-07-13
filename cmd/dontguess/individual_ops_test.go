@@ -43,8 +43,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // newIndividualTierEngine builds the exact pieces runServeLocal wires together

@@ -3,7 +3,7 @@ package exchange
 import (
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 )
 
 // AllEntryBehavioralSignals returns a snapshot map of per-entry behavioral signals

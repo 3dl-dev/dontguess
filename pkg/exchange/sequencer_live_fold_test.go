@@ -12,7 +12,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // driveLiveFold feeds msgs through the LIVE ingest path (IngestLive + Drain per

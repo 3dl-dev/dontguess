@@ -16,9 +16,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/store"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // TestSettleComplete_RedeliveryDoesNotDoubleEmitConsumeSignal verifies that

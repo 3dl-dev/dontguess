@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/campfire-net/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 )
 
 // mintAuthKind is the nostr event kind used for the OpMint IPC auth token. It is

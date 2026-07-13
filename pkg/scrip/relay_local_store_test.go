@@ -20,8 +20,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/scrip"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // newLocalStore opens a fresh dgstore.Store backed by a temp file. Each test

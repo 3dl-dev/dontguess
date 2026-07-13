@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/demand"
+	"github.com/3dl-dev/dontguess/pkg/demand"
 )
 
 // TestPrintDemandBacklog_RenderedOutput asserts the text-mode backlog renders

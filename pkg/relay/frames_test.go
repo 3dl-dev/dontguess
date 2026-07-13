@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 )
 
 // sampleEvent is a fully-populated (unsigned-shape) nostr event used to prove

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // admInjectPut writes a substantive, quality-gate-passing exchange:put from the

@@ -28,11 +28,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/identity"
-	"github.com/campfire-net/dontguess/pkg/nostr"
-	"github.com/campfire-net/dontguess/pkg/scrip"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/nostr"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 const wireIDBuyerMint = int64(1_000_000)

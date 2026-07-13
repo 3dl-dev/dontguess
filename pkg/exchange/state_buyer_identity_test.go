@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/store"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // setupMatchedOrder seeds inventory, places a buy order, runs the engine to

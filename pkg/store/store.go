@@ -29,7 +29,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/campfire-net/dontguess/pkg/proto"
+	"github.com/3dl-dev/dontguess/pkg/proto"
 )
 
 // ErrStoreClosed is returned by Append/BatchAppend when the Store has already

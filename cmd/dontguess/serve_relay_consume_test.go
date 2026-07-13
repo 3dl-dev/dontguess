@@ -32,10 +32,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/identity"
-	"github.com/campfire-net/dontguess/pkg/nostr"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/nostr"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // syncLogBuf is a goroutine-safe log sink: the Outbox publish loop runs on its own

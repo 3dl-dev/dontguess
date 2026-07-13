@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/store"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 )
 
 // TestWarmCompression_MatchTriggersAssign verifies that when the engine matches

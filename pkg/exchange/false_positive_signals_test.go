@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 )
 
 // seedDeliverChain builds the minimal message chain in State to trigger

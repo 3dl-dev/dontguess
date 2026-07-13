@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 )
 
 // TestAgentInit_IssuesSecp256k1Identity verifies:

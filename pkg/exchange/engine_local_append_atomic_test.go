@@ -63,7 +63,7 @@ import (
 	"testing"
 	"time"
 
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 func TestAppendLocalRecordAtomic_ConcurrentFoldNoDoubleApply(t *testing.T) {

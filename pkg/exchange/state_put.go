@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/campfire-net/dontguess/pkg/matching"
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // validCompressionTiers is the set of accepted compression_tier values.

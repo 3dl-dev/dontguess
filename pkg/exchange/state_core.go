@@ -3,7 +3,7 @@ package exchange
 import (
 	"encoding/json"
 
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // NewState creates an empty exchange state.

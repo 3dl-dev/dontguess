@@ -6,8 +6,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/nostr"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/nostr"
 )
 
 // --------------------------------------------------------------------------

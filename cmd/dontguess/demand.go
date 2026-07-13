@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/demand"
+	"github.com/3dl-dev/dontguess/pkg/demand"
 	"github.com/spf13/cobra"
 )
 

@@ -19,8 +19,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/campfire-net/dontguess/pkg/identity"
-	"github.com/campfire-net/dontguess/pkg/relayclient"
+	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/relayclient"
 	"github.com/spf13/cobra"
 )
 

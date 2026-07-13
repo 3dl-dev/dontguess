@@ -1,7 +1,7 @@
 // Package dontguess embeds convention declarations for the exchange.
 //
 // This file lives at the repo root so go:embed can reach docs/convention/.
-// Import as github.com/campfire-net/dontguess and use ConventionFS.
+// Import as github.com/3dl-dev/dontguess and use ConventionFS.
 package dontguess
 
 import "embed"

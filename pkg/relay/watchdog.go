@@ -51,8 +51,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/nostr"
-	"github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/nostr"
+	"github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // defaultAlarm is the standard loud-degradation sink used when a caller passes a

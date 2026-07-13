@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 func TestKeySet_ConcurrentAllowedAddRemove_RaceClean(t *testing.T) {

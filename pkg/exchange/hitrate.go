@@ -3,7 +3,7 @@ package exchange
 import (
 	"encoding/json"
 
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 )
 
 // HitRateOptions configures the quality-weighted hit-rate computation.

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 )
 
 // buildIndex creates a test index with the given entries (no IDF priming).

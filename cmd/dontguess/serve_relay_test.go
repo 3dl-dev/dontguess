@@ -30,12 +30,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/identity"
-	"github.com/campfire-net/dontguess/pkg/nostr"
-	"github.com/campfire-net/dontguess/pkg/proto"
-	"github.com/campfire-net/dontguess/pkg/relay"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/nostr"
+	"github.com/3dl-dev/dontguess/pkg/proto"
+	"github.com/3dl-dev/dontguess/pkg/relay"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // --- in-process fake relay ---------------------------------------------------

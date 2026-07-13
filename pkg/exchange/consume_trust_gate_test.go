@@ -12,7 +12,7 @@ package exchange_test
 import (
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // TestConsume_ForgedNonOperator_CountsNotOperator: an allowlisted (non-operator)

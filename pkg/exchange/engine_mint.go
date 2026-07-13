@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // scripApplier is the live-fold surface of a scrip store. LocalScripStore

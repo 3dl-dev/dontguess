@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/scrip"
-	"github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // TestMintScrip_CreditsBalanceAndSupplyLive proves the mint bootstrap credits

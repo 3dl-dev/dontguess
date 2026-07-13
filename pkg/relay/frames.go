@@ -19,7 +19,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/campfire-net/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 )
 
 // NIP-01 / NIP-42 frame labels — the first element of every wire array.

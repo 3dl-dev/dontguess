@@ -20,7 +20,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // TestTrustTransition_DeAllowlistDropsLevel: removing a member from the allowlist

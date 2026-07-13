@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // TestNextMonotonicTimestamp_StrictlyIncreasing proves repeated calls never

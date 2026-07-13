@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // newNotifyTestEngine builds a run-loop-free engine over a fresh LocalStore with

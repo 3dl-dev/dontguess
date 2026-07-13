@@ -37,7 +37,7 @@ import (
 	"testing"
 	"time"
 
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 func TestLocalDispatchCursorMonotonic_StaleSnapshotNoDoubleConsume(t *testing.T) {

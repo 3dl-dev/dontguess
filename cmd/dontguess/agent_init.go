@@ -35,7 +35,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/campfire-net/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 	"github.com/spf13/cobra"
 )
 

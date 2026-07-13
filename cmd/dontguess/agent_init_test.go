@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 )
 
 // scratchExchange returns an isolated scratch DG_HOME temp dir. It is retained

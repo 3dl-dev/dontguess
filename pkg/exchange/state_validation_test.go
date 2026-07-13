@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // buildPutPayload constructs an exchange:put JSON payload with explicit fields.

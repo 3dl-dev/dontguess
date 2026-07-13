@@ -43,7 +43,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // buildQGPutPayload constructs an exchange:put payload for quality-gate tests.

@@ -8,9 +8,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/proto"
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/proto"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // sampleSender / sampleID are realistic hex pubkey-shaped strings.

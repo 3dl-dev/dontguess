@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 )
 
 // ErrForgedOperatorEvent is the typed rejection returned when an ingested event

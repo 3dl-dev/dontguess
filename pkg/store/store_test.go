@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/store"
 )
 
 func TestStore_AppendReadAll_PreservesOrderAndFields(t *testing.T) {

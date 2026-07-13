@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/proto"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/proto"
 )
 
 // domainPrefix is the exchange domain tag prefix. The exchange package strips it

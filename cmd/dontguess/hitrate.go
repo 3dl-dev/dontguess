@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 	"github.com/spf13/cobra"
 )
 

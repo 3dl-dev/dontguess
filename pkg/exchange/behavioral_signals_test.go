@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 )
 
 // makeConsumeMessage builds a minimal exchange:consume Message for testing

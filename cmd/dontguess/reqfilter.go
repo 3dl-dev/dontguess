@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/nostr"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/nostr"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // ReqFilter is a NIP-01-shaped exchange query: kinds, tag filters, and a

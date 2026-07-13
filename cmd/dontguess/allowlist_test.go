@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 )
 
 // bootstrapAllowlistHome inits a scratch DG_HOME (so LoadConfig has a config

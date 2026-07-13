@@ -1,7 +1,7 @@
 package exchange
 
 import (
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 )
 
 // rebuildMatchIndex rebuilds the semantic match index from the current live inventory.

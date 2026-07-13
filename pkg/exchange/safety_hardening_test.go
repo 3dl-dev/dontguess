@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // TestShortKey_NeverPanicsOnShortInput verifies that shortKey handles strings

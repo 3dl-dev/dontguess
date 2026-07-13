@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // TestExchangeOp_CanonicalSourceOnly locks the canonical-source op-determination

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 )
 
 // Tag constants for exchange convention operations.

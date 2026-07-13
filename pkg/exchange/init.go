@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/identity"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/identity"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // operatorKeyFile is the on-disk name of the persisted secp256k1 (nostr)

@@ -1,8 +1,8 @@
 package exchange
 
 import (
-	"github.com/campfire-net/dontguess/pkg/proto"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/proto"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // Message is the dontguess-owned representation of an exchange message used

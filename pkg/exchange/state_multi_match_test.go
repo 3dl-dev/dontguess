@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // buildMatchPayload builds a match message payload with the given entry IDs as results.

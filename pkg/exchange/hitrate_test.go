@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/matching"
 )
 
 // buyMsg builds an exchange:buy fixture with the real payload shape observed

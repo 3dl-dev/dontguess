@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 	"github.com/spf13/cobra"
 )
 

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // errInjected is returned by memSpendingStore when a failure toggle is set.

@@ -22,8 +22,8 @@
 package nostr
 
 import (
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // Nostr event kinds for exchange operations (draft — see package doc).

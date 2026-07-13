@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/proto"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/proto"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // scrip operation tag constants. These match the convention spec in

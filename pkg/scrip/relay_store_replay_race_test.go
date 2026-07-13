@@ -31,7 +31,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/campfire-net/dontguess/pkg/scrip"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
 // TestLocalScripStore_ABAEtag_RejectedAfterResync is the deterministic,

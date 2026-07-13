@@ -17,12 +17,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/campfire-net/dontguess/pkg/exchange"
-	"github.com/campfire-net/dontguess/pkg/identity"
-	"github.com/campfire-net/dontguess/pkg/matching"
-	"github.com/campfire-net/dontguess/pkg/relay"
-	"github.com/campfire-net/dontguess/pkg/scrip"
-	dgstore "github.com/campfire-net/dontguess/pkg/store"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/relay"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
+	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 	"github.com/spf13/cobra"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
