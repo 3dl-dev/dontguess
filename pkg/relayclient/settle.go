@@ -120,6 +120,17 @@ type SettleOptions struct {
 	// MaxInlineBytes overrides MaxInlineContentBytes (0 => default). Exposed so a
 	// test can drive the oversize LOUD-guard without a 32 KiB fixture.
 	MaxInlineBytes int
+	// BlobStore is the buyer-side Blossom client (dontguess-250). When a §3.4 v2
+	// deliver references its ciphertext as a blob_pointer (oversize content offloaded
+	// to Blossom rather than inlined in the 3401 put), the buyer resolves the
+	// CIPHERTEXT bytes through this store. The fetch is UNAUTHENTICATED and that is
+	// correct (design §2): a Blossom blob is AEAD ciphertext addressed by
+	// sha256(ciphertext), so fetching yields only ciphertext (never the CEK) — there
+	// is nothing to authorize. Integrity is enforced by the buyer AFTER the fetch
+	// (sha256(ciphertext)==ciphertext_hash) plus the AEAD tag on decrypt. Nil is the
+	// default (no Blossom capability): a blob_pointer deliver then LOUD-fails rather
+	// than silently passing. The inline (put_event) path never touches it.
+	BlobStore exchange.BlobStore
 }
 
 // SettleResult is the discriminated outcome of the settle chain.
@@ -276,7 +287,7 @@ func Settle(ctx context.Context, conn *relay.Conn, signer identity.Signer, buy *
 		return res, nil
 
 	case exchange.SettlePhaseStrDeliver:
-		content, contentHash, err := verifyDeliver(ctx, conn, signer, ev, opts.MaxInlineBytes)
+		content, contentHash, err := verifyDeliver(ctx, conn, signer, ev, opts.MaxInlineBytes, opts.BlobStore)
 		if err != nil {
 			return nil, err
 		}
@@ -463,19 +474,25 @@ type deliverPayload struct {
 // on the deliver wire shape (§3.1(6)):
 //
 //   - §3.4 v2 confidential envelope (key_wrap present, team tier): unwrap the CEK
-//     (NIP-44 from the operator = the deliver author), REQ-fetch the already-public
-//     ciphertext referenced by ciphertext_ref.put_event, verify
-//     sha256(ciphertext)==ciphertext_hash BEFORE decrypting, then AEAD-decrypt
-//     (dontguess-5db). This is the paying buyer's end-to-end decrypt.
+//     (NIP-44 from the operator = the deliver author), resolve the already-public
+//     ciphertext referenced by ciphertext_ref — either REQ-fetched inline from
+//     ciphertext_ref.put_event (dontguess-5db) or fetched as a Blossom blob via the
+//     buyer-side blobStore from ciphertext_ref.blob_pointer (dontguess-250) — verify
+//     sha256(ciphertext)==ciphertext_hash BEFORE decrypting, then AEAD-decrypt. This
+//     is the paying buyer's end-to-end decrypt.
 //   - LEGACY individual-tier plaintext deliver (content field present): the
 //     unchanged decode+hash-verify path (backward compat — individual tier is
 //     already confidential and stays byte-for-byte unchanged, design §Scope).
 //
-// It FAILS LOUD (returns err, never settle(complete)) on: a Blossom-pointer/-ref
-// deliver (Blossom buyer fetch is DEFERRED — dontguess-640); oversize content; a
-// hash mismatch (possible tampering); a misrouted/undecryptable wrap; or a
-// missing/undecodable body.
-func verifyDeliver(ctx context.Context, conn deliverConn, signer identity.Signer, ev *identity.Event, maxInlineBytes int) (content []byte, contentHash string, err error) {
+// blobStore is the buyer-side Blossom client (nil = no Blossom capability). It is
+// consulted ONLY for a v2 blob_pointer deliver; the inline and legacy paths never
+// touch it.
+//
+// It FAILS LOUD (returns err, never settle(complete)) on: a blob_pointer deliver
+// with no blobStore configured; a Blossom fetch failure (blob not found / corrupt);
+// oversize content; a hash mismatch (possible tampering); a misrouted/undecryptable
+// wrap; or a missing/undecodable body.
+func verifyDeliver(ctx context.Context, conn deliverConn, signer identity.Signer, ev *identity.Event, maxInlineBytes int, blobStore exchange.BlobStore) (content []byte, contentHash string, err error) {
 	var payload deliverPayload
 	if uerr := json.Unmarshal([]byte(ev.Content), &payload); uerr != nil {
 		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: parse payload: %w", shortID(ev.ID), uerr)
@@ -485,7 +502,7 @@ func verifyDeliver(ctx context.Context, conn deliverConn, signer identity.Signer
 	// present key_wrap.wrapped (the operator always emits both together); the
 	// legacy plaintext deliver has neither.
 	if payload.V >= 2 || payload.KeyWrap.Wrapped != "" {
-		return decryptDeliverV2(ctx, conn, signer, ev, &payload, maxInlineBytes)
+		return decryptDeliverV2(ctx, conn, signer, ev, &payload, maxInlineBytes, blobStore)
 	}
 	return verifyLegacyDeliver(ev, &payload, maxInlineBytes)
 }
@@ -535,17 +552,24 @@ func verifyLegacyDeliver(ev *identity.Event, payload *deliverPayload, maxInlineB
 }
 
 // decryptDeliverV2 is the paying buyer's end-to-end decrypt of a §3.4 v2
-// confidential deliver (dontguess-5db). Steps (§3.1(6)):
+// confidential deliver (dontguess-5db inline path; dontguess-250 blob path).
+// Steps (§3.1(6)):
 //  1. Unwrap the CEK: cek = NIP-44.Open(buyerSigner, operatorPub, key_wrap.wrapped).
 //     The operator key IS the deliver's AUTHOR (ev.PubKey): the one secp256k1
 //     keypair both Schnorr-signs the deliver and performs the NIP-44 ECDH wrap
 //     (§4.5.5), and awaitSettle already verified ev's signature (and, when set,
 //     that the author is opts.OperatorPubKey) upstream — so ev.PubKey is the
 //     operator's wrap key, no separate operator-pubkey plumbing needed.
-//  2. Fetch the already-public ciphertext from ciphertext_ref.put_event (the 3401
-//     put event id), reading its enc.ciphertext.
+//  2. Resolve the already-public ciphertext from ciphertext_ref. Two shapes:
+//     put_event (inline in the 3401 put's enc.ciphertext — REQ-fetched over conn,
+//     dontguess-5db) XOR blob_pointer (oversize content offloaded to Blossom —
+//     fetched via blobStore, dontguess-250). The Blossom fetch is UNAUTHENTICATED
+//     and that is CORRECT (design §2): the blob is AEAD ciphertext addressed by
+//     sha256(ciphertext); fetching it yields only ciphertext, never the CEK, so
+//     there is nothing to authorize. Do NOT add fetch-auth.
 //  3. Verify sha256(ciphertext)==ciphertext_hash BEFORE decrypting (integrity;
-//     mismatch ⇒ abort, do NOT settle(complete)).
+//     mismatch/corruption/tamper ⇒ abort, do NOT settle(complete)). This runs
+//     identically for both the inline and blob sources.
 //  4. AEAD-decrypt: nonce = first NonceSize bytes of the ciphertext; plaintext =
 //     ChaCha20-Poly1305(cek).Open(nonce, rest).
 //
@@ -553,15 +577,9 @@ func verifyLegacyDeliver(ev *identity.Event, payload *deliverPayload, maxInlineB
 // key, so a captured deliver replayed toward a DIFFERENT buyer is simply
 // undecryptable by them (their key cannot unwrap). We also fail fast if
 // key_wrap.recipient is present and is not our key (a misrouted deliver).
-func decryptDeliverV2(ctx context.Context, conn deliverConn, signer identity.Signer, ev *identity.Event, p *deliverPayload, maxInlineBytes int) (content []byte, contentHash string, err error) {
+func decryptDeliverV2(ctx context.Context, conn deliverConn, signer identity.Signer, ev *identity.Event, p *deliverPayload, maxInlineBytes int, blobStore exchange.BlobStore) (content []byte, contentHash string, err error) {
 	if signer == nil {
 		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: v2 confidential deliver requires a buyer signer to unwrap the CEK, got nil", shortID(ev.ID))
-	}
-	// A blob-pointer ciphertext reference ⇒ Blossom buyer fetch, which is DEFERRED
-	// (dontguess-640, NOT implemented here). Loud-fail — never silently skip.
-	if p.CiphertextRef.BlobPointer != "" {
-		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: v2 deliver references a BLOSSOM blob (%s) but buyer-side Blossom fetch is DEFERRED (dontguess-640, NOT implemented) — cannot fetch/verify; track the deferred Blossom fetch item",
-			shortID(ev.ID), p.CiphertextRef.BlobPointer)
 	}
 	if p.KeyWrap.Alg != "" && p.KeyWrap.Alg != "nip44-v2-secp256k1" {
 		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: unsupported key_wrap.alg %q (want nip44-v2-secp256k1)", shortID(ev.ID), p.KeyWrap.Alg)
@@ -572,8 +590,13 @@ func decryptDeliverV2(ctx context.Context, conn deliverConn, signer identity.Sig
 	if p.CiphertextHash == "" {
 		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: v2 deliver supplied no ciphertext_hash — cannot verify integrity; refusing to settle(complete)", shortID(ev.ID))
 	}
-	if p.CiphertextRef.PutEvent == "" {
-		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: v2 deliver has no ciphertext_ref.put_event — nowhere to fetch the ciphertext from; refusing to settle(complete)", shortID(ev.ID))
+	// The ciphertext lives in exactly ONE of two places: a Blossom blob_pointer
+	// (oversize content, dontguess-250) or an inline put_event (dontguess-5db). At
+	// least one is required.
+	hasBlob := p.CiphertextRef.BlobPointer != ""
+	hasPut := p.CiphertextRef.PutEvent != ""
+	if !hasBlob && !hasPut {
+		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: v2 deliver has neither ciphertext_ref.put_event nor ciphertext_ref.blob_pointer — nowhere to fetch the ciphertext from; refusing to settle(complete)", shortID(ev.ID))
 	}
 	// Fail fast on a misrouted deliver: the wrap MUST be addressed to OUR key. (The
 	// cryptographic binding is the real defense — a forged recipient label still
@@ -594,10 +617,20 @@ func decryptDeliverV2(ctx context.Context, conn deliverConn, signer identity.Sig
 		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: unwrapped CEK is %d bytes, want %d", shortID(ev.ID), len(cek), chacha20poly1305.KeySize)
 	}
 
-	// (2) Fetch the already-public ciphertext from the referenced 3401 put event.
-	ciphertext, ferr := fetchPutCiphertext(ctx, conn, p.CiphertextRef.PutEvent, maxInlineBytes)
-	if ferr != nil {
-		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: %w", shortID(ev.ID), ferr)
+	// (2) Resolve the already-public ciphertext. A blob_pointer ref (oversize content
+	// offloaded to Blossom) is fetched via the buyer-side blobStore; otherwise the
+	// ciphertext is inline in the referenced 3401 put event, REQ-fetched over conn.
+	var ciphertext []byte
+	if hasBlob {
+		ciphertext, err = fetchBlobCiphertext(blobStore, p.CiphertextRef.BlobPointer, ev)
+	} else {
+		ciphertext, err = fetchPutCiphertext(ctx, conn, p.CiphertextRef.PutEvent, maxInlineBytes)
+		if err != nil {
+			err = fmt.Errorf("relayclient: settle: deliver %s: %w", shortID(ev.ID), err)
+		}
+	}
+	if err != nil {
+		return nil, "", err
 	}
 
 	// (3) Verify sha256(ciphertext)==ciphertext_hash BEFORE decrypting.
@@ -730,6 +763,37 @@ func extractPutCiphertext(pev *identity.Event, max int) ([]byte, error) {
 	}
 	if len(ciphertext) == 0 {
 		return nil, fmt.Errorf("referenced put %s has an empty ciphertext body", shortID(pev.ID))
+	}
+	return ciphertext, nil
+}
+
+// fetchBlobCiphertext resolves the already-public AEAD ciphertext blob by pointer
+// via the buyer-side Blossom client (dontguess-250). This is the counterpart to
+// fetchPutCiphertext for oversize content that was offloaded to Blossom rather than
+// inlined in the 3401 put.
+//
+// The fetch is deliberately UNAUTHENTICATED (design §2): a Blossom blob is AEAD
+// ciphertext addressed by sha256(ciphertext). Fetching it yields ONLY ciphertext —
+// the CEK is never in the blob (it travels wrapped in the deliver's key_wrap and is
+// unwrapped separately, step 1). So there is nothing to authorize: an attacker who
+// fetches the blob gets undecryptable bytes. Integrity is enforced by the CALLER
+// AFTER this returns (sha256(ciphertext)==ciphertext_hash) plus the AEAD tag on
+// decrypt — NOT by any fetch-time credential. Do NOT add fetch-auth here.
+//
+// A nil store (no Blossom capability configured) is a LOUD failure, never a silent
+// pass: the buyer cannot fetch the ciphertext, so it must not settle(complete).
+func fetchBlobCiphertext(store exchange.BlobStore, pointer string, ev *identity.Event) ([]byte, error) {
+	if store == nil {
+		return nil, fmt.Errorf("relayclient: settle: deliver %s: v2 deliver references a Blossom blob (%s) but no buyer BlobStore is configured — cannot fetch the ciphertext; set SettleOptions.BlobStore to a Blossom client. Refusing to settle(complete)",
+			shortID(ev.ID), pointer)
+	}
+	ciphertext, err := store.Fetch(pointer)
+	if err != nil {
+		return nil, fmt.Errorf("relayclient: settle: deliver %s: fetch Blossom blob %s: %w — cannot retrieve the ciphertext; refusing to settle(complete)",
+			shortID(ev.ID), pointer, err)
+	}
+	if len(ciphertext) == 0 {
+		return nil, fmt.Errorf("relayclient: settle: deliver %s: Blossom blob %s is empty — no ciphertext to decrypt", shortID(ev.ID), pointer)
 	}
 	return ciphertext, nil
 }

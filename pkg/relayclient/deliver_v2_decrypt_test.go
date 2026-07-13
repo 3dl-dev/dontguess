@@ -184,7 +184,7 @@ func TestVerifyDeliverV2_RoundTrip_DecryptsToOriginalPlaintext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	got, gotHash, err := verifyDeliver(ctx, conn, fx.buyer, deliverEv, 0)
+	got, gotHash, err := verifyDeliver(ctx, conn, fx.buyer, deliverEv, 0, nil)
 	if err != nil {
 		t.Fatalf("verifyDeliver (v2 happy path): %v", err)
 	}
@@ -211,7 +211,7 @@ func TestVerifyDeliverV2_CiphertextHashMismatch_FailsLoud(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	got, _, err := verifyDeliver(ctx, conn, fx.buyer, deliverEv, 0)
+	got, _, err := verifyDeliver(ctx, conn, fx.buyer, deliverEv, 0, nil)
 	if err == nil {
 		t.Fatalf("expected a LOUD ciphertext-hash mismatch error, got nil (plaintext=%q)", got)
 	}
@@ -238,7 +238,7 @@ func TestVerifyDeliverV2_MisroutedRecipient_FailsFast(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _, err = verifyDeliver(ctx, conn, attacker, deliverEv, 0)
+	_, _, err = verifyDeliver(ctx, conn, attacker, deliverEv, 0, nil)
 	if err == nil {
 		t.Fatalf("expected a misrouted-recipient error, got nil")
 	}
@@ -265,7 +265,7 @@ func TestVerifyDeliverV2_WrongKeyCannotUnwrap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	got, _, err := verifyDeliver(ctx, conn, attacker, deliverEv, 0)
+	got, _, err := verifyDeliver(ctx, conn, attacker, deliverEv, 0, nil)
 	if err == nil {
 		t.Fatalf("expected a CEK-unwrap failure for the wrong buyer key, got nil (plaintext=%q)", got)
 	}
@@ -279,7 +279,7 @@ func TestVerifyDeliverV2_WrongKeyCannotUnwrap(t *testing.T) {
 	// fine — proving the failure above is the key binding, not a malformed fixture.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
-	ok, _, err := verifyDeliver(ctx2, fx.fetchConn(t), fx.buyer, deliverEv, 0)
+	ok, _, err := verifyDeliver(ctx2, fx.fetchConn(t), fx.buyer, deliverEv, 0, nil)
 	if err != nil {
 		t.Fatalf("the real buyer must still decrypt the same deliver: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestVerifyDeliver_LegacyPlaintext_StillDecodes(t *testing.T) {
 	defer cancel()
 
 	// nil conn + nil signer: the legacy path must never touch them.
-	got, gotHash, err := verifyDeliver(ctx, nil, nil, ev, 0)
+	got, gotHash, err := verifyDeliver(ctx, nil, nil, ev, 0, nil)
 	if err != nil {
 		t.Fatalf("legacy deliver decode: %v", err)
 	}
