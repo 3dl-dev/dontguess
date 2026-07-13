@@ -1,34 +1,30 @@
 #!/bin/sh
-# test/reliability/run.sh — entry point for reliability test suite
+# test/reliability/run.sh — entry point for the wrapper reliability gate (nostr-first).
 #
-# Targets:
-#   all         — run all reliability tests (default)
-#   regression  — wrapper regression tests (wrapper_test.sh)
-#   parallel    — parallel buy harness, 50 concurrent, >=94% reach gate (wrapper_parallel.sh)
-
+# The cf-era shell harnesses (wrapper_test.sh, wrapper_parallel.sh,
+# e2e_full_pipeline.sh, operator_accept_put.sh, attempt_log_test.sh) were retired
+# with the nostr-first cutover (dontguess-ed2 §6 item 9): they required the deleted
+# `cf` binary and a live hosted campfire at ~/.cf to verify "reached the exchange".
+# Their wrapper-reliability coverage now lives in gated Go tests that drive the REAL
+# shipped wrapper (extracted from site/install.sh) against a stub operator:
+#
+#   TestInstallE2E_*                 (test/install_e2e_test.go)
+#     auto-start gating (H6, individual vs team tier), operator dispatch (no cf),
+#     individual-tier put/buy reachability end-to-end, attempt-log JSONL.
+#   TestInstall_Flock*               (test/install_flock_injection_test.go)
+#     flock single-operator auto-start, PID-file write, shell-injection hardening.
+#   TestInstaller_NoCfDownload / TestWrapper_*   (test/install_nostr_wrapper_test.go)
+#     no cf download, no cf dispatch, serve auto-start byte-gated to individual tier.
+#
+# These are part of `go test -race ./...` (the CI gate), so this entry point just
+# runs them directly under the race detector, cache-busting with -count=1.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET="${1:-all}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-case "$TARGET" in
-  regression)
-    echo "=== Running wrapper regression tests ==="
-    sh "${SCRIPT_DIR}/wrapper_test.sh"
-    ;;
-  parallel)
-    echo "=== Running parallel buy harness ==="
-    bash "${SCRIPT_DIR}/wrapper_parallel.sh"
-    ;;
-  all)
-    echo "=== Running all reliability tests ==="
-    sh "${SCRIPT_DIR}/wrapper_test.sh"
-    bash "${SCRIPT_DIR}/wrapper_parallel.sh"
-    ;;
-  *)
-    echo "Usage: $0 [all|regression|parallel]"
-    exit 1
-    ;;
-esac
+echo "=== Running wrapper reliability tests (nostr-first, Go) ==="
+cd "${REPO_ROOT}"
+go test -race -count=1 -run 'TestInstall' ./test/
 
-echo "=== All requested targets passed ==="
+echo "=== All reliability tests passed ==="
