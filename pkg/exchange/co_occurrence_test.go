@@ -335,8 +335,13 @@ func TestStalePredictionAssigns(t *testing.T) {
 	}
 }
 
-// TestDeadlineAt_ClaimRejected verifies that an assign-claim is rejected when
-// the assign's DeadlineAt has passed.
+// TestDeadlineAt_ClaimRejected verifies that a claim on a standing assign whose
+// DeadlineAt has passed is rejected. Event-sourced-pure (ruling 2026-07-08): the
+// fold no longer rejects the claim by comparing DeadlineAt against a wall clock.
+// Instead the operator sweep observes the passed deadline off-fold and emits an
+// assign-expire (antecedent = assign ID) that closes the record to the terminal
+// AssignExpired state; the subsequent claim is then rejected because the record
+// is no longer AssignOpen — deterministically on every replay.
 func TestDeadlineAt_ClaimRejected(t *testing.T) {
 	t.Parallel()
 
@@ -353,17 +358,41 @@ func TestDeadlineAt_ClaimRejected(t *testing.T) {
 	assignMsg := Message{ID: "assign-deadline", Sender: "op-key", Tags: []string{TagAssign}, Payload: payload}
 	s.Apply(&assignMsg)
 
-	// Attempt to claim the expired assign.
-	claimMsg := makeAssignClaimMsg("claim-1", "worker-key", "assign-deadline")
-	s.Apply(&claimMsg)
+	// Sanity: the sweep must see this as a stale standing assign to close.
+	stale := s.StalePredictionAssigns()
+	if len(stale) != 1 || stale[0] != "assign-deadline" {
+		t.Fatalf("StalePredictionAssigns = %v, want [assign-deadline]", stale)
+	}
 
-	// The assign should still be open (claim rejected).
+	// Operator emits assign-expire (antecedent = assign ID) to close the stale
+	// standing offer. This is the deterministic, operator-authored replacement for
+	// the removed wall-clock DeadlineAt guard.
+	expireMsg := Message{
+		ID:          "expire-deadline",
+		Sender:      "op-key",
+		Tags:        []string{TagAssignExpire},
+		Antecedents: []string{"assign-deadline"},
+		Payload:     []byte(`{}`),
+	}
+	s.Apply(&expireMsg)
+
 	rec := s.assignByID["assign-deadline"]
 	if rec == nil {
 		t.Fatal("assign record not found")
 	}
-	if rec.Status != AssignOpen {
-		t.Errorf("status = %v after expired claim, want AssignOpen", rec.Status)
+	if rec.Status != AssignExpired {
+		t.Fatalf("status = %v after operator expire, want AssignExpired", rec.Status)
+	}
+
+	// Attempt to claim the expired assign — must be rejected (record not open).
+	claimMsg := makeAssignClaimMsg("claim-1", "worker-key", "assign-deadline")
+	s.Apply(&claimMsg)
+
+	if rec.Status != AssignExpired {
+		t.Errorf("status = %v after claim on expired assign, want AssignExpired (claim rejected)", rec.Status)
+	}
+	if _, held := s.claimedAssigns["worker-key"]; held {
+		t.Error("worker should not hold a claim on an expired standing assign")
 	}
 }
 

@@ -447,6 +447,18 @@ type DegradationMetrics struct {
 	DroppedUnlisted      atomic.Int64
 	DroppedLowReputation atomic.Int64
 
+	// DroppedDedupPoison counts SEAM-A trust-gate rejects (dontguess-327) that
+	// purged a zero-trust-registered content hash out of contentHashIndex. applyPut
+	// registers EVERY put's content hash during the fold with no trust filter; a
+	// non-allowlisted / below-floor sender's rejected put would otherwise leave that
+	// hash squatting the index, permanently blocking a later ALLOWLISTED seller's
+	// byte-identical put (the exchange's designed high-reuse happy path) via a silent
+	// bare return in applyPut. Purging the hash on the trust reject closes that
+	// griefing lever; this counter makes the purge — previously an invisible
+	// squat-and-block — observable. Incremented once per SEAM-A trust reject,
+	// alongside DroppedUnlisted / DroppedLowReputation.
+	DroppedDedupPoison atomic.Int64
+
 	// DroppedUnderfundedBuy counts anonymous buys dropped by the demand-signal
 	// bound (design §8-D1, dontguess-3879): a buyer holding less than
 	// EngineOptions.MinBuyBalance scrip had its buy dropped in handleBuy BEFORE
@@ -498,6 +510,7 @@ type DegradationCounts struct {
 	TrustDenialOther          int64 `json:"trust_denial_other"`
 	DroppedUnlisted           int64 `json:"dropped_unlisted"`
 	DroppedLowReputation      int64 `json:"dropped_low_reputation"`
+	DroppedDedupPoison        int64 `json:"dropped_dedup_poison"`
 	DroppedUnderfundedBuy     int64 `json:"dropped_underfunded_buy"`
 	FoldDenialNotOperator     int64 `json:"fold_denial_not_operator"`
 	FoldDenialBuyerIdentity   int64 `json:"fold_denial_buyer_identity"`
@@ -713,6 +726,7 @@ func (e *Engine) DegradationSnapshot() DegradationCounts {
 		TrustDenialOther:          e.degradation.TrustDenialOther.Load(),
 		DroppedUnlisted:           e.degradation.DroppedUnlisted.Load(),
 		DroppedLowReputation:      e.degradation.DroppedLowReputation.Load(),
+		DroppedDedupPoison:        e.degradation.DroppedDedupPoison.Load(),
 		DroppedUnderfundedBuy:     e.degradation.DroppedUnderfundedBuy.Load(),
 		FoldDenialNotOperator:     e.degradation.FoldDenialNotOperator.Load(),
 		FoldDenialBuyerIdentity:   e.degradation.FoldDenialBuyerIdentity.Load(),
@@ -922,6 +936,7 @@ func (e *Engine) runLocal(ctx context.Context) error {
 			}
 			e.sweepExpiredClaims()
 			e.sweepExpiredAuctions()
+			e.sweepStalePredictionAssigns()
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -1615,6 +1630,46 @@ func (e *Engine) sweepExpiredClaims() {
 		// the next subscribe loop iteration to pick it up.
 		e.state.Apply(expireMsg)
 		e.opts.log("engine: sweep: claim expired, task reopened claim=%s", shortKey(claimMsgID))
+	}
+}
+
+// sweepStalePredictionAssigns detects unclaimed AssignOpen standing
+// (brokered-match) assigns whose DeadlineAt has passed and emits an
+// operator-authored exchange:assign-expire message for each one, with the ASSIGN
+// id as the antecedent. State.Apply (applyAssignExpire, standing-deadline path)
+// transitions the record to the terminal AssignExpired state so it can no longer
+// be claimed.
+//
+// This is the off-fold enforcement of standing-assign deadlines that replaced the
+// removed wall-clock DeadlineAt guard in applyAssignClaim (event-sourced-pure
+// ruling 2026-07-08): the operator observes the deadline off-fold (wall clock is
+// fine here — this is the operator authoring an event, not the fold) and records
+// the closure as an operator-authored message so the fold transition is
+// deterministic on replay.
+//
+// Called on every poll tick (backstop). No-op when LocalStore is not configured.
+func (e *Engine) sweepStalePredictionAssigns() {
+	if e.opts.LocalStore == nil {
+		return
+	}
+	stale := e.state.StalePredictionAssignsTS()
+
+	for _, assignID := range stale {
+		payload, err := json.Marshal(map[string]string{
+			"assign_id":   assignID,
+			"detected_at": time.Now().UTC().Format(time.RFC3339),
+		})
+		if err != nil {
+			e.opts.log("engine: sweep stale: marshal assign-expire payload: %v", err)
+			continue
+		}
+		expireMsg, err := e.sendOperatorMessage(payload, []string{TagAssignExpire}, []string{assignID})
+		if err != nil {
+			e.opts.log("engine: sweep stale: emit assign-expire for assign=%s: %v", shortKey(assignID), err)
+			continue
+		}
+		e.state.Apply(expireMsg)
+		e.opts.log("engine: sweep stale: standing assign deadline passed, closed assign=%s", shortKey(assignID))
 	}
 }
 

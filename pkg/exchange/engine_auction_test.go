@@ -157,6 +157,71 @@ func TestEngine_AuctionSweep_FullPath(t *testing.T) {
 	}
 }
 
+// TestEngine_StalePredictionSweep_FullPath drives the off-fold enforcement of
+// standing-assign deadlines through the running engine. It is the engine-level
+// counterpart to the fold-only TestDeadlineAt_ClaimRejected and proves the
+// event-sourced-pure replacement (ruling 2026-07-08) for the removed wall-clock
+// DeadlineAt guard in applyAssignClaim:
+//
+//  1. Operator posts a brokered-match standing assign whose deadline_at is in the
+//     past (already expired).
+//  2. The engine sweep (sweepStalePredictionAssigns) detects it via
+//     StalePredictionAssigns and emits an operator-authored assign-expire whose
+//     antecedent is the ASSIGN id.
+//  3. State.Apply (applyAssignExpire, standing-deadline path) transitions the
+//     record to the terminal AssignExpired state, so it is no longer claimable.
+//
+// Uses the real engine event loop (startEngine), so
+// sweepStalePredictionAssigns → sendOperatorMessage → state.Apply is fully
+// exercised — no direct state mutation.
+func TestEngine_StalePredictionSweep_FullPath(t *testing.T) {
+	t.Parallel()
+	h := newTestHarness(t)
+	eng := h.newEngineWithOpts(func(o *exchange.EngineOptions) {
+		o.PollInterval = 50 * time.Millisecond
+	})
+
+	// Replay existing store messages (operator membership, etc.) into state.
+	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
+
+	// Operator posts a standing brokered-match assign already past its deadline.
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	assignPayload, _ := json.Marshal(map[string]any{
+		"entry_id":    "stale-entry",
+		"task_type":   "brokered-match",
+		"reward":      int64(100),
+		"deadline_at": past,
+	})
+	assignMsg := h.sendMessage(h.operator, assignPayload, []string{exchange.TagAssign}, nil)
+
+	// Start the engine; the backstop sweep fires every 50ms.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	h.startEngine(eng, ctx, cancel)
+
+	// The sweep must emit an operator-authored assign-expire for the stale assign.
+	expireMsgs := auctionPollForTag(t, h, exchange.TagAssignExpire, 1, 4*time.Second)
+	cancel()
+
+	if len(expireMsgs) == 0 {
+		t.Fatal("expected assign-expire message from stale-prediction sweep, got none")
+	}
+	expireMsg := expireMsgs[len(expireMsgs)-1]
+	if expireMsg.Sender != h.operator.PublicKeyHex() {
+		t.Errorf("assign-expire sender = %q, want operator %q", expireMsg.Sender, h.operator.PublicKeyHex())
+	}
+	if len(expireMsg.Antecedents) == 0 || expireMsg.Antecedents[0] != assignMsg.ID {
+		t.Errorf("assign-expire antecedents = %v, want [%q] (assign id, standing-deadline path)",
+			expireMsg.Antecedents, assignMsg.ID)
+	}
+
+	// The record must reach the terminal AssignExpired state.
+	rec := waitForAssignStatus(t, eng, assignMsg.ID, exchange.AssignExpired, 4*time.Second)
+	if rec.Status != exchange.AssignExpired {
+		t.Fatalf("assign status = %v, want AssignExpired", rec.Status)
+	}
+}
+
 // TestEngine_AuctionVickreyPrice_PaymentCorrectness verifies that when a Vickrey
 // auction closes with two bidders, the winner (lowest bidder) is paid the
 // second-lowest bid as the clearing price — not their own bid and not base_reward.

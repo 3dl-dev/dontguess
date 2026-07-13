@@ -31,7 +31,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // extractWrapperFromInstaller reads site/install.sh, finds the
@@ -273,4 +275,111 @@ func TestInstall_FlockBenignStillWorks(t *testing.T) {
 	}
 
 	t.Logf("Benign DG_HOME path works: operator started with pinned CF_HOME and PID written")
+}
+
+// TestInstall_HealthProbeDeadlineHonored proves the DONTGUESS_HEALTH_PROBE_DEADLINE
+// env knob actually controls the wrapper's operator-wait deadline, rather than
+// being dead code with a hardcoded timeout.
+//
+// It exercises the knob DETERMINISTICALLY by holding the wrapper's start-lock
+// (${DG_HOME}/dontguess.start.lock) for the whole invocation. That forces the
+// wrapper's `flock -n "$LOCK"` to fail on every run, so it takes the lost-flock
+// probe branch (site/install.sh ~line 321), whose loop polls for a PID that can
+// never appear (nobody can start the operator while we hold the lock) for exactly
+// DONTGUESS_HEALTH_PROBE_DEADLINE seconds. The wrapper's wall-clock runtime is
+// therefore the probe deadline, and it tracks the knob.
+//
+// Why not drive the post-start readiness loop (~line 347) directly: that path is
+// gated on `_i_started_operator -eq 1`, which flips based on whether the flock
+// body found a pre-existing operator PID — a non-deterministic branch. An earlier
+// alive-stub version of this test relied on that branch and passed locally but
+// FLAKED ON CI (the wrapper took the _i_started_operator=0 branch, skipped the
+// readiness loop entirely, exec'd the buy stub and "succeeded"). Holding the lock
+// removes that non-determinism: the lost-flock probe path is taken on every run,
+// in every environment. Both wait loops read the same ${DONTGUESS_HEALTH_PROBE_DEADLINE:-N}
+// knob, so proving it at the probe site proves the knob is wired.
+func TestInstall_HealthProbeDeadlineHonored(t *testing.T) {
+	t.Parallel()
+
+	run := func(t *testing.T, deadlineSecs string) time.Duration {
+		t.Helper()
+		testDir := t.TempDir()
+		binDir := filepath.Join(testDir, "bin")
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			t.Fatalf("mkdir bin: %v", err)
+		}
+
+		// Instant-exit operator stub. Because we hold the start-lock, the operator is
+		// never actually started, so this stub is only ever invoked for the final buy
+		// dispatch, where it must return promptly (no sleep) — the measured runtime is
+		// then the probe deadline alone. If the lock-hold ever failed, the wrapper would
+		// win the flock, start this stub, watch it exit, hit the dead-PID break and
+		// return in ~0.2s, which makes the discrimination assertion below fail LOUDLY
+		// rather than hang for a live stub's lifetime.
+		opStub := "#!/bin/sh\nexit 0\n"
+		if err := writeExecFile(t, filepath.Join(binDir, "dontguess-operator"), []byte(opStub)); err != nil {
+			t.Fatalf("writing operator stub: %v", err)
+		}
+
+		wrapperSrc := extractWrapperFromInstaller(t)
+		wrapperPath := filepath.Join(binDir, "dontguess")
+		if err := writeExecFile(t, wrapperPath, []byte(wrapperSrc)); err != nil {
+			t.Fatalf("writing extracted wrapper: %v", err)
+		}
+
+		dgHome := filepath.Join(testDir, "dg_home")
+		makeDGHome(t, dgHome)
+		dgOp := filepath.Join(binDir, "dontguess-operator")
+
+		// Hold the wrapper's start-lock so its `flock -n` cannot win. flock(2) (what
+		// syscall.Flock takes) is the same advisory lock util-linux `flock` uses, so a
+		// held LOCK_EX here deterministically blocks the wrapper's LOCK_NB acquisition.
+		lockPath := filepath.Join(dgHome, "dontguess.start.lock")
+		lockF, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			t.Fatalf("open start-lock: %v", err)
+		}
+		defer lockF.Close()
+		if err := syscall.Flock(int(lockF.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Fatalf("acquire start-lock: %v", err)
+		}
+		defer func() { _ = syscall.Flock(int(lockF.Fd()), syscall.LOCK_UN) }()
+
+		cmd := exec.Command(wrapperPath, "buy", "--task", "deadline probe", "--budget", "100")
+		cmd.Env = []string{
+			"HOME=" + testDir,
+			"PATH=" + binDir + ":" + os.Getenv("PATH"),
+			"DG_HOME=" + dgHome,
+			"DG_OP=" + dgOp,
+			"DG_SYNTHETIC=0",
+			"DONTGUESS_HEALTH_PROBE_DEADLINE=" + deadlineSecs,
+		}
+		var buf bytes.Buffer
+		cmd.Stdout = &buf
+		cmd.Stderr = &buf
+
+		start := time.Now()
+		_ = cmd.Run() // exit code is irrelevant; the knob's effect is the time spent in the probe loop
+		elapsed := time.Since(start)
+		t.Logf("deadline=%s elapsed=%s output:\n%s", deadlineSecs, elapsed, buf.String())
+		return elapsed
+	}
+
+	elapsed1 := run(t, "1")
+	elapsed5 := run(t, "5")
+
+	// Mutation-proof lower bound: with the knob honored, deadline=1 spends ~1s in the
+	// probe loop. If the knob were dead code (hardcoded 5s default), this would be ~5s.
+	if elapsed1 >= 3*time.Second {
+		t.Fatalf("DONTGUESS_HEALTH_PROBE_DEADLINE=1 took %s, expected ~1s (well under 3s) — the deadline knob is not being honored (dead code)", elapsed1)
+	}
+	// deadline=5 must actually spend ~5s in the probe loop — proves the knob value is
+	// read, not a fixed small timeout the knob happens not to affect.
+	if elapsed5 < 4*time.Second {
+		t.Fatalf("DONTGUESS_HEALTH_PROBE_DEADLINE=5 took %s, expected ~5s — the knob does not control the probe deadline", elapsed5)
+	}
+	// Discriminating power: the runtime must track the knob across a wide gap.
+	if elapsed5-elapsed1 < 3*time.Second {
+		t.Fatalf("expected deadline=5 (%s) to exceed deadline=1 (%s) by >=3s — wall-clock runtime must track the knob", elapsed5, elapsed1)
+	}
 }
