@@ -278,7 +278,7 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 		PutMsgID          string  `json:"put_msg_id"`
 		SellerKey         string  `json:"seller_key"`
 		Description       string  `json:"description"`
-		ContentHash       string  `json:"content_hash"`
+		ContentHash       string  `json:"content_hash,omitempty"`
 		ContentType       string  `json:"content_type"`
 		Price             int64   `json:"price"`
 		Confidence        float64 `json:"confidence"`
@@ -294,12 +294,27 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 		entry := rc.entry
 		ageHours := int(time.Since(time.Unix(0, entry.PutTimestamp)).Hours())
 		rep := e.state.SellerReputation(entry.SellerKey)
+
+		// content_hash is the operator-LOCAL sha256(plaintext) dedup key. For a v2
+		// confidential entry (WrappedCEKOperator != "") it is an unsalted
+		// plaintext hash, so publishing it on the public exchange:match event
+		// converts it into a guess-confirmation + cross-entry-correlation oracle
+		// (content-confidentiality-envelope-541 §4.4, A1/P1: RESOLVED means it must
+		// NOT be on any public wire). It buys the buyer nothing pre-purchase —
+		// matching ranks on Description, integrity is verified against
+		// ciphertext_hash in the deliver envelope (§4.4 A7) — so OMIT it for v2.
+		// Individual-tier / legacy plaintext entries (WrappedCEKOperator == "") are
+		// local/confidential or already-public and keep content_hash unchanged.
+		contentHash := entry.ContentHash
+		if entry.WrappedCEKOperator != "" {
+			contentHash = ""
+		}
 		matchResults[i] = MatchResult{
 			EntryID:           entry.EntryID,
 			PutMsgID:          entry.PutMsgID,
 			SellerKey:         entry.SellerKey,
 			Description:       entry.Description,
-			ContentHash:       entry.ContentHash,
+			ContentHash:       contentHash,
 			ContentType:       entry.ContentType,
 			Price:             e.computePrice(entry),
 			Confidence:        rc.confidence,
@@ -573,6 +588,25 @@ func (e *Engine) sendBrokeredMatchAssign(buyMsg *Message, task string, maxResult
 	return nil
 }
 
+// skipCompressionForV2 documents why every compression-assign path bails out
+// when entry.WrappedCEKOperator != "" (a v2 confidential entry):
+//
+//  1. LEAK: the compression work order embeds entry.ContentHash =
+//     sha256(plaintext) (compressionProtocol, "Content hash:"), and the assign is
+//     a PUBLIC exchange:assign message. For a v2 entry that re-broadcasts an
+//     unsalted plaintext hash onto the public wire — the exact
+//     guess-confirmation + correlation oracle §4.4 (A1/P1) removed. RESOLVED
+//     means it must never reappear on any public wire.
+//  2. NONSENSE: a compressor cannot meaningfully compress AEAD ciphertext (it is
+//     high-entropy and semantically opaque), and the operator never re-publishes
+//     the plaintext. Confidential entries therefore get NO compression derivative
+//     — there is no plaintext for a compressor to act on. Using ciphertext_hash
+//     instead would close the leak but still order impossible work, so the
+//     minimal correct change is to not post the assign at all.
+//
+// Individual-tier / legacy plaintext entries (WrappedCEKOperator == "") are
+// unaffected — they keep the full compression flow byte-for-byte.
+
 // sendCompressionAssign sends an exchange:assign message for a compress task
 // directed exclusively at the original seller of the given entry. The bounty
 // is 50% of the entry's token_cost. The description includes the entry ID,
@@ -581,6 +615,9 @@ func (e *Engine) sendBrokeredMatchAssign(buyMsg *Message, task string, maxResult
 // This is sent immediately after a put is accepted (hot path). Failure is
 // non-fatal to the caller — the error is logged and the accept proceeds.
 func (e *Engine) sendCompressionAssign(entry *InventoryEntry) error {
+	if entry.WrappedCEKOperator != "" {
+		return nil // v2 confidential entry: see skipCompressionForV2.
+	}
 	bounty := entry.TokenCost * HotCompressionBountyPct / 100
 	description := compressionProtocol(entry.EntryID, entry.ContentHash, entry.ContentType, bounty)
 	payload, err := json.Marshal(map[string]any{
@@ -616,6 +653,9 @@ func (e *Engine) sendCompressionAssign(entry *InventoryEntry) error {
 // matched entry. Failure is non-fatal to the caller — the error is logged and
 // the match proceeds.
 func (e *Engine) sendWarmCompressionAssign(entry *InventoryEntry, buyerKey string) error {
+	if entry.WrappedCEKOperator != "" {
+		return nil // v2 confidential entry: see skipCompressionForV2.
+	}
 	bounty := entry.TokenCost * WarmCompressionBountyPct / 100
 	description := compressionProtocol(entry.EntryID, entry.ContentHash, entry.ContentType, bounty)
 	payload, err := json.Marshal(map[string]any{
@@ -660,6 +700,9 @@ func (e *Engine) PostOpenCompressionAssign(entryID string) error {
 // ColdCompressionBountyPct (20%) of the entry's token_cost. Posted by the medium
 // loop for high-demand entries that still lack a compressed derivative.
 func (e *Engine) sendColdCompressionAssign(entry *InventoryEntry) error {
+	if entry.WrappedCEKOperator != "" {
+		return nil // v2 confidential entry: see skipCompressionForV2.
+	}
 	bounty := entry.TokenCost * ColdCompressionBountyPct / 100
 	description := compressionProtocol(entry.EntryID, entry.ContentHash, entry.ContentType, bounty)
 	payload, err := json.Marshal(map[string]any{
