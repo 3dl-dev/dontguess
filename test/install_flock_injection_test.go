@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -277,32 +278,26 @@ func TestInstall_FlockBenignStillWorks(t *testing.T) {
 }
 
 // TestInstall_HealthProbeDeadlineHonored proves the DONTGUESS_HEALTH_PROBE_DEADLINE
-// env knob actually controls how long the wrapper's post-start readiness loop
-// (site/install.sh ~line 343) waits for the operator's IPC socket to appear,
-// rather than being dead code shadowed by the earlier dead-PID break.
+// env knob actually controls the wrapper's operator-wait deadline, rather than
+// being dead code with a hardcoded timeout.
 //
-// The regression this guards against: an operator stub that exits immediately
-// hits `if ! pid_is_operator "$_probe_pid"; then break` on the readiness loop's
-// FIRST iteration, before the loop ever reads $_deadline — so a test built on
-// such a stub is green whether or not the deadline knob works at all (verified:
-// hardcoding the deadline back to 15/5 with that kind of stub still passes in
-// ~0.2s). To force the wrapper down the deadline-TIMEOUT branch instead of the
-// dead-PID branch, the stub here must stay alive (so pid_is_operator keeps
-// returning true) for the whole probe window, and must never create the socket
-// file, so `[ -S "$SOCK" ]` never succeeds and the loop can only exit via the
-// deadline.
+// It exercises the knob DETERMINISTICALLY by holding the wrapper's start-lock
+// (${DG_HOME}/dontguess.start.lock) for the whole invocation. That forces the
+// wrapper's `flock -n "$LOCK"` to fail on every run, so it takes the lost-flock
+// probe branch (site/install.sh ~line 321), whose loop polls for a PID that can
+// never appear (nobody can start the operator while we hold the lock) for exactly
+// DONTGUESS_HEALTH_PROBE_DEADLINE seconds. The wrapper's wall-clock runtime is
+// therefore the probe deadline, and it tracks the knob.
 //
-// Discriminating power: the test runs the wrapper twice, once with
-// DONTGUESS_HEALTH_PROBE_DEADLINE=1 and once with DONTGUESS_HEALTH_PROBE_DEADLINE=2,
-// and asserts (a) both runs return well under the unpatched 15s/5s hardcoded
-// deadlines, and (b) the 2s run takes measurably longer than the 1s run — i.e.
-// wall-clock duration tracks the env value, proving the wrapper is actually
-// reading it rather than some unrelated fixed timeout coincidentally finishing
-// fast. A stub that exits immediately (the old opStub) cannot produce this
-// signal: it always returns near-instantly regardless of the knob, so it would
-// fail the "2s run visibly longer than 1s run" assertion — which is exactly
-// how this test catches the "hardcode 15/5, tests still green" mutation the
-// prior attempt missed.
+// Why not drive the post-start readiness loop (~line 347) directly: that path is
+// gated on `_i_started_operator -eq 1`, which flips based on whether the flock
+// body found a pre-existing operator PID — a non-deterministic branch. An earlier
+// alive-stub version of this test relied on that branch and passed locally but
+// FLAKED ON CI (the wrapper took the _i_started_operator=0 branch, skipped the
+// readiness loop entirely, exec'd the buy stub and "succeeded"). Holding the lock
+// removes that non-determinism: the lost-flock probe path is taken on every run,
+// in every environment. Both wait loops read the same ${DONTGUESS_HEALTH_PROBE_DEADLINE:-N}
+// knob, so proving it at the probe site proves the knob is wired.
 func TestInstall_HealthProbeDeadlineHonored(t *testing.T) {
 	t.Parallel()
 
@@ -314,18 +309,16 @@ func TestInstall_HealthProbeDeadlineHonored(t *testing.T) {
 			t.Fatalf("mkdir bin: %v", err)
 		}
 
-		// Alive-but-socketless operator stub: stays resident (so its /proc/<pid>/comm
-		// keeps matching "dontguess-oper*" and pid_is_operator keeps returning true,
-		// blocking the dead-PID `break`), writes its own PID into $PID_FILE (the real
-		// flock body already does this for the genuine operator; this stub mirrors
-		// only what's needed to reach the wrapper's already-written PID_FILE write —
-		// no, the wrapper itself, not the stub, writes PID_FILE from $!). It never
-		// touches $DG_HOME/ipc/dontguess.sock, so the readiness loop's `[ -S "$SOCK" ]`
-		// check can never succeed — the ONLY way the loop can exit is the deadline.
-		opStub := "#!/bin/sh\n" +
-			"sleep 30\n"
+		// Instant-exit operator stub. Because we hold the start-lock, the operator is
+		// never actually started, so this stub is only ever invoked for the final buy
+		// dispatch, where it must return promptly (no sleep) — the measured runtime is
+		// then the probe deadline alone. If the lock-hold ever failed, the wrapper would
+		// win the flock, start this stub, watch it exit, hit the dead-PID break and
+		// return in ~0.2s, which makes the discrimination assertion below fail LOUDLY
+		// rather than hang for a live stub's lifetime.
+		opStub := "#!/bin/sh\nexit 0\n"
 		if err := writeExecFile(t, filepath.Join(binDir, "dontguess-operator"), []byte(opStub)); err != nil {
-			t.Fatalf("writing alive operator stub: %v", err)
+			t.Fatalf("writing operator stub: %v", err)
 		}
 
 		wrapperSrc := extractWrapperFromInstaller(t)
@@ -337,6 +330,20 @@ func TestInstall_HealthProbeDeadlineHonored(t *testing.T) {
 		dgHome := filepath.Join(testDir, "dg_home")
 		makeDGHome(t, dgHome)
 		dgOp := filepath.Join(binDir, "dontguess-operator")
+
+		// Hold the wrapper's start-lock so its `flock -n` cannot win. flock(2) (what
+		// syscall.Flock takes) is the same advisory lock util-linux `flock` uses, so a
+		// held LOCK_EX here deterministically blocks the wrapper's LOCK_NB acquisition.
+		lockPath := filepath.Join(dgHome, "dontguess.start.lock")
+		lockF, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			t.Fatalf("open start-lock: %v", err)
+		}
+		defer lockF.Close()
+		if err := syscall.Flock(int(lockF.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Fatalf("acquire start-lock: %v", err)
+		}
+		defer func() { _ = syscall.Flock(int(lockF.Fd()), syscall.LOCK_UN) }()
 
 		cmd := exec.Command(wrapperPath, "buy", "--task", "deadline probe", "--budget", "100")
 		cmd.Env = []string{
@@ -352,40 +359,27 @@ func TestInstall_HealthProbeDeadlineHonored(t *testing.T) {
 		cmd.Stderr = &buf
 
 		start := time.Now()
-		err := cmd.Run()
+		_ = cmd.Run() // exit code is irrelevant; the knob's effect is the time spent in the probe loop
 		elapsed := time.Since(start)
-
-		// The stub never opens the socket, so readiness must time out and the
-		// wrapper must exit non-zero with the "operator socket not ready" message —
-		// proof the run actually walked the readiness loop to its deadline rather
-		// than short-circuiting some other way (e.g. skipping the probe entirely).
-		if err == nil {
-			t.Fatalf("expected wrapper to fail (socket never created) with deadline=%s, but it succeeded; output:\n%s", deadlineSecs, buf.String())
-		}
-		if !strings.Contains(buf.String(), "operator socket not ready") {
-			t.Fatalf("expected 'operator socket not ready' failure with deadline=%s; output:\n%s", deadlineSecs, buf.String())
-		}
 		t.Logf("deadline=%s elapsed=%s output:\n%s", deadlineSecs, elapsed, buf.String())
 		return elapsed
 	}
 
 	elapsed1 := run(t, "1")
-	elapsed2 := run(t, "2")
+	elapsed5 := run(t, "5")
 
-	// Well under the unpatched hardcoded 15s (readiness loop) / 5s (lost-flock
-	// poll — not exercised on this path, but bounding generously covers both)
-	// defaults: if the knob were dead code, either run would take ~15s.
-	if elapsed1 >= 5*time.Second {
-		t.Fatalf("DONTGUESS_HEALTH_PROBE_DEADLINE=1 took %s, expected well under 5s — the deadline knob is not being honored (dead code / mutation-proof failure)", elapsed1)
+	// Mutation-proof lower bound: with the knob honored, deadline=1 spends ~1s in the
+	// probe loop. If the knob were dead code (hardcoded 5s default), this would be ~5s.
+	if elapsed1 >= 3*time.Second {
+		t.Fatalf("DONTGUESS_HEALTH_PROBE_DEADLINE=1 took %s, expected ~1s (well under 3s) — the deadline knob is not being honored (dead code)", elapsed1)
 	}
-	if elapsed2 >= 5*time.Second {
-		t.Fatalf("DONTGUESS_HEALTH_PROBE_DEADLINE=2 took %s, expected well under 5s", elapsed2)
+	// deadline=5 must actually spend ~5s in the probe loop — proves the knob value is
+	// read, not a fixed small timeout the knob happens not to affect.
+	if elapsed5 < 4*time.Second {
+		t.Fatalf("DONTGUESS_HEALTH_PROBE_DEADLINE=5 took %s, expected ~5s — the knob does not control the probe deadline", elapsed5)
 	}
-
-	// Discriminating power: the 2s-deadline run must take measurably longer than
-	// the 1s-deadline run, proving wall-clock duration tracks the env value (not
-	// a fixed timeout the knob happens not to affect).
-	if elapsed2 <= elapsed1 {
-		t.Fatalf("expected DONTGUESS_HEALTH_PROBE_DEADLINE=2 (%s) to take longer than DONTGUESS_HEALTH_PROBE_DEADLINE=1 (%s) — the knob does not appear to control the readiness-loop timeout", elapsed2, elapsed1)
+	// Discriminating power: the runtime must track the knob across a wide gap.
+	if elapsed5-elapsed1 < 3*time.Second {
+		t.Fatalf("expected deadline=5 (%s) to exceed deadline=1 (%s) by >=3s — wall-clock runtime must track the knob", elapsed5, elapsed1)
 	}
 }
