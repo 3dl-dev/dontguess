@@ -17,7 +17,7 @@
 
 set -e
 
-DG_REPO="campfire-net/dontguess"
+DG_REPO="3dl-dev/dontguess"
 INSTALL_DIR="${HOME}/.local/bin"
 
 if [ -t 1 ]; then

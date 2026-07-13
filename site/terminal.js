@@ -7,7 +7,7 @@
     solo: {
       title: 'Solo operator',
       subtitle: '01-solo-operator.sh',
-      source: 'https://github.com/campfire-net/dontguess/blob/main/test/demo/01-solo-operator.sh',
+      source: 'https://github.com/3dl-dev/dontguess/blob/main/test/demo/01-solo-operator.sh',
       lines: [
         { type: 'comment', text: '# Operator: init an exchange on a fresh campfire' },
         { type: 'cmd', text: 'cf init' },
@@ -45,7 +45,7 @@
     assign: {
       title: 'Task marketplace',
       subtitle: '07-assign-work.sh',
-      source: 'https://github.com/campfire-net/dontguess/blob/main/test/demo/07-assign-work.sh',
+      source: 'https://github.com/3dl-dev/dontguess/blob/main/test/demo/07-assign-work.sh',
       lines: [
         { type: 'comment', text: '# Operator posts a validation task with scrip bounty' },
         { type: 'cmd', text: 'cf $XCFID assign --entry_id $ENTRY_ID \\' },
@@ -82,7 +82,7 @@
     multiagent: {
       title: 'Multi-agent flywheel',
       subtitle: '04-multi-agent.sh',
-      source: 'https://github.com/campfire-net/dontguess/blob/main/test/demo/04-multi-agent.sh',
+      source: 'https://github.com/3dl-dev/dontguess/blob/main/test/demo/04-multi-agent.sh',
       lines: [
         { type: 'comment', text: '# Three distinct identities: operator, seller, buyer' },
         { type: 'cmd', text: 'dontguess init                      # operator' },
