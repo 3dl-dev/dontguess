@@ -471,16 +471,18 @@ func TestEngineDispatch_PreviewRequest_InvalidAntecedent_NoResponse(t *testing.T
 	}
 }
 
-// TestEngineDispatch_PreviewRequest_AssemblerMetadataPopulated verifies that the
-// engine passes correct metadata fields (Content, ContentType, EntryID) to
-// PreviewAssembler when handling a preview-request.
+// TestEngineDispatch_PreviewRequest_TeaserEchoedNoChunks verifies the
+// dontguess-4059 preview redesign: the engine echoes the entry's metadata
+// (entry_id, content_type) and a teaser field, and emits NO real-content preview
+// chunks / token counts (the old PreviewAssembler chunk path was deleted because
+// it broadcast 15-25% of plaintext on the public settle(preview) wire).
 //
-// After dontguess-nh4: seed is entry_id only. BuyerKey and MatchID are no longer
-// seeding inputs and have been removed from PreviewRequest.
-//
-// After dontguess-c9c7: entry.Content is wired through to the assembler, so the
-// emitted preview payload carries real chunks and non-zero token counts.
-func TestEngineDispatch_PreviewRequest_AssemblerMetadataPopulated(t *testing.T) {
+// This entry is a legacy plaintext put with no seller teaser, so the echoed
+// teaser is empty — the load-bearing assertion is that the preview carries NO
+// "chunks" and NO "total_tokens" (no real content, ever). A team-tier entry with
+// a real teaser + real plaintext, and the no-plaintext-substring proof, is
+// covered by preview_confidentiality_4059_test.go.
+func TestEngineDispatch_PreviewRequest_TeaserEchoedNoChunks(t *testing.T) {
 	t.Parallel()
 	h := newTestHarness(t)
 	eng := h.newEngine()
@@ -526,20 +528,22 @@ func TestEngineDispatch_PreviewRequest_AssemblerMetadataPopulated(t *testing.T) 
 		t.Fatal("no settle(preview) message found after dispatch")
 	}
 
-	// Parse the preview payload.
+	// Parse the preview payload. TotalTokens/Chunks are declared ONLY so the test
+	// can assert they are ABSENT — the preview must carry no real content.
 	var payload struct {
-		EntryID       string `json:"entry_id"`
-		ContentType   string `json:"content_type"`
-		TotalTokens   int    `json:"total_tokens"`
-		PreviewTokens int    `json:"preview_tokens"`
-		Chunks        []any  `json:"chunks"`
+		EntryID     string `json:"entry_id"`
+		ContentType string `json:"content_type"`
+		Teaser      string `json:"teaser"`
+		// Leak canaries — must stay absent/empty on the preview wire.
+		TotalTokens   int   `json:"total_tokens"`
+		PreviewTokens int   `json:"preview_tokens"`
+		Chunks        []any `json:"chunks"`
 	}
 	if err := json.Unmarshal(previewMsg.Payload, &payload); err != nil {
 		t.Fatalf("parsing preview payload: %v", err)
 	}
 
 	// ContentType in the payload must match the inventory entry's ContentType.
-	// This verifies the engine read entry.ContentType and passed it to the assembler.
 	if payload.ContentType != expectedContentType {
 		t.Errorf("preview payload content_type = %q, want %q (from inventory entry)",
 			payload.ContentType, expectedContentType)
@@ -550,21 +554,30 @@ func TestEngineDispatch_PreviewRequest_AssemblerMetadataPopulated(t *testing.T) 
 		t.Errorf("preview payload entry_id = %q, want %q", payload.EntryID, entryID)
 	}
 
-	// Antecedent must be the preview-request — confirming the engine used msg.ID
-	// (= preview-request ID) as the antecedent and thus has the correct MatchID
-	// traceable from the preview-request antecedent chain.
+	// Antecedent must be the preview-request.
 	if len(previewMsg.Antecedents) == 0 || previewMsg.Antecedents[0] != preqMsg.ID {
 		t.Errorf("preview antecedent = %v, want [%s] (preview-request)", previewMsg.Antecedents, preqMsg.ID)
 	}
 
-	// With real content wired (dontguess-c9c7), the assembler produces non-zero
-	// tokens and at least one chunk. Verify the payload faithfully reflects the
-	// assembler output.
-	if payload.TotalTokens == 0 {
-		t.Errorf("preview payload total_tokens = 0; expected non-zero with real entry.Content")
+	// The teaser field must exist in the payload (a stable preview schema key),
+	// even when empty for a legacy no-teaser entry.
+	var rawPayload map[string]json.RawMessage
+	if err := json.Unmarshal(previewMsg.Payload, &rawPayload); err != nil {
+		t.Fatalf("parsing raw preview payload: %v", err)
 	}
-	if len(payload.Chunks) == 0 {
-		t.Errorf("preview payload chunks len = 0; expected chunks with real entry.Content")
+	if _, ok := rawPayload["teaser"]; !ok {
+		t.Error("preview payload has no 'teaser' key; the teaser is the only seller free-text the preview echoes")
+	}
+
+	// dontguess-4059: NO real-content preview chunks / token counts. The old
+	// PreviewAssembler chunk path was deleted; a preview must carry neither
+	// chunks nor content-derived token counts.
+	if len(payload.Chunks) != 0 {
+		t.Errorf("preview payload carries %d chunks; the real-content chunk path was removed (dontguess-4059)", len(payload.Chunks))
+	}
+	if payload.TotalTokens != 0 || payload.PreviewTokens != 0 {
+		t.Errorf("preview payload carries content-derived token counts (total=%d preview=%d); the chunk path was removed (dontguess-4059)",
+			payload.TotalTokens, payload.PreviewTokens)
 	}
 }
 
@@ -642,30 +655,34 @@ func TestPreviewRequest_DuplicateRejected(t *testing.T) {
 	}
 }
 
-// TestPreviewRequest_RealContent verifies the full flow: put(content=X) → buy → match
-// → preview-request → preview response contains chunks with real content substrings.
+// TestPreviewRequest_NoRealContentLeak is the INVERSE of the old dontguess-c9c7
+// regression test: it proves the dontguess-4059 fix — put(content=X) → buy →
+// match → preview-request → the settle(preview) response contains NO substring
+// of the real content X (the leak the deleted PreviewAssembler chunk path caused
+// by broadcasting 15-25% of plaintext), even on the legacy plaintext path.
 //
-// This is the regression test for dontguess-c9c7: handleSettlePreviewRequest was
-// passing Content: nil to PreviewAssembler, producing empty chunks. The fix wires
-// entry.Content through so preview chunks reflect actual cached inference content.
-func TestPreviewRequest_RealContent(t *testing.T) {
+// buildMatchedState's entry content embeds the known prefix "cached inference
+// result: Preview test inference"; this asserts that string never appears in the
+// emitted preview payload.
+func TestPreviewRequest_NoRealContentLeak(t *testing.T) {
 	t.Parallel()
 	h := newTestHarness(t)
 	eng := h.newEngine()
 
 	// buildMatchedState creates an inventory entry whose content starts with
-	// "cached inference result: Preview test inference " — a known prefix we can
-	// assert against in the preview chunks.
+	// "cached inference result: Preview test inference " — a known prefix.
 	matchRec, entryID := buildMatchedState(t, h, eng)
 
-	// Retrieve the inventory entry to confirm content is non-empty (dontguess-743 prerequisite).
+	// Retrieve the inventory entry to confirm content is non-empty (so the
+	// no-leak assertion is meaningful — there IS real content that could leak).
 	inv := eng.State().Inventory()
 	if len(inv) == 0 {
 		t.Fatal("expected inventory entry after put-accept")
 	}
 	if len(inv[0].Content) == 0 {
-		t.Fatal("inventory entry has no content; test prerequisite violated (dontguess-743 must be in place)")
+		t.Fatal("inventory entry has no content; no-leak assertion would be vacuous")
 	}
+	realContent := string(inv[0].Content)
 
 	// Buyer sends preview-request.
 	preqMsg := h.sendMessage(h.buyer,
@@ -700,45 +717,36 @@ func TestPreviewRequest_RealContent(t *testing.T) {
 		t.Fatal("no settle(preview) message found after dispatch")
 	}
 
-	// Parse the preview payload.
+	// The RAW preview payload bytes must not contain the known real-content
+	// prefix — nor any preview "chunks" carrying content.
+	rawPreview := string(previewMsg.Payload)
+	const knownPrefix = "cached inference result: Preview test inference"
+	if strings.Contains(rawPreview, knownPrefix) {
+		t.Fatalf("LEAK: settle(preview) payload contains real content prefix %q — the plaintext preview path was NOT removed", knownPrefix)
+	}
+
+	// Belt-and-suspenders: assert no sizeable substring of the real content
+	// appears in the preview. Slide a window over the content and check no chunk
+	// of it leaked.
+	const window = 24
+	for i := 0; i+window <= len(realContent); i += window {
+		frag := realContent[i : i+window]
+		if strings.TrimSpace(frag) == "" {
+			continue
+		}
+		if strings.Contains(rawPreview, frag) {
+			t.Fatalf("LEAK: settle(preview) payload contains a %d-byte substring of the real content: %q", window, frag)
+		}
+	}
+
+	// The preview must carry no chunks.
 	var payload struct {
-		EntryID string `json:"entry_id"`
-		Chunks  []struct {
-			Content string `json:"content"`
-		} `json:"chunks"`
+		Chunks []any `json:"chunks"`
 	}
 	if err := json.Unmarshal(previewMsg.Payload, &payload); err != nil {
 		t.Fatalf("parsing preview payload: %v", err)
 	}
-
-	// Chunks must be non-empty — nil content produces zero chunks.
-	if len(payload.Chunks) == 0 {
-		t.Fatal("preview has 0 chunks; expected real content chunks when entry.Content is wired through")
-	}
-
-	// At least one chunk must have non-empty content string.
-	anyNonEmpty := false
-	for _, c := range payload.Chunks {
-		if len(c.Content) > 0 {
-			anyNonEmpty = true
-			break
-		}
-	}
-	if !anyNonEmpty {
-		t.Error("all preview chunk content strings are empty; entry.Content was not passed to PreviewAssembler")
-	}
-
-	// At least one chunk must contain a substring of the original content.
-	// putPayload embeds "cached inference result: <desc>" as a known prefix.
-	const wantSubstr = "cached inference result: Preview test inference"
-	found := false
-	for _, c := range payload.Chunks {
-		if strings.Contains(c.Content, wantSubstr) {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("no preview chunk contains expected content substring %q; chunks returned but content may not be from the real entry", wantSubstr)
+	if len(payload.Chunks) != 0 {
+		t.Errorf("preview payload carries %d chunks; the real-content chunk path was removed (dontguess-4059)", len(payload.Chunks))
 	}
 }

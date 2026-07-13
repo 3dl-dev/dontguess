@@ -28,12 +28,10 @@ import (
 // buildLargePutPayload constructs an exchange:put JSON payload with content
 // large enough to exceed BlossomOffloadThreshold.
 //
-// Content is generated as line-structured pseudo-code (not a flat byte
-// pattern): PreviewAssembler snaps chunk boundaries to structural markers
-// (newlines, function keywords), and content with no such markers degenerates
-// to only two boundaries {0, len}, causing pathological (oversized,
-// overlapping) chunk selection. Realistic code always has line breaks, so
-// tests use realistic content shape to exercise the normal preview path.
+// Content is generated as line-structured pseudo-code (realistic code shape).
+// (Historically this mattered because the deleted PreviewAssembler snapped
+// chunk boundaries to structural markers; post-dontguess-4059 no preview slice
+// is derived from content at all, but realistic shape is kept for fidelity.)
 func buildLargePutPayload(t *testing.T, desc string, tokenCost int64, size int) (payload []byte, content []byte) {
 	t.Helper()
 	var buf []byte
@@ -82,13 +80,14 @@ func TestApplyPut_OversizeContentOffloadedToBlossom(t *testing.T) {
 	if entry.BlobPointer == "" {
 		t.Fatal("expected oversize entry to have a non-empty BlobPointer")
 	}
-	if len(entry.Content) >= size {
-		t.Fatalf("expected inline Content to be much smaller than full content (%d bytes); got %d bytes — oversize content was inlined", size, len(entry.Content))
-	}
-	// Inline preview should be roughly 15-25% of the full content (this
-	// project's preview target), and strictly less than the full size.
-	if len(entry.Content) == 0 {
-		t.Fatal("expected a non-empty inline preview for the oversize entry")
+	// Post-dontguess-4059: the old inline real-content preview slice was DELETED
+	// (buildInlinePreviewBytes) because settle(preview) broadcast it as plaintext.
+	// An offloaded entry now inlines NOTHING — the full content lives only in the
+	// Blossom blob (addressed by ContentHash), delivery is a pointer + client-side
+	// verify, and settle(preview) echoes the seller teaser. So entry.Content must
+	// be empty for an offloaded entry (no real-content slice anywhere on the wire).
+	if len(entry.Content) != 0 {
+		t.Fatalf("expected offloaded entry to inline NO content (real-content preview slice was removed, dontguess-4059); got %d bytes", len(entry.Content))
 	}
 
 	// ContentHash must be computed from the FULL content, not the preview.

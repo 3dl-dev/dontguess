@@ -113,8 +113,8 @@ func seedOversizePut(t *testing.T, h *testHarness, eng *exchange.Engine, desc st
 	t.Helper()
 
 	// 64 KiB of line-structured pseudo-code — exceeds BlossomOffloadThreshold
-	// (32 KiB). Line-structured (not a flat byte pattern) so PreviewAssembler's
-	// boundary-snapping behaves normally (see buildLargePutPayload doc).
+	// (32 KiB). Realistic code shape (see buildLargePutPayload doc; the old
+	// PreviewAssembler boundary-snapping rationale no longer applies post-4059).
 	var buf []byte
 	for len(buf) < 64*1024 {
 		buf = append(buf, []byte("func handler_"+string(rune('a'+(len(buf)/64)%26))+"(w, r) { return doWork(w, r) }\n")...)

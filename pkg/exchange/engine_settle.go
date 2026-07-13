@@ -26,9 +26,9 @@ import (
 //   - Burns the matching fee (price * MatchingFeeRate / 100)
 //   - Credits exchange revenue (remainder) to the operator
 //
-// For settle(preview-request) phases, the engine generates a content preview
-// using PreviewAssembler and responds with a settle(preview) message. The
-// preview antecedent is the preview-request message ID.
+// For settle(preview-request) phases, the engine echoes the seller-authored
+// entry.Teaser (never real content — §4.1, dontguess-4059) and responds with a
+// settle(preview) message. The preview antecedent is the preview-request message ID.
 func (e *Engine) handleSettle(msg *Message) error {
 	phase := settlePhaseFromTags(msg.Tags)
 
@@ -828,15 +828,15 @@ func (e *Engine) decAndSaveHold(msg *Message, matchMsgID string, holdAmount, bes
 	return nil
 }
 
-// handleSettlePreviewRequest generates a content preview in response to a
+// handleSettlePreviewRequest emits a teaser preview in response to a
 // settle(preview-request) message from a buyer.
 //
 // The engine:
 //  1. Validates the match exists in state (antecedent must be a match message).
 //  2. Looks up the entry from the match.
-//  3. Calls PreviewAssembler.Assemble() with the entry details and full content
-//     to generate preview chunks. The preview is a subset of the full content
-//     (5 non-overlapping random chunks totaling 15-25% of the content).
+//  3. Echoes the seller-authored entry.Teaser (§4.1, dontguess-4059) — NEVER
+//     real content. The old real-content chunk path was deleted; see
+//     sendPreviewResponse.
 //  4. Sends a settle(preview) response with the antecedent set to the
 //     preview-request message ID.
 //
@@ -876,30 +876,23 @@ func (e *Engine) handleSettlePreviewRequest(msg *Message) error {
 }
 
 // sendPreviewResponse generates and emits the settle(preview) message for an entry.
+//
+// CONFIDENTIALITY (content-confidentiality-envelope-541 §4.1, dontguess-4059):
+// this echoes ONLY the seller-authored, bounded, coherence-checked entry.Teaser
+// — NEVER real content. The old real-content preview-chunk path (PreviewAssembler
+// emitting 5 chunks / 15-25% of plaintext into this PUBLIC settle(preview)) was
+// the last wire-side plaintext leak and has been DELETED. On team tier the
+// entry's content is only ever available as AEAD ciphertext, so there is nothing
+// to slice here even in principle; the teaser is the seller's intentionally-
+// published abstract. The SmallContentThreshold=500 auto-refund path
+// (handleSettleSmallContentDispute) remains as buyer protection for content too
+// small for even a teaser to be informative.
 func (e *Engine) sendPreviewResponse(msg *Message, matchMsgID string, entry *InventoryEntry) error {
-	previewResult, err := previewForEntry(entry)
-	if err != nil {
-		return fmt.Errorf("engine: preview-request: assemble preview for entry %s: %w", shortKey(entry.EntryID), err)
-	}
-
-	type ChunkPayload struct {
-		Content    string `json:"content"`
-		StartByte  int    `json:"start_byte"`
-		EndByte    int    `json:"end_byte"`
-		ChunkIndex int    `json:"chunk_index"`
-	}
-	chunks := make([]ChunkPayload, len(previewResult.Chunks))
-	for i, c := range previewResult.Chunks {
-		chunks[i] = ChunkPayload(c)
-	}
-
 	previewPayload, err := e.marshal(map[string]any{
-		"entry_id":       entry.EntryID,
-		"content_type":   entry.ContentType,
-		"total_tokens":   previewResult.TotalTokens,
-		"preview_tokens": previewResult.PreviewTokens,
-		"chunks":         chunks,
-		"guide":          "Preview shows 5 randomly-selected chunks (15-25% of total content). Chunks are boundary-aligned: code chunks break on function boundaries, prose on paragraphs. This preview is free — no scrip charged. To purchase the full content, send settle(buyer-accept). To decline, send settle(buyer-reject) — no charge. Scrip is reserved at accept, not at preview.",
+		"entry_id":     entry.EntryID,
+		"content_type": entry.ContentType,
+		"teaser":       entry.Teaser,
+		"guide":        "This is a FREE seller-authored teaser (a bounded abstract), not the content itself — under encryption no real content is ever previewed. No scrip is charged. To purchase the full content, send settle(buyer-accept). To decline, send settle(buyer-reject) — no charge. Scrip is reserved at accept, not at preview.",
 	})
 	if err != nil {
 		return fmt.Errorf("engine: preview-request: marshal preview payload: %w", err)

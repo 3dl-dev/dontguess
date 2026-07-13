@@ -680,6 +680,7 @@ func (s *State) applyPut(msg *Message) {
 	var payload struct {
 		V               int          `json:"v"`
 		Description     string       `json:"description"`
+		Teaser          string       `json:"teaser"`  // seller-authored public abstract (§4.1, TAINTED)
 		Content         string       `json:"content"` // base64-encoded plaintext (LEGACY / TAINTED)
 		TokenCost       int64        `json:"token_cost"`
 		ContentType     string       `json:"content_type"`
@@ -788,6 +789,34 @@ func (s *State) applyPut(msg *Message) {
 	if isTestLikeDescription(payload.Description) {
 		return
 	}
+	// Teaser gate (content-confidentiality-envelope-541 §4.1, dontguess-4059).
+	// The teaser is the seller-authored public abstract that settle(preview)
+	// now echoes IN PLACE of the deleted real-content preview chunks. Two hard
+	// constraints, both enforced here — at put-accept, where the operator has
+	// already decrypted the plaintext (§3.1(2)):
+	//
+	//  (1) HARD-CAP (fail-closed drop): a teaser over MaxTeaserBytes is dropped
+	//      like any other applyPut violation. Teaser bytes are intentionally-
+	//      published, so the cap makes pasting whole content into the "teaser" a
+	//      self-defeating dropped put rather than a leak vector.
+	//
+	//  (2) COHERENCE-CHECK (drop the teaser, keep the put): reuse the §4
+	//      description-vs-content coherence gate to catch teaser/content
+	//      bait-and-switch — a teaser whose claimed nouns are disconnected from
+	//      the DECRYPTED plaintext (a lure unrelated to what is actually sold)
+	//      that a buyer would otherwise only discover post-purchase. An
+	//      incoherent teaser is dropped to "" (nothing misleading is ever
+	//      echoed) while the content sale still proceeds; the crude embedder's
+	//      false-negatives therefore cost at most a missing teaser, never a lost
+	//      put. teaserCoherent fails OPEN when there is nothing to compare (an
+	//      empty teaser, or a teaser with no content-bearing nouns).
+	if len(payload.Teaser) > MaxTeaserBytes {
+		return
+	}
+	validatedTeaser := payload.Teaser
+	if validatedTeaser != "" && !teaserCoherent(validatedTeaser, contentBytes) {
+		validatedTeaser = ""
+	}
 	// Validate compression_tier. Unknown values are silently dropped to "".
 	tier := payload.CompressionTier
 	if tier != "" {
@@ -825,20 +854,21 @@ func (s *State) applyPut(msg *Message) {
 	entryContent := contentBytes
 	blobPointer := ""
 	if !isV2 && s.blobStore != nil && len(contentBytes) > BlossomOffloadThreshold {
-		previewBytes, err := buildInlinePreviewBytes(contentBytes, contentType, msg.ID)
-		if err != nil {
-			// Cannot produce a safe inline preview — drop the put rather than
-			// inline the oversize content as a fallback (hard constraint: never
-			// inline oversize content on the relay).
-			return
-		}
 		pointer, err := s.blobStore.Put(contentBytes)
 		if err != nil {
 			// Upload failed — drop the put. Do not fall back to inlining, and
 			// do not register the content hash, so the seller may retry.
 			return
 		}
-		entryContent = previewBytes
+		// Offloaded: the full content lives ONLY in the Blossom blob (addressed
+		// by ContentHash); entry.Content holds NOTHING. The old real-content
+		// inline preview slice (buildInlinePreviewBytes) was deleted — it sliced
+		// 15-25% of plaintext onto the entry that settle(preview) then broadcast
+		// (content-confidentiality-envelope-541 §4.1, dontguess-4059). Delivery
+		// is now a pointer + client-side ciphertext-hash verify (emitDeliverPointer),
+		// and settle(preview) echoes the seller teaser, so no plaintext slice is
+		// ever needed on any wire.
+		entryContent = nil
 		blobPointer = pointer
 	}
 
@@ -858,6 +888,7 @@ func (s *State) applyPut(msg *Message) {
 		BlobPointer:        blobPointer,
 		WrappedCEKOperator: wrappedCEKOperator,
 		CiphertextHash:     ciphertextHash,
+		Teaser:             validatedTeaser,
 	}
 	s.pendingPuts[msg.ID] = entry
 	s.putToEntry[msg.ID] = msg.ID
@@ -868,26 +899,31 @@ func (s *State) applyPut(msg *Message) {
 	s.contentHashIndex[contentHash] = struct{}{}
 }
 
-// buildInlinePreviewBytes computes the buyer-facing preview chunks for content
-// (same algorithm PreviewAssembler uses at settle(preview) time) and
-// concatenates them into a single inline byte slice. Used at put time to
-// derive the inline preview that stays with the entry when the full content
-// is offloaded to Blossom (dontguess-7783).
-func buildInlinePreviewBytes(content []byte, contentType, entryID string) ([]byte, error) {
-	pa := &PreviewAssembler{}
-	result, err := pa.Assemble(PreviewRequest{
-		Content:     content,
-		ContentType: contentType,
-		EntryID:     entryID,
-	})
-	if err != nil {
-		return nil, err
+// teaserCoherent reports whether a seller-authored teaser is semantically
+// coherent with the DECRYPTED plaintext content, reusing the §4 description-vs-
+// content coherence gate (descriptionContentCoherent, dontguess-5f5). It
+// tokenizes the teaser, keeps only its content-bearing nouns
+// (isContentBearingToken — the same filter Gate 5 applies to descriptions), and
+// requires their cosine similarity to the content to clear minHighReuseCoherence.
+//
+// Purpose (content-confidentiality-envelope-541 §4.1, dontguess-4059): the
+// operator decrypts at put-accept, so it can catch a teaser/content bait-and-
+// switch — a teaser whose claimed domain nouns are disconnected from what is
+// actually sold — that a buyer would otherwise only discover after paying.
+//
+// Fails OPEN (returns true) when there is nothing to compare: an empty teaser,
+// a teaser with no content-bearing nouns (e.g. very short), or empty content.
+// A genuine abstract names domain nouns that appear in / relate to the content
+// and passes; a lure whose padding nouns are absent from the content scores ~0
+// and is caught.
+func teaserCoherent(teaser string, content []byte) bool {
+	nouns := make([]string, 0)
+	for _, tok := range tokenizeDescription(teaser) {
+		if isContentBearingToken(tok) {
+			nouns = append(nouns, tok)
+		}
 	}
-	var buf strings.Builder
-	for _, c := range result.Chunks {
-		buf.WriteString(c.Content)
-	}
-	return []byte(buf.String()), nil
+	return descriptionContentCoherent(nouns, content)
 }
 
 // stripTagPrefix removes a convention tag prefix from a value if present.

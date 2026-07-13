@@ -88,6 +88,18 @@ const (
 	// dispute path instead.
 	SmallContentThreshold = 500
 
+	// MaxTeaserBytes is the hard length cap on a seller-authored public teaser
+	// (content-confidentiality-envelope-541 §4.1, dontguess-4059). The teaser is
+	// the ONLY seller-authored free-text that a settle(preview) echoes on the
+	// public wire under encryption, so its size directly bounds intentional
+	// exposure. applyPut DROPS (fail-closed) any put whose teaser exceeds this
+	// cap: teaser bytes are treated as intentionally-published, so the cap makes
+	// pasting whole content into the "teaser" a self-defeating dropped put rather
+	// than a leak. 4 KiB is a small multiple of a realistic abstract (a few
+	// paragraphs) and well under MaxDescriptionBytes (64 KiB) — a teaser is a
+	// human abstract, not a second copy of the content.
+	MaxTeaserBytes = 4 * 1024 // 4 KiB
+
 	// CoOccurrenceK is the maximum number of co-occurring entries tracked per entry.
 	// When the bounded map reaches capacity, the entry with the lowest count is evicted.
 	CoOccurrenceK = 20
@@ -284,6 +296,18 @@ type InventoryEntry struct {
 	// A7) and is DISTINCT from ContentHash, which is the operator-local
 	// sha256(plaintext) dedup key. Empty for legacy plaintext entries.
 	CiphertextHash string
+
+	// Teaser is the seller-authored public abstract of the content
+	// (content-confidentiality-envelope-541 §4.1, dontguess-4059). It is the
+	// ONLY seller free-text that settle(preview) echoes on the public wire —
+	// the real-content preview-chunk path was deleted because it broadcast
+	// 15-25% of plaintext. Validated at applyPut: hard-capped at MaxTeaserBytes
+	// (over-cap puts are dropped) and coherence-checked against the DECRYPTED
+	// plaintext (an incoherent bait-and-switch teaser is dropped to "" while the
+	// put is still accepted). Distinct from Description (Description is the terse
+	// matching key; Teaser is the richer human abstract). Empty when the seller
+	// authored no teaser or its coherence check failed.
+	Teaser string
 }
 
 // IsExpired returns true if the entry has passed its expiry time.
