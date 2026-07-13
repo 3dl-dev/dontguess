@@ -183,7 +183,7 @@ func (s *State) openPredictionAssignsForEntry(entryID string) int {
 		if rec.TaskType != "brokered-match" {
 			continue
 		}
-		if rec.Status == AssignAccepted || rec.Status == AssignRejected || rec.Status == AssignPaid {
+		if rec.Status == AssignAccepted || rec.Status == AssignRejected || rec.Status == AssignPaid || rec.Status == AssignExpired {
 			continue
 		}
 		// Expired standing assigns don't count toward the fanout limit.

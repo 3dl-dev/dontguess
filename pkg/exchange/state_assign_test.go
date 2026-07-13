@@ -3,6 +3,7 @@ package exchange
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -23,6 +24,11 @@ func makeAssignMsg(id, sender, entryID, taskType string, reward int64, exclusive
 		Sender:  sender,
 		Tags:    []string{TagAssign},
 		Payload: b,
+		// The fold derives receive time from the message Timestamp only — it has no
+		// clock (foldTime). Real assign messages always carry an author timestamp;
+		// these helpers stamp "now" so fold-derived times (AssignReceivedAt,
+		// ClaimExpiresAt ceiling) sit near the wall clock, matching production.
+		Timestamp: time.Now().UnixNano(),
 	}
 }
 
@@ -33,6 +39,7 @@ func makeAssignClaimMsg(id, sender, assignID string) Message {
 		Tags:        []string{TagAssignClaim},
 		Antecedents: []string{assignID},
 		Payload:     []byte(`{}`),
+		Timestamp:   time.Now().UnixNano(),
 	}
 }
 
@@ -46,6 +53,7 @@ func makeAssignCompleteMsg(id, sender, claimMsgID string, result []byte) Message
 		Tags:        []string{TagAssignComplete},
 		Antecedents: []string{claimMsgID},
 		Payload:     result,
+		Timestamp:   time.Now().UnixNano(),
 	}
 }
 
@@ -720,7 +728,12 @@ func TestAssignExpireReplay(t *testing.T) {
 }
 
 // TestAssignExpireCompleteAfterExpiry verifies that a late assign-complete
-// (submitted after the claim TTL) is dropped by the state machine.
+// (submitted after the operator has expired the claim) is dropped by the state
+// machine. Event-sourced-pure (ruling 2026-07-08): the fold no longer drops the
+// completion by comparing ClaimExpiresAt against a wall clock — instead the
+// operator emits an assign-expire that reopens the claim (deleting the
+// claimMsgToAssign index), and the late completion is then dropped because its
+// claim antecedent no longer resolves.
 func TestAssignExpireCompleteAfterExpiry(t *testing.T) {
 	s := NewState()
 	s.OperatorKey = operatorKey
@@ -728,15 +741,21 @@ func TestAssignExpireCompleteAfterExpiry(t *testing.T) {
 	s.Apply(ptr(makeAssignMsg("assign-late1", operatorKey, "entry-late1", "freshness", 100, "")))
 	s.Apply(ptr(makeAssignClaimMsg("claim-late1", agentKey, "assign-late1")))
 
-	// Set expiry to the past.
 	rec := s.assignByID["assign-late1"]
-	rec.ClaimExpiresAt = time.Now().Add(-1 * time.Second)
 
-	// Submit complete after expiry — must be dropped.
+	// Operator observes the claim TTL lapse (off-fold) and emits assign-expire,
+	// reopening the task. This is the deterministic, operator-authored enforcement
+	// that replaced the removed wall-clock check inside applyAssignComplete.
+	s.Apply(ptr(makeAssignExpireMsg("expire-late1", operatorKey, "claim-late1")))
+	if rec.Status != AssignOpen {
+		t.Fatalf("expected AssignOpen after operator expire, got %v", rec.Status)
+	}
+
+	// Submit complete after expiry — must be dropped (claim index gone).
 	s.Apply(ptr(makeAssignCompleteMsg("complete-late1", agentKey, "claim-late1", nil)))
 
-	if rec.Status != AssignClaimed {
-		t.Fatalf("expected AssignClaimed (complete dropped), got %v", rec.Status)
+	if rec.Status != AssignOpen {
+		t.Fatalf("expected AssignOpen (late complete dropped), got %v", rec.Status)
 	}
 	if _, pending := s.pendingAssignResults["complete-late1"]; pending {
 		t.Fatal("late complete must not be indexed in pendingAssignResults")
@@ -783,6 +802,97 @@ func TestAssignClaimCustomTimeout(t *testing.T) {
 
 // ptr is a helper that takes a value and returns a pointer to it.
 func ptr(m Message) *Message { return &m }
+
+// buildAssignLifecycleSeq builds a fixed-timestamp assign lifecycle message log:
+// assign → claim1 → expire(claim1) → claim2 → complete(claim2). Every message
+// carries an explicit, caller-chosen Timestamp (baseTS + small offsets) so the
+// log is fully self-describing — the fold derives every time value from these
+// stamps and never from the wall clock (event-sourced-pure ruling 2026-07-08).
+func buildAssignLifecycleSeq(baseTS int64) []Message {
+	const s = int64(time.Second)
+	assign := makeAssignMsg("d-assign", operatorKey, "d-entry", "freshness", 100, "")
+	assign.Timestamp = baseTS
+	claim1 := makeAssignClaimMsg("d-claim1", agentKey, "d-assign")
+	claim1.Timestamp = baseTS + 1*s
+	expire1 := makeAssignExpireMsg("d-expire1", operatorKey, "d-claim1")
+	expire1.Timestamp = baseTS + 2*s
+	claim2 := makeAssignClaimMsg("d-claim2", agentKey2, "d-assign")
+	claim2.Timestamp = baseTS + 3*s
+	complete := makeAssignCompleteMsg("d-complete", agentKey2, "d-claim2", []byte(`{"output":"ok"}`))
+	complete.Timestamp = baseTS + 4*s
+	return []Message{assign, claim1, expire1, claim2, complete}
+}
+
+// replayAssignLifecycle folds the given log into a fresh State and returns a
+// value copy of the resulting assign record.
+func replayAssignLifecycle(seq []Message) AssignRecord {
+	s := NewState()
+	s.OperatorKey = operatorKey
+	s.Replay(seq)
+	return *s.assignByID["d-assign"]
+}
+
+// TestAssignFoldDeterministicAcrossWallClock is the event-sourced-pure regression
+// guard for the assign fold (ruling 2026-07-08, option B). It proves two things:
+//
+//  1. Replay determinism: folding the SAME fixed-timestamp log twice — the two
+//     Replay calls run at two different real wall-clock instants — yields a
+//     byte-identical assign record. Any surviving time.Now() inside an
+//     applyAssign* handler would make the two folds diverge (or, at minimum,
+//     couple the result to the wall clock at replay time).
+//
+//  2. Wall-clock independence: a log whose message timestamps sit far in the PAST
+//     (2020) and an otherwise identical log far in the FUTURE (2030) fold to the
+//     SAME status progression. Under the removed wall-clock guard in
+//     applyAssignComplete, the 2020 completion would have been dropped
+//     (time.Now() is well past ClaimExpiresAt = 2020+15m) leaving AssignClaimed,
+//     while the 2030 completion would be accepted — a clock-dependent divergence.
+//     The fix makes both reach AssignCompleted.
+func TestAssignFoldDeterministicAcrossWallClock(t *testing.T) {
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
+	future := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
+
+	// (1) Byte-identical double replay of the SAME log (2020 stamps, so the
+	// removed complete-expiry guard would have fired under the old code).
+	seq := buildAssignLifecycleSeq(past)
+	recA := replayAssignLifecycle(seq)
+	recB := replayAssignLifecycle(seq)
+	if !reflect.DeepEqual(recA, recB) {
+		t.Fatalf("fold is not replay-deterministic:\n  A = %+v\n  B = %+v", recA, recB)
+	}
+
+	// The completion must have been accepted (proves the wall-clock ClaimExpiresAt
+	// gate is gone — under the old fold this record would be stuck at AssignClaimed).
+	if recA.Status != AssignCompleted {
+		t.Fatalf("status = %v, want AssignCompleted (late completion must not be dropped by a fold clock)", recA.Status)
+	}
+	if recA.ClaimantKey != agentKey2 {
+		t.Fatalf("claimant = %q, want %q (second claimant after expire+reclaim)", recA.ClaimantKey, agentKey2)
+	}
+
+	// (2) Past vs future: identical status progression regardless of message-time
+	// vs wall-clock ordering. Absolute times differ by construction, but the
+	// derived durations and the terminal status must match exactly.
+	recFuture := replayAssignLifecycle(buildAssignLifecycleSeq(future))
+	if recFuture.Status != recA.Status {
+		t.Fatalf("status differs past=%v future=%v — fold outcome depends on wall clock", recA.Status, recFuture.Status)
+	}
+	if recFuture.ClaimantKey != recA.ClaimantKey {
+		t.Fatalf("claimant differs past=%q future=%q — fold outcome depends on wall clock", recA.ClaimantKey, recFuture.ClaimantKey)
+	}
+	// ClaimExpiresAt is derived from AssignReceivedAt + timeout; the delta must be
+	// invariant to the absolute base timestamp.
+	deltaPast := recA.ClaimExpiresAt.Sub(recA.AssignReceivedAt)
+	deltaFuture := recFuture.ClaimExpiresAt.Sub(recFuture.AssignReceivedAt)
+	if deltaPast != deltaFuture {
+		t.Fatalf("ClaimExpiresAt-AssignReceivedAt delta differs past=%v future=%v", deltaPast, deltaFuture)
+	}
+	// And the record's own timestamps must track the message log, not the wall
+	// clock: AssignReceivedAt equals the assign message's stamp.
+	if got := recFuture.AssignReceivedAt.UnixNano(); got != future {
+		t.Fatalf("AssignReceivedAt = %d, want message timestamp %d (fold read a clock, not the log)", got, future)
+	}
+}
 
 // --- Vickrey Auction Tests ---
 

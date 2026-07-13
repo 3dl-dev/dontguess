@@ -427,6 +427,15 @@ const (
 	// Transitions from AssignAccepted → AssignPaid in ClaimAssignPayment to
 	// prevent double-payment on replayed accept messages.
 	AssignPaid
+	// AssignExpired is a terminal state for an unclaimed standing assign whose
+	// DeadlineAt has passed. The transition AssignOpen → AssignExpired is applied
+	// by applyAssignExpire when the operator sweep emits an assign-expire whose
+	// antecedent is the assign ID (not a claim ID). This is the event-sourced-pure
+	// replacement for the removed wall-clock DeadlineAt guard in applyAssignClaim
+	// (ruling 2026-07-08): an expired standing offer is closed by an operator event
+	// in the log rather than by the fold reading time.Now(), so it is unclaimable
+	// deterministically on replay.
+	AssignExpired
 )
 
 // String returns a human-readable name for the AssignStatus value.
@@ -444,6 +453,8 @@ func (s AssignStatus) String() string {
 		return "assign-rejected"
 	case AssignPaid:
 		return "assign-paid"
+	case AssignExpired:
+		return "assign-expired"
 	default:
 		return fmt.Sprintf("assign-unknown(%d)", int(s))
 	}

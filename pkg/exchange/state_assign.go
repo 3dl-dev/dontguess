@@ -5,6 +5,26 @@ import (
 	"time"
 )
 
+// foldTime returns the operator/author-authored message timestamp as a UTC time.
+//
+// Per the operator ruling of 2026-07-08 (option B, event-sourced-pure), the
+// assign fold MUST have no clock: every time value it records is derived from
+// this persisted, replay-stable message Timestamp and NEVER from time.Now().
+// The wall clock is non-deterministic on replay and manipulable by whichever
+// node's clock observes a message first — reading it inside Apply would make the
+// folded State depend on when (and where) the log is replayed. A message with no
+// Timestamp (test/synthetic only) yields the zero time, which is still fully
+// deterministic. Deadline ENFORCEMENT does not live in the fold — it is driven
+// exclusively by the off-fold operator sweep emitting operator-authored
+// exchange:assign-expire events (engine sweepExpiredClaims /
+// sweepStalePredictionAssigns), which the fold then applies deterministically.
+func foldTime(msg *Message) time.Time {
+	if msg.Timestamp > 0 {
+		return time.Unix(0, msg.Timestamp).UTC()
+	}
+	return time.Time{}
+}
+
 // applyAssign processes an exchange:assign message.
 //
 // Only the operator may post assign tasks. Non-operator senders are rejected
@@ -49,12 +69,9 @@ func (s *State) applyAssign(msg *Message) {
 	if timeoutMinutes <= 0 || timeoutMinutes > 30 {
 		timeoutMinutes = DefaultClaimTimeoutMinutes
 	}
-	// Use the message's sender-reported timestamp as receive time; fall back to
-	// current wall clock if the timestamp is absent (tests, synthetic messages).
-	receivedAt := time.Now().UTC()
-	if msg.Timestamp > 0 {
-		receivedAt = time.Unix(0, msg.Timestamp).UTC()
-	}
+	// Receive time is the operator-authored assign message Timestamp — the fold
+	// has no clock (see foldTime).
+	receivedAt := foldTime(msg)
 	rec := &AssignRecord{
 		AssignID:            msg.ID,
 		EntryID:             payload.EntryID,
@@ -111,10 +128,13 @@ func (s *State) applyAssignClaim(msg *Message) {
 		s.recordFoldDenial(foldDenialAssignExclusive, msg)
 		return
 	}
-	// DeadlineAt constraint: standing assigns past their deadline are unclaim-able.
-	if !rec.DeadlineAt.IsZero() && time.Now().UTC().After(rec.DeadlineAt) {
-		return
-	}
+	// DeadlineAt constraint: standing assigns past their deadline are unclaim-able,
+	// but that is NOT enforced here with a wall clock (event-sourced-pure ruling
+	// 2026-07-08). Enforcement is off-fold: the operator sweep
+	// (engine sweepStalePredictionAssigns) detects a passed DeadlineAt and emits an
+	// operator-authored exchange:assign-expire whose fold transition (AssignOpen →
+	// AssignExpired) makes this record fail the `Status != AssignOpen` guard above.
+	// The fold never reads the clock, so a claim's success is identical on replay.
 
 	// Parse the claim payload (supports both expires_at and bid fields).
 	var claimPayload struct {
@@ -128,10 +148,7 @@ func (s *State) applyAssignClaim(msg *Message) {
 	// Auction path: if this assign has an auction window, collect bids instead
 	// of claiming immediately.
 	if !rec.AuctionDeadline.IsZero() {
-		msgTime := time.Now().UTC()
-		if msg.Timestamp > 0 {
-			msgTime = time.Unix(0, msg.Timestamp).UTC()
-		}
+		msgTime := foldTime(msg)
 		if !msgTime.Before(rec.AuctionDeadline) {
 			// Auction window closed; stray claim messages are ignored.
 			// Finalization is handled by applyAssignAuctionClose.
@@ -184,10 +201,7 @@ func (s *State) applyAssignClaim(msg *Message) {
 			}
 		}
 	}
-	claimTime := time.Now().UTC()
-	if msg.Timestamp > 0 {
-		claimTime = time.Unix(0, msg.Timestamp).UTC()
-	}
+	claimTime := foldTime(msg)
 	rec.Status = AssignClaimed
 	rec.ClaimantKey = msg.Sender
 	rec.ClaimMsgID = msg.ID
@@ -263,10 +277,7 @@ func (s *State) applyAssignAuctionClose(msg *Message) {
 	}
 
 	// Transition to AssignClaimed with the Vickrey winner.
-	auctionCloseTime := time.Now().UTC()
-	if msg.Timestamp > 0 {
-		auctionCloseTime = time.Unix(0, msg.Timestamp).UTC()
-	}
+	auctionCloseTime := foldTime(msg)
 	ceiling := rec.AssignReceivedAt.Add(time.Duration(rec.ClaimTimeoutMinutes) * time.Minute)
 	rec.Status = AssignClaimed
 	rec.ClaimantKey = winner.WorkerKey
@@ -310,16 +321,14 @@ func (s *State) applyAssignComplete(msg *Message) {
 		s.recordFoldDenial(foldDenialAssignClaimant, msg)
 		return
 	}
-	// Defensive expiry check: if the claim has expired (the engine should have
-	// already emitted assign-expire and transitioned back to AssignOpen, but
-	// message ordering is not guaranteed), drop the completion.
-	if !rec.ClaimExpiresAt.IsZero() && time.Now().UTC().After(rec.ClaimExpiresAt) {
-		return
-	}
-	completeTime := time.Now().UTC()
-	if msg.Timestamp > 0 {
-		completeTime = time.Unix(0, msg.Timestamp).UTC()
-	}
+	// Claim expiry is NOT re-checked here against a wall clock (event-sourced-pure
+	// ruling 2026-07-08). A late completion is rejected deterministically instead:
+	// the off-fold operator sweep (engine sweepExpiredClaims) emits an
+	// operator-authored exchange:assign-expire once ClaimExpiresAt passes, which
+	// the fold applies to reopen the assign (AssignClaimed → AssignOpen) and delete
+	// the claimMsgToAssign index — so a completion arriving after that either fails
+	// the claimMsgToAssign lookup above or the `Status != AssignClaimed` guard.
+	completeTime := foldTime(msg)
 	rec.Status = AssignCompleted
 	rec.CompleteMsgID = msg.ID
 	rec.Result = msg.Payload
@@ -400,15 +409,23 @@ func (s *State) applyAssignReject(msg *Message) {
 // applyAssignExpire processes an exchange:assign-expire message.
 //
 // Only the operator may emit assign-expire messages.
-// Antecedent: the assign-claim message ID that expired.
+// Antecedent: EITHER the assign-claim message ID of a claimed task that expired,
+// OR (deadline path) the assign message ID of an unclaimed standing task whose
+// DeadlineAt has passed.
 //
 // Validation:
 //   - Sender must be the operator (if OperatorKey set).
-//   - Antecedent must reference a known assign-claim for an assign in AssignClaimed state.
-//   - Idempotent: replaying the same expire message is a no-op (record already open).
+//   - Antecedent must reference EITHER a known assign-claim for an assign in
+//     AssignClaimed state (claim-expiry path), OR a known AssignOpen assign
+//     (standing-deadline path).
+//   - Idempotent: replaying the same expire message is a no-op.
 //
-// On success, the claimant fields are cleared, the claimedAssigns binding is
-// removed, and the record transitions back to AssignOpen.
+// Claim-expiry path: the claimant fields are cleared, the claimedAssigns binding
+// is removed, and the record transitions back to AssignOpen so another agent may
+// claim it. Standing-deadline path: the unclaimed record transitions to the
+// terminal AssignExpired state so it is no longer claimable — this is the
+// event-sourced-pure replacement for the removed wall-clock DeadlineAt guard in
+// applyAssignClaim (ruling 2026-07-08).
 func (s *State) applyAssignExpire(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
 		return
@@ -416,25 +433,30 @@ func (s *State) applyAssignExpire(msg *Message) {
 	if len(msg.Antecedents) == 0 {
 		return
 	}
-	claimMsgID := msg.Antecedents[0]
-	// Find the assign record via the O(1) claim-msg index.
-	assignID, ok := s.claimMsgToAssign[claimMsgID]
-	if !ok {
-		return // idempotent: already expired/open or unknown
+	antecedent := msg.Antecedents[0]
+	// Claim-expiry path: antecedent is a claim-msg ID indexed to a claimed assign.
+	if assignID, ok := s.claimMsgToAssign[antecedent]; ok {
+		rec := s.assignByID[assignID]
+		if rec == nil || rec.Status != AssignClaimed {
+			return // idempotent: already expired/open or unknown
+		}
+		// Free the agent's claim slot.
+		delete(s.claimedAssigns, rec.ClaimantKey)
+		// Remove from claim-msg index.
+		delete(s.claimMsgToAssign, antecedent)
+		// Reset to open so a different agent may claim the task.
+		rec.ClaimantKey = ""
+		rec.ClaimMsgID = ""
+		rec.ClaimExpiresAt = time.Time{}
+		rec.Status = AssignOpen
+		return
 	}
-	rec := s.assignByID[assignID]
-	if rec == nil || rec.Status != AssignClaimed {
-		return // idempotent: already expired/open or unknown
+	// Standing-deadline path: antecedent is the assign ID of an unclaimed standing
+	// task past its DeadlineAt. Close it terminally so it can no longer be claimed.
+	if rec, ok := s.assignByID[antecedent]; ok && rec.Status == AssignOpen {
+		rec.Status = AssignExpired
 	}
-	// Free the agent's claim slot.
-	delete(s.claimedAssigns, rec.ClaimantKey)
-	// Remove from claim-msg index.
-	delete(s.claimMsgToAssign, claimMsgID)
-	// Reset to open so a different agent may claim the task.
-	rec.ClaimantKey = ""
-	rec.ClaimMsgID = ""
-	rec.ClaimExpiresAt = time.Time{}
-	rec.Status = AssignOpen
+	// Anything else: idempotent no-op (already claimed/completed/expired or unknown).
 }
 
 // ExpireStaleClaims checks all AssignClaimed records and returns the claim
@@ -518,7 +540,7 @@ func (s *State) ActiveAssigns(entryID string) []*AssignRecord {
 	recs := s.assignsByEntry[entryID]
 	out := make([]*AssignRecord, 0, len(recs))
 	for _, r := range recs {
-		if r.Status == AssignAccepted || r.Status == AssignRejected || r.Status == AssignPaid {
+		if r.Status == AssignAccepted || r.Status == AssignRejected || r.Status == AssignPaid || r.Status == AssignExpired {
 			continue
 		}
 		cp := *r
