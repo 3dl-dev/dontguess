@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/3dl-dev/dontguess/pkg/nip44"
 	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
@@ -1040,6 +1041,19 @@ func (e *Engine) handleSettleDeliverContent(msg *Message) error {
 // message with nil error means the deliver was declined (no content / oversize /
 // missing hash) — a no-op, not an error, unchanged from before.
 func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, buyerKey string) (*Message, error) {
+	// Team-tier v2 confidential entry (dontguess-9e8, content-confidentiality
+	// §3.4): the entry carries the seller's CEK wrapped to the operator plus the
+	// ciphertext hash. Deliver re-wraps the SAME CEK to the paying buyer and
+	// references the already-public ciphertext — it carries NO content and NO
+	// ciphertext on the wire. This closes the remaining deliver-side leak
+	// (previously the full plaintext was inlined here). The wrap RECIPIENT is
+	// buyerKey, which is the antecedent-chain MatchBuyerKey (engine_settle.go:978),
+	// never a payload field — that recipient key IS the anti-replay binding
+	// (§4.5.4): a captured deliver replayed toward a different (unfunded) buyer is
+	// simply undecryptable by them.
+	if entry.WrappedCEKOperator != "" {
+		return e.emitDeliverEnvelope(msg, entry, buyerKey)
+	}
 	if entry.BlobPointer != "" {
 		return e.emitDeliverPointer(msg, entry, buyerKey)
 	}
@@ -1099,6 +1113,83 @@ func (e *Engine) emitDeliverPointer(msg *Message, entry *InventoryEntry, buyerKe
 	}
 
 	return e.sendDeliverMessage(msg, entry, buyerKey, deliverPointerPayload, entry.ContentHash)
+}
+
+// emitDeliverEnvelope emits the §3.4 v2 confidential settle(deliver) for a
+// team-tier encrypted entry (dontguess-9e8). It carries the CEK re-wrapped to
+// the paying buyer + a reference to the already-public ciphertext + the
+// ciphertext hash — NEVER the content or the ciphertext bytes themselves.
+//
+// Re-wrap pivot (§3.1(5)): the operator unwraps the CEK from the seller's
+// wrap-to-operator (NIP-44(operatorPriv, sellerPub, WrappedCEKOperator)), then
+// re-seals the SAME CEK to the buyer (NIP-44(operatorPriv, buyerPub, CEK)). The
+// operator's always-online key is the re-wrapping pivot, so seller and buyer
+// never overlap.
+//
+// SECURITY — the anti-replay binding (§4.5.4): recipient / buyerKey is the
+// caller-supplied antecedent-chain MatchBuyerKey (engine_settle.go:978), NEVER a
+// pubkey read from any payload field. NIP-44 has no AAD, so the CEK wrap cannot
+// be crypto-bound to the match id inside the envelope; binding instead rests on
+// (a) the operator's Schnorr signature over the antecedent-chained deliver, (b)
+// the deliver→match→buyer chain, and (c) the live-reservation gate already
+// applied in handleSettleDeliverContent before this is reached. Because the CEK
+// is sealed to buyerPub, a captured deliver replayed toward a different
+// (unfunded) buyer is undecryptable by them — the recipient key IS the binding.
+//
+// Inline is the Phase-1 path: the ciphertext lives in the original 3401 put
+// event, so ciphertext_ref is {put_event: entry.PutMsgID}. A BlobPointer (the
+// Phase-4/dontguess-640 large-content path) would instead reference the Blossom
+// blob; v2 Phase-1 entries are inline-only (a blob-only team put is dropped at
+// applyPut), so this branch is defensive.
+func (e *Engine) emitDeliverEnvelope(msg *Message, entry *InventoryEntry, buyerKey string) (*Message, error) {
+	if entry.CiphertextHash == "" {
+		e.opts.log("engine: settle-deliver: v2 entry=%s has WrappedCEKOperator but no ciphertext_hash — refusing to emit deliver", shortKey(entry.EntryID))
+		return nil, nil
+	}
+	if e.state.operatorSigner == nil {
+		e.opts.log("engine: settle-deliver: v2 entry=%s but no operatorSigner — cannot re-wrap CEK", shortKey(entry.EntryID))
+		return nil, nil
+	}
+
+	// Unwrap the CEK from the seller's wrap-to-operator. entry.SellerKey is the
+	// put sender (state_put.go:848 SellerKey = msg.Sender), the same key
+	// decryptV2Put opened FROM at put time.
+	cek, err := nip44.Open(e.state.operatorSigner, entry.SellerKey, entry.WrappedCEKOperator)
+	if err != nil {
+		return nil, fmt.Errorf("engine: settle-deliver: unwrap CEK for entry=%s: %w", shortKey(entry.EntryID), err)
+	}
+
+	// Re-wrap the SAME CEK to the antecedent-chain buyer key — the binding.
+	wrappedForBuyer, err := nip44.Seal(e.state.operatorSigner, buyerKey, cek)
+	if err != nil {
+		return nil, fmt.Errorf("engine: settle-deliver: re-wrap CEK to buyer for entry=%s: %w", shortKey(entry.EntryID), err)
+	}
+
+	// Inline case: ciphertext lives in the original 3401 put event.
+	ciphertextRef := map[string]any{"put_event": entry.PutMsgID}
+	if entry.BlobPointer != "" {
+		ciphertextRef = map[string]any{"blob_pointer": entry.BlobPointer}
+	}
+
+	deliverEnvelopePayload, err := e.marshal(map[string]any{
+		"phase":           SettlePhaseStrDeliver,
+		"v":               2,
+		"entry_id":        entry.EntryID,
+		"content_alg":     "chacha20poly1305",
+		"ciphertext_ref":  ciphertextRef,
+		"ciphertext_hash": entry.CiphertextHash,
+		"key_wrap": map[string]any{
+			"alg":       "nip44-v2-secp256k1",
+			"recipient": buyerKey,
+			"wrapped":   wrappedForBuyer,
+		},
+		"guide": "Unwrap the CEK via NIP-44(buyerPriv, operatorPub, key_wrap.wrapped), fetch the ciphertext via ciphertext_ref, verify sha256(ciphertext)==ciphertext_hash, then AEAD-decrypt (content_alg). Mismatch ⇒ dispute, do NOT settle(complete).",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("engine: settle-deliver: marshal v2 envelope for entry=%s: %w", shortKey(entry.EntryID), err)
+	}
+
+	return e.sendDeliverMessage(msg, entry, buyerKey, deliverEnvelopePayload, entry.CiphertextHash)
 }
 
 // sendDeliverMessage emits the settle(deliver) convention message shared by
