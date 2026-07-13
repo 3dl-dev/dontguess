@@ -411,13 +411,14 @@ func TestE2E_TeamRoundTrip_PutBuyMatchSettle_ClientRunE_NotifyDriven(t *testing.
 	putCmd.SetOut(&putOut)
 	putCmd.SetErr(&putErr)
 	setPutFlags(t, putCmd, map[string]string{
-		"description":  ed2cPutDesc,
-		"content":      base64.StdEncoding.EncodeToString(ed2cContent),
-		"token_cost":   "8000",
-		"content_type": "exchange:content-type:code",
-		"domains":      "go",
-		"relay":        hub.wsURL(),
-		"timeout":      "3s", // no put-reject expected → returns after the bounded window
+		"description":   ed2cPutDesc,
+		"content":       base64.StdEncoding.EncodeToString(ed2cContent),
+		"token_cost":    "8000",
+		"content_type":  "exchange:content-type:code",
+		"domains":       "go",
+		"relay":         hub.wsURL(),
+		"timeout":       "3s", // no put-reject expected → returns after the bounded window
+		"operator-npub": operator.Npub(),
 	})
 	if err := runPut(putCmd, nil); err != nil {
 		t.Fatalf("runPut (allowlisted seller) returned error: %v\nstdout:\n%s\nstderr:\n%s", err, putOut.String(), putErr.String())
@@ -524,12 +525,13 @@ func TestE2E_NonAllowlistedPut_SurfacesLoudPutReject_ClientRunE(t *testing.T) {
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	setPutFlags(t, cmd, map[string]string{
-		"description":  "Reverse a linked list in place, iterative",
-		"content":      base64.StdEncoding.EncodeToString([]byte("some content the operator must never make matchable")),
-		"token_cost":   "8500",
-		"content_type": "exchange:content-type:code",
-		"relay":        hub.wsURL(),
-		"timeout":      "10s",
+		"description":   "Reverse a linked list in place, iterative",
+		"content":       base64.StdEncoding.EncodeToString([]byte("some content the operator must never make matchable")),
+		"token_cost":    "8500",
+		"content_type":  "exchange:content-type:code",
+		"relay":         hub.wsURL(),
+		"timeout":       "10s",
+		"operator-npub": operator.Npub(),
 	})
 	err = runPut(cmd, nil)
 	if err == nil {

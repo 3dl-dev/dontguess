@@ -48,6 +48,7 @@ yet wired to this command.`,
 	cmd.Flags().String("content_type", "exchange:content-type:text", "full exchange content-type tag")
 	cmd.Flags().StringSlice("domains", nil, "domain tags (comma-separated)")
 	cmd.Flags().String("relay", "", "relay websocket URL (default: first of DONTGUESS_RELAY_URLS)")
+	cmd.Flags().String("operator-npub", "", "operator npub to wrap the content key to (required for team tier — content is encrypted to the operator)")
 	cmd.Flags().Duration("timeout", relayclient.DefaultTimeout, "bounded end-to-end timeout (dial, publish, await OK + put-reject)")
 	cmd.Flags().Bool("relay-auth", false, "opt into the NIP-42 client AUTH handshake (default: WithoutClientAuth)")
 	return cmd
@@ -66,6 +67,7 @@ func runPut(cmd *cobra.Command, args []string) error {
 	contentType, _ := cmd.Flags().GetString("content_type")
 	domains, _ := cmd.Flags().GetStringSlice("domains")
 	relayURL, _ := cmd.Flags().GetString("relay")
+	operatorNpub, _ := cmd.Flags().GetString("operator-npub")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	relayAuth, _ := cmd.Flags().GetBool("relay-auth")
 
@@ -94,6 +96,18 @@ func runPut(cmd *cobra.Command, args []string) error {
 		relayURL = urls[0]
 	}
 
+	// Team-tier puts encrypt content to the operator (§3.1): the CEK is
+	// NIP-44-wrapped to the operator's x-only key, so we MUST know it before
+	// building the put. Individual tier (runPutIndividual, above) never reaches
+	// here — it is already confidential over the local socket.
+	if operatorNpub == "" {
+		return fmt.Errorf("put: --operator-npub is required for team tier (content is encrypted to the operator; §3.1)")
+	}
+	operatorPubKey, err := identity.DecodeNpubToHex(operatorNpub)
+	if err != nil {
+		return fmt.Errorf("put: --operator-npub is not a valid npub: %w", err)
+	}
+
 	signer, err := loadAgentSigner()
 	if err != nil {
 		return fmt.Errorf("put: %w", err)
@@ -113,11 +127,12 @@ func runPut(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	result, err := relayclient.Put(ctx, conn, signer, relayclient.PutRequest{
-		Description: description,
-		Content:     content,
-		TokenCost:   tokenCost,
-		ContentType: contentType,
-		Domains:     domains,
+		Description:    description,
+		Content:        content,
+		TokenCost:      tokenCost,
+		ContentType:    contentType,
+		Domains:        domains,
+		OperatorPubKey: operatorPubKey,
 	})
 	if err != nil {
 		return fmt.Errorf("put failed: %w", err)

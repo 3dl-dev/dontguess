@@ -74,12 +74,14 @@ func TestRunPut_NoRelayConfigured_RoutesIndividualTier(t *testing.T) {
 
 func TestRunPut_MissingAgentIdentity(t *testing.T) {
 	t.Setenv("AGENT_CF_HOME", "")
+	op, _ := identity.Generate()
 	cmd := newPutCmd()
 	setPutFlags(t, cmd, map[string]string{
-		"description": "x",
-		"content":     base64.StdEncoding.EncodeToString([]byte("y")),
-		"token_cost":  "1000",
-		"relay":       "ws://127.0.0.1:1",
+		"description":   "x",
+		"content":       base64.StdEncoding.EncodeToString([]byte("y")),
+		"token_cost":    "1000",
+		"relay":         "ws://127.0.0.1:1",
+		"operator-npub": op.Npub(),
 	})
 	err := runPut(cmd, nil)
 	if err == nil || !strings.Contains(err.Error(), "AGENT_CF_HOME") {
@@ -97,14 +99,16 @@ func TestRunPut_AllowlistedRelay_NoRejectObserved_Succeeds(t *testing.T) {
 	}
 	t.Setenv("AGENT_CF_HOME", agentHome)
 
+	op, _ := identity.Generate()
 	cmd := newPutCmd()
 	setPutFlags(t, cmd, map[string]string{
-		"description":  "reusable CI path filter",
-		"content":      base64.StdEncoding.EncodeToString([]byte("computed content")),
-		"token_cost":   "1000",
-		"content_type": "exchange:content-type:code",
-		"relay":        wsURL(srv.URL),
-		"timeout":      "500ms",
+		"description":   "reusable CI path filter",
+		"content":       base64.StdEncoding.EncodeToString([]byte("computed content")),
+		"token_cost":    "1000",
+		"content_type":  "exchange:content-type:code",
+		"relay":         wsURL(srv.URL),
+		"timeout":       "500ms",
+		"operator-npub": op.Npub(),
 	})
 	if err := runPut(cmd, nil); err != nil {
 		t.Fatalf("runPut: %v", err)
@@ -131,11 +135,12 @@ func TestRunPut_NonAllowlistedRelay_SurfacesRejectAndFails(t *testing.T) {
 
 	cmd := newPutCmd()
 	setPutFlags(t, cmd, map[string]string{
-		"description": "test content",
-		"content":     base64.StdEncoding.EncodeToString([]byte("computed content")),
-		"token_cost":  "1000",
-		"relay":       wsURL(srv.URL),
-		"timeout":     "1s",
+		"description":   "test content",
+		"content":       base64.StdEncoding.EncodeToString([]byte("computed content")),
+		"token_cost":    "1000",
+		"relay":         wsURL(srv.URL),
+		"timeout":       "1s",
+		"operator-npub": operator.Npub(),
 	})
 	err = runPut(cmd, nil)
 	if err == nil {

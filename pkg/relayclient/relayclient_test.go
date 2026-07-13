@@ -179,10 +179,11 @@ func TestPut_OKIsNotSuccess_RejectSurfaced(t *testing.T) {
 	defer cancel()
 
 	result, err := Put(ctx, conn, agent, PutRequest{
-		Description: "a reusable schema checklist",
-		Content:     []byte("computed content bytes"),
-		TokenCost:   1000,
-		ContentType: "exchange:content-type:code",
+		Description:    "a reusable schema checklist",
+		Content:        []byte("computed content bytes"),
+		TokenCost:      1000,
+		ContentType:    "exchange:content-type:code",
+		OperatorPubKey: operator.PubKeyHex(),
 	})
 	if err != nil {
 		t.Fatalf("Put: %v", err)
@@ -219,10 +220,11 @@ func TestPut_AllowlistedNoReject_BoundedSuccess(t *testing.T) {
 
 	start := time.Now()
 	result, err := Put(ctx, conn, agent, PutRequest{
-		Description: "a reusable CI path filter",
-		Content:     []byte("computed content bytes"),
-		TokenCost:   1000,
-		ContentType: "exchange:content-type:code",
+		Description:    "a reusable CI path filter",
+		Content:        []byte("computed content bytes"),
+		TokenCost:      1000,
+		ContentType:    "exchange:content-type:code",
+		OperatorPubKey: newSigner(t).PubKeyHex(),
 	})
 	elapsed := time.Since(start)
 	if err != nil {
@@ -257,10 +259,11 @@ func TestPut_StalledPostConnectRelay_TimesOutLoud(t *testing.T) {
 
 	start := time.Now()
 	_, err := Put(ctx, conn, agent, PutRequest{
-		Description: "stalled relay probe",
-		Content:     []byte("x"),
-		TokenCost:   1000,
-		ContentType: "exchange:content-type:text",
+		Description:    "stalled relay probe",
+		Content:        []byte("x"),
+		TokenCost:      1000,
+		ContentType:    "exchange:content-type:text",
+		OperatorPubKey: newSigner(t).PubKeyHex(),
 	})
 	elapsed := time.Since(start)
 	if err == nil {
@@ -291,10 +294,11 @@ func TestPut_StalledHandshakeRelay_TimesOutLoud(t *testing.T) {
 
 	start := time.Now()
 	_, err := Put(ctx, conn, agent, PutRequest{
-		Description: "stalled handshake probe",
-		Content:     []byte("x"),
-		TokenCost:   1000,
-		ContentType: "exchange:content-type:text",
+		Description:    "stalled handshake probe",
+		Content:        []byte("x"),
+		TokenCost:      1000,
+		ContentType:    "exchange:content-type:text",
+		OperatorPubKey: newSigner(t).PubKeyHex(),
 	})
 	elapsed := time.Since(start)
 	if err == nil {
@@ -321,10 +325,11 @@ func TestPut_DeadRelay_FailsFastNotDefaultBackoff(t *testing.T) {
 
 	start := time.Now()
 	_, err := Put(ctx, conn, agent, PutRequest{
-		Description: "dead relay probe",
-		Content:     []byte("x"),
-		TokenCost:   1000,
-		ContentType: "exchange:content-type:text",
+		Description:    "dead relay probe",
+		Content:        []byte("x"),
+		TokenCost:      1000,
+		ContentType:    "exchange:content-type:text",
+		OperatorPubKey: newSigner(t).PubKeyHex(),
 	})
 	elapsed := time.Since(start)
 	if err == nil {

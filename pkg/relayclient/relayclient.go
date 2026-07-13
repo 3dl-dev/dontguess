@@ -20,18 +20,32 @@ package relayclient
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
 	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/nip44"
 	"github.com/3dl-dev/dontguess/pkg/nostr"
 	"github.com/3dl-dev/dontguess/pkg/proto"
 	"github.com/3dl-dev/dontguess/pkg/relay"
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/chacha20poly1305"
 )
+
+// maxInlineCiphertextPlaintext is the plaintext-size ceiling for the inline
+// ciphertext path. Content at or below this size is AEAD-encrypted and carried
+// inline in the put payload (§3.2: len(content) ≤ 32 KiB → inline). Larger
+// content requires the Blossom CIPHERTEXT offload + blob_pointer path, which is
+// item dontguess-640 (Phase 4). buildPutMessage fails CLOSED on oversize
+// content — it NEVER falls back to a plaintext blob or an inline plaintext
+// leak. Mirrors the engine's BlossomOffloadThreshold (state_types.go:138).
+const maxInlineCiphertextPlaintext = 32 * 1024
 
 // DefaultBackoff is the client's bounded reconnect schedule. It deliberately
 // does NOT reuse relay.DefaultBackoff (MaxAttempts=0, retry forever) — a
@@ -49,9 +63,10 @@ var DefaultBackoff = relay.Backoff{
 const DefaultTimeout = 15 * time.Second
 
 // PutRequest is the caller-supplied content of a put. Content is the RAW
-// (already-decoded) bytes — Put base64-encodes it onto the wire payload
-// itself, mirroring the engine's applyPut expectation
-// (pkg/exchange/state_put.go).
+// (already-decoded) plaintext bytes. Put NEVER places plaintext on the wire:
+// buildPutMessage encrypts Content under a per-entry random CEK (AEAD) and
+// wraps that CEK to the operator (NIP-44). See the schema-v2 "enc" envelope in
+// docs/design/content-confidentiality-envelope-541.md §3.3.
 type PutRequest struct {
 	Description string
 	Content     []byte
@@ -60,6 +75,17 @@ type PutRequest struct {
 	// "exchange:content-type:code" (the engine strips the prefix internally).
 	ContentType string
 	Domains     []string
+	// OperatorPubKey is the operator's 32-byte x-only pubkey (hex). The CEK is
+	// NIP-44-wrapped to this key so the always-online operator can decrypt at
+	// put-accept and re-wrap to buyers at deliver (§3.1). REQUIRED for team-tier
+	// puts — without it there is no recipient for the content key. Mirrors the
+	// SettleOptions.OperatorPubKey precedent (settle.go).
+	OperatorPubKey string
+	// Teaser is the optional seller-authored public abstract carried alongside
+	// description (§3.3, §4.1). It is intentionally-published cleartext (may be
+	// ""); the teaser length cap + operator coherence check is item
+	// dontguess-4059 — 58f only carries the field on the wire.
+	Teaser string
 }
 
 // PutResult is the outcome of a Put call.
@@ -324,10 +350,28 @@ func parsePutReject(ev *identity.Event, putID string) (rejected bool, reason str
 	return true, payload.Reason, true
 }
 
-// buildPutMessage renders req into the proto.Message shape the engine's
-// applyPut (pkg/exchange/state_put.go) expects: description/content/
-// token_cost/content_type/domains in the JSON payload, content base64-encoded,
-// tagged exchange:put.
+// buildPutMessage renders req into the schema-v2 ciphertext-only put payload
+// (docs/design/content-confidentiality-envelope-541.md §3.3). It emits NO
+// plaintext and NO plaintext hash: a passive relay reader sees only
+// description, teaser, token_cost, content_type, domains, and the "enc"
+// envelope (AEAD ciphertext + a hash OVER THE CIPHERTEXT + the CEK wrapped to
+// the operator). Recovering plaintext requires the operator's (or a paying
+// buyer's) secp256k1 private key — confidentiality by construction, not by
+// relay read-ACL.
+//
+// Construction (all four steps are security invariants the veracity adversary
+// checks):
+//  1. CEK is 32 fresh bytes from crypto/rand — NEVER content-derived (a
+//     content-derived key re-creates the §4.4 plaintext guess-confirmation
+//     oracle via convergent encryption).
+//  2. ciphertext = nonce(12) || ChaCha20-Poly1305(CEK, nonce, plaintext). The
+//     nonce is fresh per encryption and prepended so the buyer can split it.
+//     This is the BULK cipher, distinct from NIP-44 which only wraps the CEK.
+//  3. ciphertext_hash = "sha256:"+hex(sha256(ciphertext)) — over the CIPHERTEXT
+//     bytes, never plaintext (§4.4/§3.3): a plaintext hash would be a public
+//     guess-confirmation oracle.
+//  4. key_wrap.wrapped = NIP-44(sellerPriv, operatorPub, CEK) — only the
+//     operator can unwrap it.
 func buildPutMessage(signer identity.Signer, req PutRequest) (*proto.Message, error) {
 	if req.Description == "" {
 		return nil, fmt.Errorf("empty description")
@@ -338,12 +382,62 @@ func buildPutMessage(signer identity.Signer, req PutRequest) (*proto.Message, er
 	if req.TokenCost <= 0 {
 		return nil, fmt.Errorf("token_cost must be positive, got %d", req.TokenCost)
 	}
+	if req.OperatorPubKey == "" {
+		return nil, fmt.Errorf("empty operator pubkey: a team-tier put must wrap its content key to the operator (§3.1)")
+	}
+	// Fail CLOSED on oversize content: the Blossom CIPHERTEXT offload
+	// (blob_pointer) + buyer-side fetch is item dontguess-640 (Phase 4). We must
+	// NEVER degrade to an inline plaintext leak or a plaintext blob, so oversize
+	// content is a loud error, not a silent fallback.
+	if len(req.Content) > maxInlineCiphertextPlaintext {
+		return nil, fmt.Errorf("content is %d bytes (> %d inline limit): large-content Blossom ciphertext offload is deferred to dontguess-640", len(req.Content), maxInlineCiphertextPlaintext)
+	}
+
+	// (1) Per-entry CEK from the CSPRNG — never derived from content.
+	cek := make([]byte, chacha20poly1305.KeySize)
+	if _, err := rand.Read(cek); err != nil {
+		return nil, fmt.Errorf("generate CEK: %w", err)
+	}
+
+	// (2) Bulk AEAD: ciphertext = nonce || ChaCha20-Poly1305(CEK, nonce, plaintext).
+	aead, err := chacha20poly1305.New(cek)
+	if err != nil {
+		return nil, fmt.Errorf("init content AEAD: %w", err)
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate content nonce: %w", err)
+	}
+	ciphertext := aead.Seal(nonce, nonce, req.Content, nil)
+
+	// (3) Integrity hash over the CIPHERTEXT (buyer/Blossom verify), never plaintext.
+	sum := sha256.Sum256(ciphertext)
+	ciphertextHash := "sha256:" + hex.EncodeToString(sum[:])
+
+	// (4) Wrap the CEK to the operator via NIP-44 (secp256k1 ECDH). nip44.Seal
+	// returns a base64 payload string; carry it verbatim as key_wrap.wrapped.
+	wrapped, err := nip44.Seal(signer, req.OperatorPubKey, cek)
+	if err != nil {
+		return nil, fmt.Errorf("wrap CEK to operator: %w", err)
+	}
+
 	payload, err := json.Marshal(map[string]any{
+		"v":            2,
 		"description":  req.Description,
-		"content":      base64.StdEncoding.EncodeToString(req.Content),
+		"teaser":       req.Teaser,
 		"token_cost":   req.TokenCost,
 		"content_type": req.ContentType,
 		"domains":      req.Domains,
+		"enc": map[string]any{
+			"content_alg":     "chacha20poly1305",
+			"ciphertext_hash": ciphertextHash,
+			"ciphertext":      base64.StdEncoding.EncodeToString(ciphertext),
+			"key_wrap": map[string]any{
+				"alg":       "nip44-v2-secp256k1",
+				"recipient": req.OperatorPubKey,
+				"wrapped":   wrapped,
+			},
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode put payload: %w", err)
