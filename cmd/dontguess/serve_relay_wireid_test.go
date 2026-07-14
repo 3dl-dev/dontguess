@@ -122,6 +122,30 @@ type wireIDStack struct {
 // fleet-allowlisted buyer's settle(buyer-accept) is silently dropped pre-fold
 // (engine_core.go dispatch). Every pre-existing call site passes none, so
 // EngineOptions.TrustChecker stays nil and behavior is byte-for-byte unchanged.
+//
+// DELIBERATELY no OperatorSigner (dontguess-3d8 cleanup sweep, FIX 4): with no
+// OperatorSigner, EngineOptions.ScripStore alone does NOT flip
+// State.encryptedRequired (engine_core.go: encryptedRequired = ScripStore!=nil
+// && OperatorSigner!=nil), so every put fixture built against this stack takes
+// the legacy plaintext/individual-tier applyPut path even though ScripStore
+// (and, for allowlist tests, TrustChecker) are wired "team-tier". This is
+// intentional, not an oversight: every test built on newWireIDStack targets
+// non-crypto dispatch behavior — wire-id/store-id reconciliation across a
+// restart (TestRelayRestartWireIDSettle), auto-deliver exactly-once
+// (TestRelayAutoDeliverExactlyOnce), consume/outbox logging
+// (TestRelayTeamTierConsumePublishesNoOutboxFatal), and the trust-gate
+// allowlist silent-drop (TestEd2C_RunBuy_MintedButNotAllowlistedBuyer_...) —
+// none of which is exercised any differently by an encrypted vs. plaintext put.
+// Wiring OperatorSigner here would force migrating every fixture's plaintext
+// put payload (knownPutPayload et al.) to the v2 envelope (CEK, key_wrap,
+// ciphertext_hash) for zero added coverage of what these tests actually check.
+// The encrypted (v2) path IS covered end-to-end, including combined with a
+// live TrustChecker, by the separate e2eStack in
+// serve_relay_ed2g_e2e_test.go (newE2EStack wires both OperatorSigner and
+// TrustChecker) — see e.g. TestE2E_TeamRoundTrip_PutBuyMatchSettle_ClientRunE_NotifyDriven
+// and TestE2E_NonAllowlistedPut_SurfacesLoudPutReject_ClientRunE. That is the
+// smoke coverage this cleanup would otherwise have had to add from scratch, so
+// no new variant is added here.
 func newWireIDStack(t *testing.T, ctx context.Context, ls *dgstore.Store, operator identity.Signer, cursorPath string, trustChecker ...*exchange.TrustChecker) *wireIDStack {
 	t.Helper()
 

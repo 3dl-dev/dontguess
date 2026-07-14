@@ -99,37 +99,9 @@ func (s *State) BlobStore() BlobStore {
 	return s.blobStore
 }
 
-// FetchAndVerifyBlob resolves entry's full content via the configured
-// BlobStore and verifies it against entry.ContentHash before returning it.
-// This is the client-side hash verification the design doc calls out as a
-// free content-hash-spoof mitigation: a tampered or corrupted blob is
-// rejected here rather than delivered to a buyer.
-//
-// Returns an error if:
-//   - entry has no BlobPointer (nothing to fetch — caller should use
-//     entry.Content directly instead),
-//   - no BlobStore is configured,
-//   - the fetch fails,
-//   - the fetched bytes' sha256 does not match entry.ContentHash.
-func (s *State) FetchAndVerifyBlob(entry *InventoryEntry) ([]byte, error) {
-	if entry == nil {
-		return nil, errors.New("exchange: nil entry")
-	}
-	if entry.BlobPointer == "" {
-		return nil, errors.New("exchange: entry has no blob pointer")
-	}
-	store := s.BlobStore()
-	if store == nil {
-		return nil, errors.New("exchange: no blob store configured")
-	}
-	content, err := store.Fetch(entry.BlobPointer)
-	if err != nil {
-		return nil, err
-	}
-	sum := sha256.Sum256(content)
-	gotHash := "sha256:" + hex.EncodeToString(sum[:])
-	if gotHash != entry.ContentHash {
-		return nil, errors.New("exchange: blob content-hash mismatch — possible tampering or corruption")
-	}
-	return content, nil
+// sha256Ref returns the canonical "sha256:"+hex(sha256(b)) content-address
+// string used throughout the exchange for ContentHash/CiphertextHash values.
+func sha256Ref(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

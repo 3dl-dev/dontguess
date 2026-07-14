@@ -46,8 +46,17 @@ import (
 // (dontguess-640, Phase 4). If oversize content is put with NO BlobStore,
 // buildPutMessage fails CLOSED — it NEVER falls back to a plaintext blob or an
 // inline plaintext leak, and it NEVER stores plaintext in a blob (the blob always
-// holds ciphertext). Mirrors the engine's BlossomOffloadThreshold (state_types.go:138).
-const maxInlineCiphertextPlaintext = 32 * 1024
+// holds ciphertext). This IS the engine's exchange.BlossomOffloadThreshold — a
+// local alias so relayclient call sites don't need the exchange. qualifier.
+const maxInlineCiphertextPlaintext = exchange.BlossomOffloadThreshold
+
+// sha256Ref returns the canonical "sha256:"+hex(sha256(b)) content-address
+// string used for ciphertext_hash/content_hash values on the wire. Mirrors
+// the operator-side helper of the same name in pkg/exchange.
+func sha256Ref(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
 
 // DefaultBackoff is the client's bounded reconnect schedule. It deliberately
 // does NOT reuse relay.DefaultBackoff (MaxAttempts=0, retry forever) — a
@@ -424,8 +433,7 @@ func buildPutMessage(signer identity.Signer, req PutRequest) (*proto.Message, er
 	ciphertext := aead.Seal(nonce, nonce, req.Content, nil)
 
 	// (3) Integrity hash over the CIPHERTEXT (buyer/Blossom verify), never plaintext.
-	sum := sha256.Sum256(ciphertext)
-	ciphertextHash := "sha256:" + hex.EncodeToString(sum[:])
+	ciphertextHash := sha256Ref(ciphertext)
 
 	// (4) Wrap the CEK to the operator via NIP-44 (secp256k1 ECDH). nip44.Seal
 	// returns a base64 payload string; carry it verbatim as key_wrap.wrapped.

@@ -42,9 +42,7 @@ package relayclient
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -539,8 +537,7 @@ func verifyLegacyDeliver(ev *identity.Event, payload *deliverPayload, maxInlineB
 			shortID(ev.ID), len(content), max)
 	}
 
-	rawHash := sha256.Sum256(content)
-	got := "sha256:" + hex.EncodeToString(rawHash[:])
+	got := sha256Ref(content)
 	if payload.ContentHash == "" {
 		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: operator supplied no content_hash — cannot verify integrity; refusing to settle(complete)", shortID(ev.ID))
 	}
@@ -634,8 +631,7 @@ func decryptDeliverV2(ctx context.Context, conn deliverConn, signer identity.Sig
 	}
 
 	// (3) Verify sha256(ciphertext)==ciphertext_hash BEFORE decrypting.
-	sum := sha256.Sum256(ciphertext)
-	got := "sha256:" + hex.EncodeToString(sum[:])
+	got := sha256Ref(ciphertext)
 	if got != p.CiphertextHash {
 		return nil, "", fmt.Errorf("relayclient: settle: deliver %s: CIPHERTEXT HASH MISMATCH — computed %s but the deliver claimed %s (possible tampering); NOT sending settle(complete)",
 			shortID(ev.ID), got, p.CiphertextHash)

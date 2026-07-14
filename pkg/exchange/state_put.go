@@ -1,9 +1,7 @@
 package exchange
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"time"
@@ -720,8 +718,7 @@ func (s *State) decryptV2Put(sellerPubHex string, enc *encEnvelope) (plaintext [
 	// wrong blob before spending an ECDH + AEAD open on it (§3.1(6)/§4.4 A7). For
 	// the offloaded path this ALSO authenticates the fetched blob against the hash
 	// the seller committed to on the (signed) put.
-	sum := sha256.Sum256(ciphertext)
-	if "sha256:"+hex.EncodeToString(sum[:]) != enc.CiphertextHash {
+	if sha256Ref(ciphertext) != enc.CiphertextHash {
 		return nil, false
 	}
 	// Unwrap CEK = NIP-44.Open(operatorPriv, sellerPub, wrapped).
@@ -955,8 +952,7 @@ func (s *State) applyPut(msg *Message) {
 		}
 	}
 	// Compute content hash from the decoded bytes. Never trust hash from payload.
-	sum := sha256.Sum256(contentBytes)
-	contentHash := "sha256:" + hex.EncodeToString(sum[:])
+	contentHash := sha256Ref(contentBytes)
 	// Quality gate §2 (dontguess-ed1): content-hash deduplication.
 	// Reject puts whose content is already present in inventory or pendingPuts.
 	// This prevents sellers from re-putting identical content under a new description
@@ -972,7 +968,7 @@ func (s *State) applyPut(msg *Message) {
 	// bytes to the blob store and keep only a precomputed inline preview slice
 	// (15-25% of content, content-type-aware chunked — same algorithm used for
 	// the buyer-facing preview) plus the pointer. The full-fidelity deliver
-	// path fetches-and-verifies against contentHash (see FetchAndVerifyBlob).
+	// path fetches the blob (BlobStore.Fetch) and verifies it against contentHash.
 	//
 	// If no blob store is configured, or content is at/below the threshold,
 	// behavior is unchanged from before this change: full bytes stored inline.

@@ -7,8 +7,8 @@ package exchange_test
 //     produces a pending entry with a non-empty BlobPointer and Content that
 //     is NOT the full raw bytes (only the small inline preview slice) — the
 //     full content is never inlined.
-//   - The full content is retrievable and verifies via
-//     State.FetchAndVerifyBlob against the entry's ContentHash.
+//   - The full content is retrievable via BlobStore.Fetch and verifies
+//     against the entry's ContentHash.
 //   - Oversize put with NO blob store configured falls back to legacy
 //     behavior: full content inlined (regression safety — existing tests/
 //     callers that never configure a blob store are unaffected).
@@ -98,9 +98,13 @@ func TestApplyPut_OversizeContentOffloadedToBlossom(t *testing.T) {
 	}
 
 	// Full content must be fetchable and verify against ContentHash.
-	got, err := eng.State().FetchAndVerifyBlob(entry)
+	got, err := blobStore.Fetch(entry.BlobPointer)
 	if err != nil {
-		t.Fatalf("FetchAndVerifyBlob: %v", err)
+		t.Fatalf("Fetch: %v", err)
+	}
+	gotSum := sha256.Sum256(got)
+	if "sha256:"+hex.EncodeToString(gotSum[:]) != entry.ContentHash {
+		t.Fatalf("fetched blob content-hash mismatch: got %x, entry.ContentHash %q", gotSum, entry.ContentHash)
 	}
 	if len(got) != len(fullContent) {
 		t.Fatalf("fetched blob length = %d, want %d", len(got), len(fullContent))

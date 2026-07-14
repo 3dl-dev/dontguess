@@ -2,9 +2,7 @@ package exchange
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1062,8 +1060,7 @@ func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, buyerKe
 		return nil, nil
 	}
 
-	rawHash := sha256.Sum256(content)
-	contentHash := "sha256:" + hex.EncodeToString(rawHash[:])
+	contentHash := sha256Ref(content)
 
 	deliverContentPayload, err := e.marshal(map[string]any{
 		"phase":        SettlePhaseStrDeliver,
@@ -1084,9 +1081,7 @@ func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, buyerKe
 // Blossom-offloaded entry: a BlobPointer + content_hash, never the bytes. The
 // buyer is responsible for fetching entry.BlobPointer from the Blossom blob
 // store and verifying the fetched bytes' sha256 against content_hash before
-// trusting the content. See State.FetchAndVerifyBlob for the equivalent check
-// implemented for callers that fetch on the buyer's behalf server-side rather
-// than delivering a pointer for the buyer to resolve itself.
+// trusting the content.
 func (e *Engine) emitDeliverPointer(msg *Message, entry *InventoryEntry, buyerKey string) (*Message, error) {
 	if entry.ContentHash == "" {
 		e.opts.log("engine: settle-deliver: entry=%s has BlobPointer but no content_hash — refusing to emit pointer deliver", shortKey(entry.EntryID))
