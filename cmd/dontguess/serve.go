@@ -398,7 +398,12 @@ func runServeLocal(dgHome string) error {
 	}
 	var legs []relayLeg
 	for _, relayURL := range relayURLs {
-		conn := relay.New(relayURL, relaySigner)
+		// WithoutClientAuth: match the client side (relayclient.go DEFAULT) and the
+		// production strfry relays, which gate writes by a signed-author allowlist
+		// and never push a NIP-42 AUTH challenge. Without this the operator's leg
+		// blocks forever in dialAndAuth on a challenge that never arrives (conn.go
+		// §WithoutClientAuth), hanging serve startup before the operator socket binds.
+		conn := relay.New(relayURL, relaySigner, relay.WithoutClientAuth())
 		stop, aerr := attachRelayTransport(ctx, localStore, relaySigner, relaySigner.PubKeyHex(),
 			relayCursorPath(localStorePath, relayURL), conn, conn, 5*time.Second, logger.Printf, appendNotify,
 			eng.State().RegisterWireAlias)
