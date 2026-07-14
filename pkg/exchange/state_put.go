@@ -443,6 +443,18 @@ func IsHighReuseArtifact(entry *InventoryEntry) bool {
 	// whose padding nouns clear Gate 5's structural floor but are disconnected from the
 	// content ("widget gadget test pattern go" over unrelated bytes), while genuine
 	// artifacts — whose claimed nouns actually appear in / relate to their content — pass.
+	//
+	// OFFLOADED entries (dontguess-391): when the full content lives only in the
+	// Blossom blob (BlobPointer set), entry.Content is nil. descriptionContentCoherent
+	// fails OPEN on nil content, so re-running it HERE would auto-pass Gate 6 for every
+	// >32 KiB put — the premium-fraud this gate exists to catch. The operator DID have
+	// the decrypted plaintext at fold time (applyPut fetched+decrypted the blob to gate
+	// it), and stored the coherence verdict on the entry then. Consult that stored
+	// verdict instead of the nil Content. Inline / content-present entries keep the live
+	// computation below, byte-for-byte unchanged and Replay-stable.
+	if entry.BlobPointer != "" {
+		return entry.HighReuseCoherent
+	}
 	return descriptionContentCoherent(contextNouns, entry.Content)
 }
 
@@ -981,6 +993,23 @@ func (s *State) applyPut(msg *Message) {
 		LegacyPlaintext:    grandfathered,
 		ExpiresAt:          legacyExpiresAt,
 	}
+	// Gate-6 fold-time coherence verdict for OFFLOADED entries (dontguess-391).
+	// When the full content is offloaded to Blossom (blobPointer set), entryContent
+	// (and thus entry.Content) is nil — the plaintext is discarded from the entry.
+	// IsHighReuseArtifact therefore cannot recompute description↔content coherence at
+	// pricing/settle time and would fail Gate 6 OPEN, letting a keyword-stuffed junk
+	// >32 KiB put earn the high-reuse premium/residual. Compute the verdict HERE, on
+	// contentBytes (the full plaintext the operator just decrypted — inline or fetched),
+	// and store it. Structural gates 1-5 stay live in IsHighReuseArtifact (they read
+	// entry fields); this only preserves the Gate-6 input the offload discards. Covers
+	// BOTH offload paths: v2 confidential (blob_pointer) and legacy individual-tier
+	// (BlossomOffloadThreshold). Inline entries keep entry.Content and are re-derived
+	// live, so this flag is left false for them.
+	if blobPointer != "" {
+		matched, nouns := highReuseStructuralMatch(entry)
+		entry.HighReuseCoherent = !matched || descriptionContentCoherent(nouns, contentBytes)
+	}
+
 	s.pendingPuts[msg.ID] = entry
 	s.putToEntry[msg.ID] = msg.ID
 	// Register content hash in the dedup index so subsequent puts with identical

@@ -335,6 +335,21 @@ type InventoryEntry struct {
 	// fail-closed dropped (dontguess-4bed) so new plaintext injection is blocked.
 	// Always false for v2 confidential entries and for individual-tier entries.
 	LegacyPlaintext bool
+
+	// HighReuseCoherent is the fold-time §4 Gate-6 semantic-coherence verdict
+	// (dontguess-391), computed by applyPut on the DECRYPTED plaintext for an
+	// OFFLOADED entry — one whose full content lives only in the Blossom blob
+	// (BlobPointer set, Content nil). Because the plaintext is discarded from the
+	// entry after the fold, IsHighReuseArtifact cannot recompute description↔content
+	// coherence at pricing/settle time; for an offloaded entry it MUST consult this
+	// stored verdict instead of re-reading entry.Content (which is nil, and would
+	// otherwise fail the coherence gate OPEN — the dontguess-391 fraud). Combined
+	// with the live structural gates 1-5: IsHighReuseArtifact = structuralMatch &&
+	// HighReuseCoherent for offloaded entries. Replay-stable: applyPut re-fetches,
+	// re-decrypts, and recomputes this identically on every fold. Only meaningful
+	// (and only set) for offloaded entries; left false for inline / content-present
+	// entries, whose coherence is re-derived live from entry.Content (unchanged).
+	HighReuseCoherent bool
 }
 
 // IsExpired returns true if the entry has passed its expiry time.
