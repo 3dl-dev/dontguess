@@ -398,7 +398,10 @@ func TestE2E_Confidentiality_PassiveReaderAndUnauthBlossom_YieldOnlyCiphertext(t
 	buyer, _ := identity.Generate()   // the PAYING buyer (funds + settles)
 	stranger, _ := identity.Generate() // allowlisted but NEVER funds/settles
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// 180s outer bound: ~3s standalone, but this whole-flow E2E (two buys + a
+	// preview + passive REQ capture) must survive `go test -race ./...` CPU
+	// contention; comfortably above the per-op sub-deadlines below.
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	// Allowlist seller + paying buyer + stranger. The stranger is an ADMITTED
 	// non-paying agent (§2 row 3): admission secures the write pipe, not reads.
 	st := newE2EStack(t, ctx, ls, operator, dir+"/events.jsonl.pubcursor",
@@ -742,7 +745,12 @@ func drive2f7Buy(t *testing.T, parent context.Context, wsURL string, buyer ident
 	t.Helper()
 	conn := relayclient.NewConn(wsURL, buyer)
 	defer conn.Close()
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	// The Buy→Settle chain is ~1s standalone; this per-op deadline is sized for
+	// the worst case of `go test -race ./...`, where every package's race tests
+	// run at once and starve this heavy E2E's goroutines. Not a logic race — the
+	// flow is deterministic; the deadline just needs headroom under CPU contention
+	// (bounded by the 180s outer context). See dontguess-2f7 flake investigation.
+	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
 	defer cancel()
 	br, err := relayclient.Buy(ctx, conn, buyer, relayclient.BuyRequest{
 		Task: task, Budget: budget, OperatorPubKey: opPubHex,
@@ -768,7 +776,8 @@ func drive2f7BuyRaw(t *testing.T, parent context.Context, wsURL string, buyer id
 	t.Helper()
 	conn := relayclient.NewConn(wsURL, buyer)
 	defer conn.Close()
-	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	// Sized for `go test -race ./...` CPU-starvation headroom (see drive2f7Buy).
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 	br, err := relayclient.Buy(ctx, conn, buyer, relayclient.BuyRequest{
 		Task: task, Budget: budget, OperatorPubKey: opPubHex,
