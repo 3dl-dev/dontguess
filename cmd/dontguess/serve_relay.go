@@ -86,6 +86,11 @@ type relayWiringConfig struct {
 	intakeCursorPath string
 	climbWatermark   int64
 	rosterFolder     *rosterFolder
+	// legPublisherSink, when set, is invoked by attachRelayTransport with the
+	// leg's demuxPublisher (dontguess-113) so the caller can capture the publish
+	// surface for out-of-band operator events — the roster republish the live
+	// allowlist hot-reload emits. nil (every pre-existing call site) is a no-op.
+	legPublisherSink func(*demuxPublisher)
 }
 
 // WithRosterFolder wires the operator-signed fleet-roster fold (design §2/P5) into
@@ -97,6 +102,17 @@ type relayWiringConfig struct {
 // do not exercise roster admission) is a strict no-op — a roster event is ignored.
 func WithRosterFolder(rf *rosterFolder) relayWiringOption {
 	return func(c *relayWiringConfig) { c.rosterFolder = rf }
+}
+
+// WithLegPublisherSink (dontguess-113) hands the caller this leg's demuxPublisher
+// the moment attachRelayTransport constructs it, so the serve process can publish
+// out-of-band operator events over the leg — specifically the operator-signed
+// kind-30078 roster the live `dontguess allowlist add|remove` hot-reload republishes
+// (design §3). The demuxPublisher is the SAME publish surface the Outbox drives; the
+// single reader routes its OK back either way. nil (individual tier, every existing
+// test call site) is a strict no-op.
+func WithLegPublisherSink(sink func(*demuxPublisher)) relayWiringOption {
+	return func(c *relayWiringConfig) { c.legPublisherSink = sink }
 }
 
 // WithClimbWatermark threads the solo→fleet CLIMB egress fence (ADV-18, design
@@ -1025,6 +1041,19 @@ func attachRelayTransport(
 	opts ...relayWiringOption,
 ) (stop func(), err error) {
 	pub := newDemuxPublisher(send)
+	// Hand this leg's publish surface to a WithLegPublisherSink caller (dontguess-113)
+	// so the serve process can republish the operator roster over the leg on a live
+	// allowlist hot-reload. Apply the opts to a local config to read the sink; the
+	// same opts are re-applied inside buildRelayWiring (idempotent setters).
+	{
+		var wcfg relayWiringConfig
+		for _, o := range opts {
+			o(&wcfg)
+		}
+		if wcfg.legPublisherSink != nil {
+			wcfg.legPublisherSink(pub)
+		}
+	}
 	wiring, watermark, err := buildRelayWiring(ls, signer, operatorKeyHex, cursorPath, pub, 0, nil, aliasRegistrar, opts...)
 	if err != nil {
 		return nil, err
@@ -1137,6 +1166,11 @@ const reconnectSlackSeconds = int64(60)
 type relayLeg struct {
 	conn *relay.Conn
 	stop func()
+	// publisher is this leg's demuxPublisher (dontguess-113), captured via
+	// WithLegPublisherSink so the live allowlist hot-reload can republish the
+	// operator-signed roster over the leg. nil is possible only if the sink never
+	// fired (it always does on a successful attach).
+	publisher *demuxPublisher
 }
 
 // relayAttachInitialBackoff / relayAttachMaxBackoff bound the retry schedule
@@ -1199,12 +1233,16 @@ func attachRelayLegsAsync(
 				// that never arrives (conn.go §WithoutClientAuth) — now confined to
 				// this async retry goroutine, never the startup path.
 				conn := relay.New(relayURL, relaySigner, relay.WithoutClientAuth())
+				var legPub *demuxPublisher
 				stop, aerr := attachRelayTransport(ctx, localStore, relaySigner, relaySigner.PubKeyHex(),
 					relayCursorPath(localStorePath, relayURL), conn, conn, 5*time.Second, logger.Printf, appendNotify,
 					eng.State().RegisterWireAlias,
 					WithIntakeCursorPath(intakeCursorPath(localStorePath, relayURL)),
 					WithClimbWatermark(climbWatermark),
-					WithRosterFolder(roster))
+					WithRosterFolder(roster),
+					// Capture the leg's publish surface so the live allowlist hot-reload
+					// can republish the operator roster over this relay (dontguess-113).
+					WithLegPublisherSink(func(p *demuxPublisher) { legPub = p }))
 				if aerr != nil {
 					_ = conn.Close()
 					if ctx.Err() != nil {
@@ -1222,7 +1260,7 @@ func attachRelayLegsAsync(
 					continue
 				}
 				legsMu.Lock()
-				*legs = append(*legs, relayLeg{conn: conn, stop: stop})
+				*legs = append(*legs, relayLeg{conn: conn, stop: stop, publisher: legPub})
 				legsMu.Unlock()
 				logger.Printf("  relay:     %s (operator npub %s)", relayURL, relaySigner.Npub())
 				return
