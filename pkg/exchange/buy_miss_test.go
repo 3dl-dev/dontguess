@@ -1363,6 +1363,20 @@ func TestBuyMiss_SellerBalanceAfterStandingOfferFulfillment(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+
+	// Step 3b: The settle message becoming visible only means emitPutAccept
+	// ran; paySellerForBuyMiss's cs.AddBudget(sellerKey, ...) is a separate,
+	// subsequent step in the same synchronous dispatch and is not guaranteed
+	// to have completed yet under CPU starvation. Synchronize on the actual
+	// credit (the seller balance) rather than settle-message visibility
+	// before cancelling the poll loop and reading balances below.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cs.Balance(sellerKey) == expectedPutPay {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	cancel()
 
 	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
