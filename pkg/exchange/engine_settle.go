@@ -1045,6 +1045,21 @@ func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, buyerKe
 	if entry.WrappedCEKOperator != "" {
 		return e.emitDeliverEnvelope(msg, entry, buyerKey)
 	}
+
+	// Climb egress fence — deliver leg (dontguess-9d1). A grandfathered pre-climb
+	// plaintext entry (LegacyPlaintext, WrappedCEKOperator=="") must NEVER have its
+	// pre-climb plaintext delivered to a relay/team buyer — the climb fence kept it
+	// off the relay and the findCandidates fence keeps it unmatchable, so a settle
+	// should never reach here for such an entry. This is defense-in-depth (design §6
+	// ADV-18): refuse to emit the content, exactly like the no-content decline below
+	// (nil, nil = declined no-op, not an error). LegacyPlaintext is team-tier only,
+	// so an individual/solo-tier local plaintext entry (LegacyPlaintext==false) still
+	// delivers normally.
+	if entry.LegacyPlaintext {
+		e.opts.log("engine: settle-deliver: REFUSING deliver for entry=%s — grandfathered pre-climb plaintext must not egress to a team buyer (dontguess-9d1, design §6 ADV-18)", shortKey(entry.EntryID))
+		return nil, nil
+	}
+
 	if entry.BlobPointer != "" {
 		return e.emitDeliverPointer(msg, entry, buyerKey)
 	}

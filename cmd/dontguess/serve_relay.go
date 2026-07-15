@@ -266,7 +266,15 @@ func establishClimbWatermark(path string, ls *dgstore.Store) (int64, error) {
 	if rerr == nil {
 		s := strings.TrimSpace(string(b))
 		if s == "" {
-			return 0, nil
+			// FAIL LOUD (dontguess-9d1): an EXISTING but empty/whitespace watermark
+			// sidecar is corrupt/truncated — writeClimbWatermarkFile always writes at
+			// least "0\n", so an empty file is never a state we produced. Returning 0
+			// here would FAIL OPEN: watermark 0 silently disables the fence, and an
+			// empty sidecar + a fresh relay cursor would re-broadcast the entire
+			// pre-climb plaintext corpus. Treat it like the negative/non-numeric cases
+			// below and refuse to serve until it is repaired (delete to force a clean
+			// recompute, or restore from backup).
+			return 0, fmt.Errorf("climb watermark %s: file is empty (truncated or corrupt) — refusing to fail open and re-broadcast the pre-climb corpus; delete it to force recompute or restore from backup", path)
 		}
 		n, perr := strconv.ParseInt(s, 10, 64)
 		if perr != nil {
