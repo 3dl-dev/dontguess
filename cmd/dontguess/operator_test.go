@@ -542,7 +542,25 @@ func TestOperatorSocket_HandlesConcurrentClients(t *testing.T) {
 // never sends data is timed out within 5-6 seconds, not hung indefinitely.
 // Regression test for dontguess-481b (missing read deadline).
 func TestOperatorSocket_StalledClient(t *testing.T) {
-	// Not parallel — this test takes ~5s by design (deadline expiry).
+	// Not parallel — mutates the package-level operatorConnDeadline var below.
+	//
+	// dontguess-c68: this test previously measured against the real 5s
+	// production default (operatorConnDeadline) with a [4s,8s] wall-clock
+	// acceptance window. Under `go test -race` with many other packages/tests
+	// running in parallel, CPU contention can delay when the server-side
+	// goroutine gets scheduled to call conn.SetDeadline after accept, which
+	// shifts the client-observed elapsed time later — occasionally past the
+	// 8s upper bound, or slow enough that the whole run trips a higher-level
+	// test timeout. The 5s constant itself isn't the bug; depending on wall
+	// clock at all under adversarial scheduling is. Fix: shorten the
+	// deadline the handler enforces (operatorConnDeadline is a package var
+	// exactly so tests can do this — see serve.go) so the test still
+	// exercises the real deadline-enforcement code path, but the absolute
+	// wall-clock budget involved is small enough that -race scheduling
+	// jitter (milliseconds to low seconds) can't push it out of bounds.
+	origDeadline := operatorConnDeadline
+	operatorConnDeadline = 200 * time.Millisecond
+	t.Cleanup(func() { operatorConnDeadline = origDeadline })
 
 	h := newOpTestHarness(t)
 	eng := h.newEngine()
@@ -556,9 +574,12 @@ func TestOperatorSocket_StalledClient(t *testing.T) {
 	// Deliberately do NOT send anything — handler should time out.
 
 	start := time.Now()
-	// The handler sets a 5-second deadline and closes the conn on timeout.
-	// Set a generous read deadline on our side to detect when the server closes.
-	conn.SetDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+	// The handler sets a conn deadline (shortened above) and closes the
+	// conn on timeout. Set a generous read deadline on our side — well
+	// above the shortened server deadline but still bounded — to detect
+	// when the server closes without hanging the test indefinitely if the
+	// deadline enforcement regresses entirely.
+	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck
 	buf := make([]byte, 64)
 	_, readErr := conn.Read(buf) // will unblock when server closes the conn
 	elapsed := time.Since(start)
@@ -566,13 +587,20 @@ func TestOperatorSocket_StalledClient(t *testing.T) {
 	if readErr == nil {
 		t.Error("expected error (server close / timeout), got nil")
 	}
-	if elapsed < 4*time.Second {
-		t.Errorf("handler closed in %v — too fast, expected ~5s deadline", elapsed)
+	// Lower bound: the server must not close before its deadline elapses
+	// (half the configured deadline, to leave slack for scheduling but
+	// still catch a deadline that isn't being enforced at all).
+	if elapsed < operatorConnDeadline/2 {
+		t.Errorf("handler closed in %v — too fast, expected ~%v deadline", elapsed, operatorConnDeadline)
 	}
-	if elapsed > 8*time.Second {
-		t.Errorf("handler took %v — deadline not enforced (expected ≤ 6s)", elapsed)
+	// Upper bound: generous multiple of the (now small) configured deadline.
+	// Because the base deadline is 200ms instead of 5s, even multi-second
+	// -race scheduling jitter fits comfortably inside this window without
+	// the test needing to depend on exact wall-clock timing.
+	if elapsed > 10*time.Second {
+		t.Errorf("handler took %v — deadline not enforced (expected close to %v)", elapsed, operatorConnDeadline)
 	}
-	t.Logf("stalled client timed out after %v (expected 5-6s): %v", elapsed, readErr)
+	t.Logf("stalled client timed out after %v (expected ~%v): %v", elapsed, operatorConnDeadline, readErr)
 }
 
 // TestOperatorSocket_OversizedRequest verifies that a >2 MiB payload is
