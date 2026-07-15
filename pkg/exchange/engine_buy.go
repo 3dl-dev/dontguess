@@ -303,10 +303,17 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 		// NOT be on any public wire). It buys the buyer nothing pre-purchase —
 		// matching ranks on Description, integrity is verified against
 		// ciphertext_hash in the deliver envelope (§4.4 A7) — so OMIT it for v2.
-		// Individual-tier / legacy plaintext entries (WrappedCEKOperator == "") are
-		// local/confidential or already-public and keep content_hash unchanged.
+		// Individual-tier genuinely-local plaintext entries (WrappedCEKOperator == "",
+		// LegacyPlaintext == false) are local/confidential and keep content_hash
+		// unchanged. A GRANDFATHERED pre-climb entry (LegacyPlaintext == true) is
+		// NEITHER local (a relay buyer could reach it absent the findCandidates fence)
+		// NOR already-public (the climb fence kept it off the relay) — publishing its
+		// unsalted sha256(pre-climb plaintext) here would re-open the §4.4 A1/P1
+		// plaintext-hash oracle on the public exchange:match wire (dontguess-9d1). It
+		// is already excluded from candidates upstream; this blanks the hash as
+		// defense-in-depth so no code path can leak it.
 		contentHash := entry.ContentHash
-		if entry.WrappedCEKOperator != "" {
+		if entry.WrappedCEKOperator != "" || entry.LegacyPlaintext {
 			contentHash = ""
 		}
 		matchResults[i] = MatchResult{
@@ -357,8 +364,15 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 
 	// Warm compression offer: if the top-matched entry has no compressed
 	// derivative, offer the buyer an exclusive compression assign.
+	//
+	// Skip a grandfathered pre-climb entry (dontguess-9d1): sendCompressionAssign
+	// embeds entry.ContentHash = sha256(plaintext) in the PUBLIC exchange:assign
+	// work order — the same §4.4 A1/P1 plaintext-hash oracle the content_hash gate
+	// above suppresses. findCandidates already fences these out of semanticMatches,
+	// so this is defense-in-depth: a grandfathered entry can never be topEntry in
+	// production, but if it ever were, no assign must republish its hash.
 	topEntry := semanticMatches[0].entry
-	if topEntry.CompressedFrom == "" && !e.state.HasCompressedVersion(topEntry.EntryID) && !e.hasActiveBuyerCompressAssign(topEntry.EntryID, msg.Sender) {
+	if !topEntry.LegacyPlaintext && topEntry.CompressedFrom == "" && !e.state.HasCompressedVersion(topEntry.EntryID) && !e.hasActiveBuyerCompressAssign(topEntry.EntryID, msg.Sender) {
 		if err := e.sendWarmCompressionAssign(topEntry, msg.Sender); err != nil {
 			e.opts.log("engine: warm compression assign failed entry=%s err=%v", topEntry.PutMsgID, err)
 		}
@@ -459,6 +473,22 @@ func (e *Engine) findCandidates(buyerKey string, budget int64, minRep int,
 		// due to a seller provenance downgrade (dontguess-lqp). These entries remain
 		// in inventory but are withheld from buyers until the operator clears the flag.
 		if entry.NeedsRevalidation {
+			continue
+		}
+
+		// Climb egress fence — match/deliver leg (dontguess-9d1). A grandfathered
+		// pre-climb plaintext entry (LegacyPlaintext, WrappedCEKOperator=="") was
+		// folded into ACTIVE inventory during the solo→fleet climb Replay so the
+		// operator does not lose its pre-migration corpus. The Outbox climb fence
+		// keeps the RAW put off the relay; this keeps the entry off the match/deliver
+		// path too. Without it a relay/team buyer could MATCH the entry, receive its
+		// unsalted sha256(pre-climb plaintext) on the exchange:match wire (the §4.4
+		// A1/P1 plaintext-hash oracle), and — on settle — receive the pre-climb
+		// PLAINTEXT itself (design §6 ADV-18). LegacyPlaintext is set ONLY on the team
+		// tier (state_put.go grandfathers only under s.encryptedRequired), so
+		// individual/solo-tier genuinely-local plaintext (LegacyPlaintext==false) is
+		// unaffected and stays matchable.
+		if entry.LegacyPlaintext {
 			continue
 		}
 
