@@ -55,6 +55,34 @@ type relayWiring struct {
 	intake  *relay.Intake
 	outbox  *relay.Outbox
 	metrics *relay.IntakeMetrics
+	// intakeCursor is the durable per-relay "how far ingested" watermark
+	// (dontguess-61a). nil when no intake-cursor sidecar path was supplied to
+	// buildRelayWiring (WithIntakeCursorPath) — callers that omit it get the
+	// bounded-kinds fix only, matching every pre-fix test call site unchanged.
+	intakeCursor *relay.IntakeCursor
+}
+
+// relayWiringOption customises buildRelayWiring beyond its required core
+// parameters. A trailing variadic option keeps every existing call site (7 test
+// files + serve.go, none of which need the intake-cursor sidecar to compile or
+// pass) source-compatible: omitting it disables the durable Intake cursor
+// exactly as before this fix (Since falls back to the local-store watermark
+// only, and ResyncAudit falls back to since=0 — see Watchdog.resyncSince).
+type relayWiringOption func(*relayWiringConfig)
+
+type relayWiringConfig struct {
+	intakeCursorPath string
+}
+
+// WithIntakeCursorPath wires the durable per-relay Intake cursor sidecar
+// (dontguess-61a) at path, mirroring the Outbox's relayCursorPath sidecar. When
+// set, buildRelayWiring opens (or creates) the sidecar and attachRelayTransport
+// uses its persisted value — re-read from disk, not memory, on every restart —
+// to bound the initial subscribe's `since`, and threads the SAME cursor into the
+// resync-audit Watchdog so the periodic full-sweep also resumes from it instead
+// of an unconditional since=0 every cycle.
+func WithIntakeCursorPath(path string) relayWiringOption {
+	return func(c *relayWiringConfig) { c.intakeCursorPath = path }
 }
 
 // appendNotifier fans a single engine EngineOptions.OnLocalAppend callback out
@@ -133,12 +161,26 @@ func buildRelayWiring(
 	maxOrphans int,
 	alarm relay.AlarmFunc,
 	aliasRegistrar func(wire, store string),
+	opts ...relayWiringOption,
 ) (*relayWiring, int64, error) {
 	if ls == nil {
 		return nil, 0, fmt.Errorf("relay wiring: nil local store")
 	}
 	if signer == nil {
 		return nil, 0, fmt.Errorf("relay wiring: nil signer")
+	}
+
+	var cfg relayWiringConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	var intakeCursor *relay.IntakeCursor
+	if cfg.intakeCursorPath != "" {
+		ic, icerr := relay.OpenIntakeCursor(cfg.intakeCursorPath)
+		if icerr != nil {
+			return nil, 0, fmt.Errorf("relay wiring: open intake cursor: %w", icerr)
+		}
+		intakeCursor = ic
 	}
 
 	seq := exchange.NewSequencer(maxOrphans)
@@ -168,7 +210,7 @@ func buildRelayWiring(
 		return nil, 0, fmt.Errorf("relay wiring: outbox: %w", err)
 	}
 
-	return &relayWiring{seq: seq, intake: intake, outbox: outbox, metrics: metrics}, watermark, nil
+	return &relayWiring{seq: seq, intake: intake, outbox: outbox, metrics: metrics, intakeCursor: intakeCursor}, watermark, nil
 }
 
 // isOperatorOrigin reports whether a persisted record is operator-authored
@@ -336,6 +378,16 @@ func (w *relayWiring) runReader(ctx context.Context, recv frameReceiver, pub *de
 				// Counted + alarmed inside the Intake already; log and keep going.
 				log.Printf("relay/reader: intake dropped event %s: %v", f.Event.ID, herr)
 			}
+			// dontguess-61a: advance the durable per-relay Intake cursor to this
+			// event's created_at REGARDLESS of accept/drop — even a dropped event
+			// means the relay has served us up to this point in time, so a
+			// subsequent REQ never needs to re-request it. Advance is a max-climb,
+			// crash-safe fsync; a nil cursor (no sidecar wired) is a no-op.
+			if w.intakeCursor != nil {
+				if aerr := w.intakeCursor.Advance(f.Event.CreatedAt); aerr != nil {
+					log.Printf("relay/reader: intake cursor persist failed (since will be recomputed from the store watermark next restart): %v", aerr)
+				}
+			}
 		case relay.LabelOK:
 			if pub != nil {
 				pub.routeOK(f.EventID, f.Accepted)
@@ -486,7 +538,16 @@ func (s *resubscriber) Query(ctx context.Context, f relay.Filter) ([]string, err
 func (w *relayWiring) newReconnectWatchdog(ls *dgstore.Store, send frameSender, alarm relay.AlarmFunc) (*relay.Watchdog, *relay.WatchdogMetrics) {
 	m := &relay.WatchdogMetrics{}
 	sub := &resubscriber{send: send, subID: relaySubID}
-	wd := relay.NewWatchdog(sub, w.seq, ls, nil, m, alarm, relay.WithReconnectSlack(reconnectSlackSeconds))
+	wd := relay.NewWatchdog(sub, w.seq, ls, nil, m, alarm,
+		relay.WithReconnectSlack(reconnectSlackSeconds),
+		// dontguess-61a: bound both the reconnect backfill AND the periodic
+		// resync audit to ONLY dontguess kinds, and thread the SAME durable
+		// per-relay Intake cursor (nil if buildRelayWiring wasn't given
+		// WithIntakeCursorPath) so the resync audit resumes from it instead of
+		// re-flooding since=0 every cycle.
+		relay.WithDontguessKinds(nostr.DontguessKinds),
+		relay.WithIntakeCursor(w.intakeCursor),
+	)
 	return wd, m
 }
 
@@ -681,9 +742,10 @@ func attachRelayTransport(
 	logf func(format string, args ...any),
 	notifier *appendNotifier,
 	aliasRegistrar func(wire, store string),
+	opts ...relayWiringOption,
 ) (stop func(), err error) {
 	pub := newDemuxPublisher(send)
-	wiring, watermark, err := buildRelayWiring(ls, signer, operatorKeyHex, cursorPath, pub, 0, nil, aliasRegistrar)
+	wiring, watermark, err := buildRelayWiring(ls, signer, operatorKeyHex, cursorPath, pub, 0, nil, aliasRegistrar, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -704,11 +766,43 @@ func attachRelayTransport(
 	// Backfill + live subscription: resume from the seeded watermark with slack;
 	// the Sequencer dedups the overlap (§2.5). Timestamp is nanoseconds; nostr
 	// created_at (Since) is seconds.
-	since := watermark/1_000_000_000 - reconnectSlackSeconds
-	if since < 0 {
-		since = 0
+	//
+	// dontguess-61a: prefer the durable per-relay Intake cursor (re-read from its
+	// on-disk sidecar by buildRelayWiring, NOT memory) over the local-store
+	// watermark when it has advanced further — the cursor tracks THIS relay's
+	// ingest progress specifically, while the store watermark blends every
+	// attached relay's history. A genuinely fresh operator/relay pair (both the
+	// cursor and the local store are empty) falls back to a BOUNDED backfill
+	// window instead of Since=0 — the documented "pre-bootstrap entries not
+	// ingested" semantic — so the very first subscribe of a brand-new operator
+	// never re-reads a relay's entire retained history. Kinds is ALWAYS bounded
+	// to nostr.DontguessKinds regardless of which since branch is taken: this is
+	// what actually closes the dropped_smuggled flood (a relay serving every
+	// kind any client has ever published there).
+	storeSince := watermark/1_000_000_000 - reconnectSlackSeconds
+	if storeSince < 0 {
+		storeSince = 0
 	}
-	reqFrame, err := relay.EncodeReq(relaySubID, relay.Filter{Since: &since})
+	since := storeSince
+	if wiring.intakeCursor != nil {
+		if cv := wiring.intakeCursor.Value(); cv > 0 {
+			cursorSince := cv - reconnectSlackSeconds
+			if cursorSince < 0 {
+				cursorSince = 0
+			}
+			if cursorSince > since {
+				since = cursorSince
+			}
+		} else if storeSince == 0 {
+			// Neither the cursor nor the local store has ever seen anything from
+			// this relay: bound the very first backfill instead of Since=0.
+			since = time.Now().Unix() - relay.DefaultBackfillWindowSeconds
+			if since < 0 {
+				since = 0
+			}
+		}
+	}
+	reqFrame, err := relay.EncodeReq(relaySubID, relay.Filter{Since: &since, Kinds: nostr.DontguessKinds})
 	if err != nil {
 		return nil, fmt.Errorf("relay attach: encode REQ: %w", err)
 	}
@@ -717,8 +811,10 @@ func attachRelayTransport(
 	}
 
 	// The reconnect-leg Watchdog re-issues the REQ (over send) + drives the
-	// intake_disconnected alarm on every drop (§2.5); the single runReader
-	// consumes the re-delivered events.
+	// intake_disconnected alarm on every drop (§2.5), and runs the periodic
+	// resync audit (§2.5 path 3) — both bounded to nostr.DontguessKinds and, for
+	// the audit, resuming from the SAME durable per-relay Intake cursor rather
+	// than an unconditional since=0 every cycle (dontguess-61a).
 	wd, _ := wiring.newReconnectWatchdog(ls, send, nil)
 
 	var wg sync.WaitGroup

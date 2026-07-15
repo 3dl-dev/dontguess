@@ -56,12 +56,13 @@ type fakeRelayConn struct {
 	mu          sync.Mutex
 	events      []*identity.Event // every EVENT the "relay" received via Send
 	reqs        []*int64          // Since value of every SUCCESSFUL REQ frame received (nil => absent)
+	reqFilters  []relay.Filter    // the FULL Filter of every SUCCESSFUL REQ (dontguess-61a: kinds+cursor assertions)
 	echo        bool
 	blockOK     bool
-	failNextREQ int  // >0: fail (not record) that many upcoming REQ Sends (models a flapping relay)
-	reqFailures int  // count of REQ Sends failed via failNextREQ (flap assertion)
-	gateOnSub   bool // model NIP-01: deliver injected events ONLY while a live REQ subscription exists
-	subscribed  bool // gateOnSub: a successful REQ makes the subscription live; a drop clears it
+	failNextREQ int      // >0: fail (not record) that many upcoming REQ Sends (models a flapping relay)
+	reqFailures int      // count of REQ Sends failed via failNextREQ (flap assertion)
+	gateOnSub   bool     // model NIP-01: deliver injected events ONLY while a live REQ subscription exists
+	subscribed  bool     // gateOnSub: a successful REQ makes the subscription live; a drop clears it
 	pending     [][]byte // gateOnSub: events injected while unsubscribed, flushed on the next successful REQ
 }
 
@@ -126,6 +127,11 @@ func (r *fakeRelayConn) Send(_ context.Context, frame []byte) error {
 			since = &v
 		}
 		r.reqs = append(r.reqs, since)
+		if len(f.Filters) > 0 {
+			r.reqFilters = append(r.reqFilters, f.Filters[0])
+		} else {
+			r.reqFilters = append(r.reqFilters, relay.Filter{})
+		}
 		if r.gateOnSub {
 			// Live subscription: flush anything injected while unsubscribed.
 			r.subscribed = true
@@ -194,6 +200,17 @@ func (r *fakeRelayConn) reqCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.reqs)
+}
+
+// reqFiltersSnapshot returns a copy of every SUCCESSFUL REQ's full Filter
+// (dontguess-61a: kinds+cursor assertions), safe for a test to read without
+// racing the reader goroutine's concurrent Send.
+func (r *fakeRelayConn) reqFiltersSnapshot() []relay.Filter {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]relay.Filter, len(r.reqFilters))
+	copy(out, r.reqFilters)
+	return out
 }
 
 // inject delivers a foreign signed event to the operator's subscription. Under

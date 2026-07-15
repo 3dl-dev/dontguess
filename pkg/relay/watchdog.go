@@ -235,6 +235,8 @@ type Watchdog struct {
 	logf    func(format string, args ...interface{})
 	slack   int64
 	now     func() time.Time
+	kinds   []int         // dontguess-61a: bounds every REQ this Watchdog issues to ONLY these kinds
+	cursor  *IntakeCursor // dontguess-61a: durable per-relay "how far ingested" watermark; nil disables (falls back to since=0 for ResyncAudit, unchanged pre-fix behavior)
 
 	mu      sync.Mutex
 	refetch *tokenBucket // targeted-refetch rate limiter (ADV-6)
@@ -289,6 +291,30 @@ func WithRefetchRand(rng *rand.Rand) WatchdogOption {
 	}
 }
 
+// WithDontguessKinds bounds every REQ this Watchdog issues (Reconnect's backfill
+// and ResyncAudit's periodic full-sweep) to ONLY the given nostr kinds
+// (dontguess-61a). Without this option kinds is empty and Filter.Kinds is
+// omitted — a relay then serves EVERY event of EVERY kind it holds (the
+// dropped_smuggled flood the fix closes). Production always wires
+// nostr.DontguessKinds; nil/empty leaves the pre-fix unbounded behavior so
+// existing tests that construct a bare Watchdog are unaffected.
+func WithDontguessKinds(kinds []int) WatchdogOption {
+	return func(w *Watchdog) {
+		w.kinds = kinds
+	}
+}
+
+// WithIntakeCursor wires the durable per-relay Intake cursor (dontguess-61a)
+// that ResyncAudit reads to bound its periodic REQ to since=cursor instead of
+// an unconditional since=0 full-history re-read on every audit cycle. nil (the
+// default) preserves the pre-fix since=0 ResyncAudit behavior — callers that
+// don't wire a cursor get the bounded-kinds fix only, not the bounded-since fix.
+func WithIntakeCursor(cursor *IntakeCursor) WatchdogOption {
+	return func(w *Watchdog) {
+		w.cursor = cursor
+	}
+}
+
 // Reconnect re-issues the backfill subscription after a live disconnect
 // (§2.5 path 1). It bumps intake_disconnected, alarms + loud-logs, then issues
 // REQ since=(watermark − slack). The returned events flow through the Intake,
@@ -303,7 +329,7 @@ func (w *Watchdog) Reconnect(ctx context.Context, watermark int64) error {
 	w.logf("relay/watchdog: reconnect backfill since=%d (watermark=%d slack=%d)", w.since(watermark), watermark, w.slack)
 
 	since := w.since(watermark)
-	if _, err := w.sub.Query(ctx, Filter{Since: &since}); err != nil {
+	if _, err := w.sub.Query(ctx, Filter{Since: &since, Kinds: w.kinds}); err != nil {
 		w.alarm("intake_disconnected", fmt.Errorf("reconnect backfill REQ failed: %w", err), nil)
 		return fmt.Errorf("watchdog: reconnect backfill: %w", err)
 	}
@@ -313,6 +339,34 @@ func (w *Watchdog) Reconnect(ctx context.Context, watermark int64) error {
 // since computes the backfill floor: watermark − slack, clamped to 0.
 func (w *Watchdog) since(watermark int64) int64 {
 	s := watermark - w.slack
+	if s < 0 {
+		s = 0
+	}
+	return s
+}
+
+// resyncSince computes the ResyncAudit floor (dontguess-61a). With a durable
+// IntakeCursor wired (WithIntakeCursor — production always wires this), it
+// resumes from cursor.Value() − slack (mirroring the reconnect leg's overlap
+// discipline — the Sequencer's id-dedup absorbs any redelivered overlap for
+// free) once the cursor has advanced past 0, and from a BOUNDED backfill window
+// ending now — never an unconditional since=0 — for the genuinely-fresh
+// operator/relay pair whose cursor has never advanced: this audit runs on
+// every low-cadence cycle, so an unbounded floor there would re-flood EVERY
+// cycle, not just once at startup. With NO cursor wired at all (the pre-fix
+// caller shape — existing tests that construct a bare Watchdog), resyncSince
+// preserves the original since=0 behavior unchanged; the kinds bound (w.kinds)
+// still closes the dropped_smuggled flood for those callers even without the
+// cursor wired.
+func (w *Watchdog) resyncSince() int64 {
+	if w.cursor == nil {
+		return 0
+	}
+	if v := w.cursor.Value(); v > 0 {
+		return w.since(v)
+	}
+	now := w.now().Unix()
+	s := now - DefaultBackfillWindowSeconds
 	if s < 0 {
 		s = 0
 	}
@@ -389,7 +443,7 @@ func (w *Watchdog) CheckOrphans(ctx context.Context) (refetched int, err error) 
 
 		w.metrics.OrphanRefetch.Add(1)
 		refetched++
-		delivered, qerr := w.sub.Query(ctx, Filter{IDs: []string{ante}})
+		delivered, qerr := w.sub.Query(ctx, Filter{IDs: []string{ante}, Kinds: w.kinds})
 		if qerr != nil {
 			// A transport error on THIS refetch is loud but not fatal: the
 			// antecedent stays pending so a later pass retries it once the relay
@@ -452,9 +506,18 @@ func (w *Watchdog) takeRefetchToken() bool {
 }
 
 // ResyncAudit runs the periodic full-resync structural-drift pass (§2.5 path 3),
-// intended at a LOW cadence. It issues REQ since=0 (through the Intake, so any
-// relay event the local store lacks and CAN be reconciled is absorbed on the
-// same pass), then diffs the relay id-set against the local id-set:
+// intended at a LOW cadence. Before dontguess-61a it issued REQ since=0 with no
+// kinds filter on EVERY cycle — a recurring, not one-time, full re-read of the
+// relay's ENTIRE history across every kind any client had ever published there.
+// It now issues REQ since=w.resyncSince() (through the Intake, so any relay
+// event the local store lacks and CAN be reconciled is absorbed on the same
+// pass), bounded to w.kinds so only dontguess's own events are re-read. When a
+// durable IntakeCursor is wired (WithIntakeCursor) resyncSince resumes from the
+// cursor watermark; with no cursor wired it falls back to a BOUNDED backfill
+// window (DefaultBackfillWindowSeconds) rather than the beginning of time — the
+// documented "pre-bootstrap entries not ingested" semantic (§4 61a): this audit
+// pass trades true unbounded structural-drift detection for a bounded, cheap,
+// EVERY-cycle-safe one. It then diffs the relay id-set against the local id-set:
 //
 //   - local-only OPERATOR event (Origin local/"") the relay lacks → hand it to
 //     the Outbox catch-up for re-publish (ResyncRepublished); if no Republisher
@@ -463,13 +526,13 @@ func (w *Watchdog) takeRefetchToken() bool {
 //     through the Intake (an orphan, or an event the Intake rejected) → cannot be
 //     reconciled here → loud resync_mismatch, one per event.
 //
-// It returns the number of resync_mismatch events found. A since=0 REQ that
-// fails is loud and returned (the audit could not run).
+// It returns the number of resync_mismatch events found. A REQ that fails is
+// loud and returned (the audit could not run).
 func (w *Watchdog) ResyncAudit(ctx context.Context) (mismatches int, err error) {
-	zero := int64(0)
-	relayIDs, qerr := w.sub.Query(ctx, Filter{Since: &zero})
+	since := w.resyncSince()
+	relayIDs, qerr := w.sub.Query(ctx, Filter{Since: &since, Kinds: w.kinds})
 	if qerr != nil {
-		w.alarm("resync_mismatch", fmt.Errorf("since=0 resync REQ failed: %w", qerr), nil)
+		w.alarm("resync_mismatch", fmt.Errorf("resync REQ (since=%d) failed: %w", since, qerr), nil)
 		return 0, fmt.Errorf("watchdog: resync audit REQ: %w", qerr)
 	}
 

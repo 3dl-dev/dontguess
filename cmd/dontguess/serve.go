@@ -122,6 +122,20 @@ func relayCursorPath(storePath, url string) string {
 	return fmt.Sprintf("%s.pubcursor.%s", storePath, hex.EncodeToString(h[:4]))
 }
 
+// intakeCursorPath returns the durable per-relay Intake-cursor sidecar path
+// (dontguess-61a), mirroring relayCursorPath's per-URL-hash naming so a
+// multi-relay operator tracks each relay's ingest watermark independently. It
+// is a DIFFERENT sidecar file from relayCursorPath (".intakecursor." vs
+// ".pubcursor." suffix) because the two cursors track opposite legs of the
+// transport: relayCursorPath counts operator-published-and-ACKed records
+// (Outbox), intakeCursorPath tracks the highest relay event created_at this
+// operator has ingested (Intake) — conflating them would let a publish-heavy,
+// ingest-light relay leg silently starve the backfill floor.
+func intakeCursorPath(storePath, url string) string {
+	h := sha256.Sum256([]byte(url))
+	return fmt.Sprintf("%s.intakecursor.%s", storePath, hex.EncodeToString(h[:4]))
+}
+
 // defaultEmbedScriptPath locates cmd/embed/main.py relative to the running
 // binary instead of a hardcoded dev-machine absolute path (dontguess-740).
 // It walks up from the executable's directory looking for a
@@ -406,7 +420,8 @@ func runServeLocal(dgHome string) error {
 		conn := relay.New(relayURL, relaySigner, relay.WithoutClientAuth())
 		stop, aerr := attachRelayTransport(ctx, localStore, relaySigner, relaySigner.PubKeyHex(),
 			relayCursorPath(localStorePath, relayURL), conn, conn, 5*time.Second, logger.Printf, appendNotify,
-			eng.State().RegisterWireAlias)
+			eng.State().RegisterWireAlias,
+			WithIntakeCursorPath(intakeCursorPath(localStorePath, relayURL)))
 		if aerr != nil {
 			return fmt.Errorf("attaching relay transport for %s: %w", relayURL, aerr)
 		}

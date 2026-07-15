@@ -41,9 +41,29 @@ const (
 	KindSettle              = 3404  // exchange:settle         (regular, immutable)
 	KindAssign              = 3405  // exchange:assign* (7 sub-ops, single kind)
 	KindConsume             = 3406  // exchange:consume        (regular, operator behavioral signal)
+	KindInvite              = 3410  // exchange:invite-redeem  (regular, join-token redemption — docs/design/onboarding-tiered-scaling-federation.md §1)
 	KindScrip               = 3411  // dontguess:scrip-*       (regular, team-tier)
 	KindInventoryProjection = 30401 // inventory+price PROJECTION (addressable, NOT source of truth)
 )
+
+// DontguessKinds is the full set of nostr kinds the dontguess protocol emits or
+// consumes as regular (non-projection) exchange messages. It bounds every relay
+// Intake subscribe REQ to ONLY these kinds so a fresh operator's backfill (and
+// the periodic resync audit) reads the exchange's own event stream instead of
+// the relay's entire firehose across every kind any client has ever published
+// there (dontguess-61a — the dropped_smuggled flood). It deliberately excludes
+// KindInventoryProjection (30401): that is an addressable projection the
+// operator PUBLISHES from derived state, never something Intake backfills.
+var DontguessKinds = []int{
+	KindPut,
+	KindBuy,
+	KindMatch,
+	KindSettle,
+	KindAssign,
+	KindConsume,
+	KindInvite,
+	KindScrip,
+}
 
 // Nostr tag names used by the adapter.
 const (
