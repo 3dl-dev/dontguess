@@ -35,4 +35,14 @@ const (
 	// settle chain, no scrip. Consumed by `dontguess buy` when
 	// DONTGUESS_RELAY_URLS is unset.
 	OpBuy = "buy"
+	// OpAllowlist is the live fleet-allowlist hot-reload op (dontguess-113, design
+	// §3 + §9 Gate B/P6): `dontguess allowlist add|remove` on a RUNNING operator
+	// mutates the live TrustChecker KeySet + republishes the operator-signed
+	// kind-30078 roster + persists Config.FleetAllowlist, all sub-second with NO
+	// restart (so admitting a member never re-triggers the 61a Since=0 history
+	// re-read). Like OpMint it carries an operator-key-signed authorization
+	// (allowlist_auth) verified server-side (verifyAllowlistAuth): reaching the
+	// 0700 socket is necessary but NOT sufficient (ADV-16). Consumed by
+	// `dontguess allowlist add|remove` when the operator is running.
+	OpAllowlist = "allowlist"
 )

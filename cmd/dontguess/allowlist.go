@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"strings"
+	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
 	"github.com/3dl-dev/dontguess/pkg/identity"
@@ -92,6 +94,17 @@ func runAllowlistAdd(dgHome, npub string, out io.Writer) error {
 		return fmt.Errorf("allowlist add: %w", err)
 	}
 
+	// dontguess-113: prefer the LIVE hot-reload path when the operator is running.
+	// The running serve mutates the live TrustChecker KeySet + republishes the
+	// operator-signed roster + persists Config.FleetAllowlist, all sub-second with
+	// NO restart (so the 61a Since=0 history re-read never fires on admit). When the
+	// socket is unreachable the operator is not running — fall back to writing the
+	// config directly so the next start picks the entry up.
+	if conn, ok := dialSocketMaybe(dgHome); ok {
+		defer conn.Close()
+		return allowlistLiveRequest(conn, dgHome, allowlistActionAdd, hexKey, npub, out)
+	}
+
 	cfg, err := exchange.LoadConfig(dgHome)
 	if err != nil {
 		return fmt.Errorf("allowlist add: %w", err)
@@ -112,6 +125,43 @@ func runAllowlistAdd(dgHome, npub string, out io.Writer) error {
 	return nil
 }
 
+// allowlistLiveRequest signs an operator-key authorization binding action+hexKey
+// (mirroring `dontguess mint`) and drives the OpAllowlist IPC op over conn. The
+// running operator verifies the signature (verifyAllowlistAuth) before mutating any
+// live state, so merely reaching the socket does not admit a member (ADV-16).
+// display is the operator-facing form (npub or hex as typed) used only in the
+// success message; the wire target and the signature both bind the canonical hex.
+func allowlistLiveRequest(conn net.Conn, dgHome, action, hexKey, display string, out io.Writer) error {
+	signer, err := loadOperatorSigner(dgHome)
+	if err != nil {
+		return fmt.Errorf("allowlist %s: %w", action, err)
+	}
+	authEv := buildAllowlistAuthEvent(action, hexKey, time.Now().Unix())
+	if err := identity.SignEvent(signer, authEv); err != nil {
+		return fmt.Errorf("allowlist %s: signing authorization: %w", action, err)
+	}
+
+	var resp okResponse
+	if err := sendRequest(conn, map[string]any{
+		"op":               OpAllowlist,
+		"allowlist_action": action,
+		"allowlist_target": hexKey,
+		"allowlist_auth":   authEv,
+	}, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("allowlist %s: %s", action, resp.Error)
+	}
+	switch action {
+	case allowlistActionRemove:
+		fmt.Fprintf(out, "removed (live): %s\n", display)
+	default:
+		fmt.Fprintf(out, "allowlisted (live): %s\n", display)
+	}
+	return nil
+}
+
 // runAllowlistRemove validates npub the same way as add (loud error, nothing
 // persisted on a malformed entry), then drops any config entry whose
 // normalized hex matches — regardless of whether it was originally stored as
@@ -123,6 +173,13 @@ func runAllowlistRemove(dgHome, npub string, out io.Writer) error {
 	hexKey, err := normalizeToHex(npub)
 	if err != nil {
 		return fmt.Errorf("allowlist remove: %w", err)
+	}
+
+	// dontguess-113: live de-admission when the operator is running (KeySet.Remove +
+	// roster republish + config persist, no restart); offline config write otherwise.
+	if conn, ok := dialSocketMaybe(dgHome); ok {
+		defer conn.Close()
+		return allowlistLiveRequest(conn, dgHome, allowlistActionRemove, hexKey, npub, out)
 	}
 
 	cfg, err := exchange.LoadConfig(dgHome)

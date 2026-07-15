@@ -45,6 +45,12 @@ var (
 	// Exposed as a package-level variable so tests can shorten it without changing
 	// production behaviour. Default is 5 seconds.
 	operatorConnDeadline = 5 * time.Second
+
+	// rosterPublishTimeout bounds each per-leg roster republish on a live allowlist
+	// hot-reload (dontguess-113) so a dead/slow relay leg cannot hold the OpAllowlist
+	// response past operatorConnDeadline — the live KeySet + config are already
+	// updated by the time the roster is published, so it is best-effort.
+	rosterPublishTimeout = 3 * time.Second
 )
 
 var serveCmd = &cobra.Command{
@@ -422,6 +428,11 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 	// no roster). Built in the team-tier block below over ks, then handed to
 	// attachRelayLegsAsync so every relay leg's reader routes rosters into it.
 	var rosterFold *rosterFolder
+	// liveKeySet is the SAME *KeySet the TrustChecker enforces and the rosterFolder
+	// folds into — hoisted out of the team-tier block below so the allowlist
+	// hot-reload controller (dontguess-113) can mutate it live. nil on the
+	// individual/no-relay tier (no admission gate to reload).
+	var liveKeySet *exchange.KeySet
 	// scripStore stays a nil scrip.SpendingStore interface on the individual/
 	// no-relay tier (content moves free — correct: the operator is the sole local
 	// writer and local puts use random per-call sender keys). Declared here (not
@@ -482,6 +493,7 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 			return fmt.Errorf("trust checker: %w", terr)
 		}
 		trustChecker = tc
+		liveKeySet = ks // shared with the allowlist hot-reload controller (dontguess-113)
 		// Fold operator-signed fleet roster events (kind 30078) into THIS ks — the
 		// same KeySet the TrustChecker/SEAM A/B gates enforce — so an operator-signed
 		// roster on the relay log is the KeySet's source of truth (design §2/P5). The
@@ -617,7 +629,52 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 	// leaves the operator half-broken: the relay leg and engine loop run fine,
 	// but every local CLI command ("operator not reachable") looks dead. Fail
 	// loud instead so `up`/serve's caller sees the failure immediately.
-	socketCleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger)
+	//
+	// The relay legs are attached AFTER the socket binds (dontguess-347), but the
+	// legs slice + its mutex are declared HERE so the allowlist hot-reload
+	// controller's roster-republish closure (dontguess-113) can fan out to whatever
+	// legs are attached at call time — reading them under legsMu, which the async
+	// attach loop below writes under the same lock.
+	var legsMu sync.Mutex
+	var legs []relayLeg
+
+	// allowlist hot-reload controller (dontguess-113, design §3 + §9 Gate B/P6):
+	// the server-side half of live `dontguess allowlist add|remove`. It mutates the
+	// live KeySet, republishes the operator roster, and persists Config.FleetAllowlist
+	// — all gated behind an operator-key signature (verifyAllowlistAuth, ADV-16).
+	// liveKeySet/operatorSigner are nil on the individual tier, where apply()
+	// degrades to a config-only persist. The publishRoster closure fans an
+	// operator-signed roster out to every attached relay leg, bounded per leg so a
+	// dead relay cannot hold the CLI past the socket deadline (the live KeySet +
+	// config are already updated by then — the publish is best-effort and reconciles
+	// on the next fold).
+	publishRoster := func(ev *identity.Event) {
+		legsMu.Lock()
+		pubs := make([]*demuxPublisher, 0, len(legs))
+		for _, l := range legs {
+			if l.publisher != nil {
+				pubs = append(pubs, l.publisher)
+			}
+		}
+		legsMu.Unlock()
+		for _, p := range pubs {
+			pctx, pcancel := context.WithTimeout(ctx, rosterPublishTimeout)
+			if _, perr := p.PublishEvent(pctx, ev); perr != nil {
+				logger.Printf("  allowlist: roster republish to a relay leg failed (live KeySet + config already updated; reconciles on next fold): %v", perr)
+			}
+			pcancel()
+		}
+	}
+	allowCtrl := &allowlistController{
+		keys:           liveKeySet,
+		operatorSigner: operatorSigner,
+		operatorKeyHex: engineOperatorKey,
+		dgHome:         dgHome,
+		publishRoster:  publishRoster,
+		nowUnix:        func() int64 { return time.Now().Unix() },
+	}
+
+	socketCleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger, allowCtrl)
 	if err != nil {
 		return fmt.Errorf("operator socket: %w", err)
 	}
@@ -634,8 +691,6 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 	// (relayCursorPath, keyed by URL) so the relays' publish watermarks never
 	// collide; every leg reads the engine's fold, which is off the buy/match hot
 	// path (docs/design/relay-transport.md §2.4).
-	var legsMu sync.Mutex
-	var legs []relayLeg
 	var relayWG sync.WaitGroup
 	if len(relayURLs) > 0 {
 		// CLIMB EGRESS FENCE (ADV-18, design §6 + §9 Gate A/P4). Establish the
@@ -847,7 +902,7 @@ func recordOperatorSocketPath(dgHome, sockPath string) error {
 // config on success so CLI clients can find it. Returns a cleanup func that
 // closes the listener and removes the socket file, and a non-nil error if the
 // socket could not be bound or the resolved path could not be persisted.
-func bindOperatorSocket(ctx context.Context, dgHome string, eng *exchange.Engine, logger *log.Logger) (func(), error) {
+func bindOperatorSocket(ctx context.Context, dgHome string, eng *exchange.Engine, logger *log.Logger, allowCtrl ...*allowlistController) (func(), error) {
 	sockPath := resolveOperatorSocketPath(dgHome)
 	ln, err := listenOperatorSocket(sockPath)
 	if err != nil {
@@ -859,7 +914,7 @@ func bindOperatorSocket(ctx context.Context, dgHome string, eng *exchange.Engine
 		return nil, fmt.Errorf("record operator socket path: %w", rerr)
 	}
 	logger.Printf("  operator socket: %s", sockPath)
-	go serveOperatorSocket(ctx, ln, eng)
+	go serveOperatorSocket(ctx, ln, eng, allowCtrl...)
 	return func() {
 		ln.Close()
 		os.Remove(sockPath)
@@ -977,6 +1032,16 @@ type operatorRequest struct {
 	// mint. nil on every other op.
 	MintAuth *identity.Event `json:"mint_auth,omitempty"`
 
+	// OpAllowlist fields (dontguess-113, design §3 + §9 Gate B/P6). AllowlistAction
+	// is "add"|"remove"; AllowlistTarget is the fleet member's lowercase hex pubkey;
+	// AllowlistAuth is the operator-key-signed authorization (allowlistAuthKind)
+	// binding this exact action+target. The handler rejects the request unless
+	// AllowlistAuth verifies (verifyAllowlistAuth) — socket reachability alone is
+	// NOT authorization for a live admit (ADV-16). nil/empty on every other op.
+	AllowlistAction string          `json:"allowlist_action,omitempty"`
+	AllowlistTarget string          `json:"allowlist_target,omitempty"`
+	AllowlistAuth   *identity.Event `json:"allowlist_auth,omitempty"`
+
 	// OpPut/OpBuy fields (individual tier, zero-relay — design §3.3,
 	// dontguess-2b4). Description/Content/TokenCost/ContentType/Domains mirror
 	// pkg/relayclient.PutRequest's shape; Task/Budget/MaxResults mirror the
@@ -996,7 +1061,8 @@ type operatorRequest struct {
 // so a hung client cannot block subsequent operator commands (dontguess-481a).
 // A WaitGroup allows clean shutdown — the function returns only after all
 // in-flight handlers finish.
-func serveOperatorSocket(ctx context.Context, ln net.Listener, eng *exchange.Engine) {
+func serveOperatorSocket(ctx context.Context, ln net.Listener, eng *exchange.Engine, allowCtrl ...*allowlistController) {
+	ctrl := firstAllowlistController(allowCtrl)
 	// Close the listener when the context is done so Accept unblocks.
 	go func() {
 		<-ctx.Done()
@@ -1019,7 +1085,7 @@ func serveOperatorSocket(ctx context.Context, ln net.Listener, eng *exchange.Eng
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			handleOperatorConn(conn, eng)
+			handleOperatorConn(conn, eng, ctrl)
 		}()
 	}
 }
@@ -1035,8 +1101,9 @@ func serveOperatorSocket(ctx context.Context, ln net.Listener, eng *exchange.Eng
 //	    being passed to json.NewDecoder, bounding memory allocation from
 //	    oversized payloads. All legitimate requests are small JSON objects
 //	    well under this ceiling.
-func handleOperatorConn(conn net.Conn, eng *exchange.Engine) {
+func handleOperatorConn(conn net.Conn, eng *exchange.Engine, allowCtrl ...*allowlistController) {
 	defer conn.Close()
+	ctrl := firstAllowlistController(allowCtrl)
 
 	// (b) Stall protection: abort if no full request arrives within operatorConnDeadline.
 	conn.SetDeadline(time.Now().Add(operatorConnDeadline)) //nolint:errcheck
@@ -1153,6 +1220,30 @@ func handleOperatorConn(conn net.Conn, eng *exchange.Engine) {
 		// it returns an error on the individual tier (ScripStore=nil) and
 		// audit-logs every mint.
 		if err := eng.MintScrip(req.Recipient, req.Amount); err != nil {
+			writeOperatorResp(conn, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeOperatorResp(conn, map[string]any{"ok": true})
+
+	case OpAllowlist:
+		// Live fleet-allowlist hot-reload (dontguess-113, design §3 + §9 Gate B/P6).
+		// Reaching this socket is NECESSARY but NOT sufficient (ADV-16): apply()
+		// runs verifyAllowlistAuth — a REAL BIP-340 Schnorr verify against the
+		// persisted operator key, binding this exact action+target — BEFORE it
+		// mutates the live KeySet, republishes the operator-signed roster, or
+		// persists Config.FleetAllowlist. A nil controller means the serve process
+		// did not wire hot-reload (should not happen — it is always built), so fail
+		// closed rather than silently no-op.
+		if ctrl == nil {
+			writeOperatorResp(conn, map[string]any{"ok": false, "error": "allowlist: hot-reload controller unavailable"})
+			return
+		}
+		err := ctrl.apply(req.AllowlistAction, req.AllowlistTarget, req.AllowlistAuth)
+		// apply() may block on the roster republish (a bounded per-leg PublishEvent),
+		// which can consume much of the 5s deadline; reset it so the response write
+		// has a fresh window (mirrors the accept-put dontguess-777 reset).
+		conn.SetDeadline(time.Now().Add(operatorConnDeadline)) //nolint:errcheck
+		if err != nil {
 			writeOperatorResp(conn, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}

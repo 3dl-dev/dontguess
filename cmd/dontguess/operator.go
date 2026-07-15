@@ -32,6 +32,20 @@ func dialSocket() net.Conn {
 	return conn
 }
 
+// dialSocketMaybe dials the operator socket resolved from dgHome WITHOUT exiting
+// on failure (unlike dialSocket). It returns (conn, true) when the operator is
+// running and reachable, or (nil, false) when it is not — the caller then chooses
+// a non-live fallback. Used by `dontguess allowlist add|remove` (dontguess-113) to
+// prefer the live hot-reload IPC path when the operator is up and fall back to a
+// direct config write when it is not.
+func dialSocketMaybe(dgHome string) (net.Conn, bool) {
+	conn, err := net.Dial("unix", resolveOperatorSocketPathFor(dgHome))
+	if err != nil {
+		return nil, false
+	}
+	return conn, true
+}
+
 // sendRequest sends a JSON request over conn and decodes the response into dst.
 func sendRequest(conn net.Conn, req map[string]any, dst any) error {
 	enc := json.NewEncoder(conn)
