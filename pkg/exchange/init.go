@@ -28,12 +28,46 @@ const operatorKeyFile = "nostr-operator.key"
 // storeFile is the DG_HOME-relative name of the local append-only event log.
 const storeFile = "events.jsonl"
 
+// Tier is the operator's declared scaling rung (dontguess-daa, design §1/§6).
+// It is EXPLICIT and persisted at config time — never inferred from relay
+// presence at serve time — so a team/fleet operator that typos or forgets its
+// relay env var fails LOUD rather than silently starting SOLO. The empty value
+// means "not declared" and resolves to solo (backward compat: an existing solo
+// operator's config has no tier field and keeps working byte-for-byte).
+type Tier string
+
+const (
+	// TierSolo is one machine, local-only, no relay, no scrip. The zero/absent
+	// tier resolves here.
+	TierSolo Tier = "solo"
+	// TierTeam is one operator federating over a relay (team-tier envelope
+	// encryption, live-admit allowlist). REQUIRES at least one relay URL.
+	TierTeam Tier = "team"
+	// TierFleet is treated identically to team for the relay-required check
+	// (team ≡ fleet here); it exists so an operator can declare fleet intent.
+	TierFleet Tier = "fleet"
+)
+
+// RequiresRelay reports whether a declared tier mandates a relay URL at config
+// time. Solo (and the empty/undeclared tier) never do; team and fleet always
+// do — the config-time fail-closed guard (Init) and the serve-time fail-closed
+// guard (assertTierHasRelay) both key off this.
+func (t Tier) RequiresRelay() bool {
+	return t == TierTeam || t == TierFleet
+}
+
 // Config is the local operator config written after init. It is campfire-free:
 // it records the operator's nostr identity, the relay URLs the operator serves,
 // and the local store path.
 type Config struct {
 	// OperatorKeyHex is the operator's nostr public key (x-only BIP-340 hex).
 	OperatorKeyHex string `json:"operator_key"`
+	// Tier is the operator's declared scaling rung (solo|team|fleet), persisted
+	// at config time (dontguess-daa). Empty means undeclared → solo. serve reads
+	// this as the source of truth for tier selection instead of inferring it from
+	// relay presence, so a declared team/fleet operator with no effective relay
+	// fails LOUD rather than silently downgrading to solo.
+	Tier Tier `json:"tier,omitempty"`
 	// OperatorNpub is the NIP-19 bech32 encoding of OperatorKeyHex.
 	OperatorNpub string `json:"operator_npub,omitempty"`
 	// RelayURLs are the relay websocket URLs the operator federates over
@@ -100,6 +134,11 @@ type InitOptions struct {
 	DGHome string
 	// RelayURLs are recorded in the config as the relays the operator serves.
 	RelayURLs []string
+	// Tier is the operator's declared scaling rung (dontguess-daa). Empty leaves
+	// any previously-persisted tier intact on an idempotent re-init, else resolves
+	// to solo. Init rejects a team/fleet tier when the effective RelayURLs set is
+	// empty — a team/fleet operator must declare its relay AT CONFIG TIME.
+	Tier Tier
 	// Force rewrites the config even if one already exists. The operator key is
 	// NEVER overwritten regardless of Force (identity is load-or-create).
 	Force bool
@@ -188,6 +227,12 @@ func Init(opts InitOptions) (*Config, error) {
 	createdAt := time.Now().UnixNano()
 	minReputation := DefaultMinReputation
 	var fleetAllowlist []string
+	// Tier and relay set default to what the caller passed; an idempotent re-init
+	// (not Force) with an empty caller value preserves the previously-persisted
+	// value so `init` never silently downgrades a declared team/fleet operator or
+	// drops its relays (dontguess-daa).
+	tier := opts.Tier
+	relayURLs := opts.RelayURLs
 	if !opts.Force {
 		if existing, lerr := LoadConfig(dgHome); lerr == nil && existing.CreatedAt != 0 {
 			createdAt = existing.CreatedAt
@@ -196,13 +241,39 @@ func Init(opts InitOptions) (*Config, error) {
 			// state it does not itself manage.
 			minReputation = existing.MinReputation
 			fleetAllowlist = existing.FleetAllowlist
+			if tier == "" {
+				tier = existing.Tier
+			}
+			if len(relayURLs) == 0 {
+				relayURLs = existing.RelayURLs
+			}
 		}
+	}
+
+	// A relay supplied with no explicit tier is a team config BY CONSTRUCTION
+	// (dontguess-daa DONE clause 2: `up --relay` persists tier=team + relay). This
+	// stamps the tier at config time so serve reads it straight from the persisted
+	// config — never re-deriving tier from relay presence at serve time. An
+	// explicit solo tier with relays is left as-is (the caller's declaration wins).
+	if tier == "" && len(relayURLs) > 0 {
+		tier = TierTeam
+	}
+
+	// Config-time fail-closed guard (dontguess-daa, design §1/§6): a declared
+	// team/fleet tier with NO effective relay is a hard error at CONFIG TIME. No
+	// silent solo downgrade, no default relay — the operator must declare the
+	// relay explicitly. Solo / undeclared tier never trips this.
+	if tier.RequiresRelay() && len(relayURLs) == 0 {
+		return nil, fmt.Errorf(
+			"init: tier %q requires at least one relay URL, but none was supplied (pass --relay <url> or set DONTGUESS_RELAY_URLS) — "+
+				"a %s operator must declare its relay at config time (no silent solo downgrade, no default relay)", tier, tier)
 	}
 
 	cfg := &Config{
 		OperatorKeyHex: id.PubKeyHex(),
 		OperatorNpub:   id.Npub(),
-		RelayURLs:      opts.RelayURLs,
+		Tier:           tier,
+		RelayURLs:      relayURLs,
 		StorePath:      storePath,
 		CreatedAt:      createdAt,
 		MinReputation:  minReputation,

@@ -113,6 +113,118 @@ func resolveRelayURLs() []string {
 	return out
 }
 
+// resolveServeTierAndRelays resolves the operator's EFFECTIVE tier and relay set
+// at serve time from the PERSISTED config as the source of truth (dontguess-daa,
+// design §1/§6), with env DONTGUESS_RELAY_URLS honored as a backward-compat
+// override. It supersedes the old silent auto-detect (relay-present ⇒ team) by
+// keying tier off the explicit persisted Config.Tier:
+//
+//   - LIVE-operator migration: an env-configured team operator (env relays set,
+//     no persisted tier) is migrated to a persisted tier=team config on first
+//     upgraded run — it is NEVER downgraded to solo. The migration merges into
+//     any existing config so the operator key / socket path / allowlist survive,
+//     minting the operator key from the identity only if the config lacks one.
+//   - Effective relay set: env overrides persisted config; empty means no relay.
+//   - Effective tier: the persisted declaration wins; an absent declaration
+//     resolves to solo (backward compat — existing solo homes keep working).
+//   - Fail-closed guard (INVERSE of §3.9): a declared team/fleet tier with NO
+//     effective relay is a hard startup error naming the tier and the relay flag.
+//
+// It never substitutes a default relay endpoint: a clean env+config yields an
+// empty relay set and the solo tier.
+func resolveServeTierAndRelays(dgHome string, operatorIdentity *identity.Secp256k1Identity, logger *log.Logger) (exchange.Tier, []string, error) {
+	envRelays := resolveRelayURLs()
+
+	cfg, cfgErr := exchange.LoadConfig(dgHome)
+	var cfgTier exchange.Tier
+	var cfgRelays []string
+	if cfgErr == nil {
+		cfgTier = cfg.Tier
+		cfgRelays = cfg.RelayURLs
+	}
+
+	// LIVE-operator migration (dontguess-daa BACKWARD-COMPAT): the durable
+	// systemd --user operator (project memory "Live exchange") is env-configured
+	// team-tier — DONTGUESS_RELAY_URLS set, and a persisted config that `init`
+	// already wrote (operator key present) but with NO Tier field (the field is
+	// new). On the first upgraded run persist tier=team + the env relays into that
+	// existing config and emit a one-line deprecation notice. The live operator
+	// must NOT be downgraded to solo.
+	//
+	// The migration fires ONLY for a config that LOADS with a NON-EMPTY operator
+	// key (a genuine operator that already ran `init`). It deliberately does NOT
+	// fire when the config is absent OR carries an empty operator_key — those are
+	// exactly the two §3.9 rogue-competing-sequencer cases that
+	// assertRelayServeHasOperatorConfig below MUST still refuse (minting/forking a
+	// fresh operator key). Auto-creating or auto-filling a config here would
+	// silently defeat that guard, so we do not. A tier already declared, or no env
+	// relays, => no migration (a genuine solo operator with empty env+config stays
+	// solo, byte-for-byte).
+	migrateRelays := effectiveRelayURLs(envRelays, cfgRelays)
+	if cfgErr == nil && cfg != nil && cfg.OperatorKeyHex != "" && cfgTier == "" && len(migrateRelays) > 0 {
+		if cfg.StorePath == "" {
+			cfg.StorePath = filepath.Join(dgHome, storeFileName)
+		}
+		cfg.Tier = exchange.TierTeam
+		cfg.RelayURLs = migrateRelays
+		if werr := exchange.WriteConfig(exchange.ConfigPath(dgHome), cfg); werr != nil {
+			return "", nil, fmt.Errorf("migrating env relay config to persisted tier: %w", werr)
+		}
+		cfgTier = exchange.TierTeam
+		cfgRelays = migrateRelays
+		logger.Printf("  migration: relay configured with no persisted tier — migrated to persisted config (tier=team); env still honored")
+	}
+
+	// Effective relay set: env overrides persisted config (backward compat).
+	relayURLs := effectiveRelayURLs(envRelays, cfgRelays)
+
+	// Effective tier: the persisted declaration is authoritative; an absent
+	// declaration resolves to solo (backward compat).
+	effectiveTier := cfgTier
+	if effectiveTier == "" {
+		effectiveTier = exchange.TierSolo
+	}
+
+	// Fail-closed guard (INVERSE of §3.9): a declared team/fleet tier with NO
+	// effective relay is a hard startup error — never a silent solo downgrade,
+	// never a default relay, never a hang.
+	if gerr := assertTierHasRelay(effectiveTier, relayURLs); gerr != nil {
+		return "", nil, fmt.Errorf("startup: %w", gerr)
+	}
+
+	return effectiveTier, relayURLs, nil
+}
+
+// storeFileName is the DG_HOME-relative name of the local append-only event log
+// (mirrors pkg/exchange's storeFile and the localStorePath below). Named here so
+// the migration write in resolveServeTierAndRelays can stamp a store_path into a
+// freshly-created config without importing the unexported pkg/exchange constant.
+const storeFileName = "events.jsonl"
+
+// effectiveRelayURLs returns the effective relay set: env relays override the
+// persisted config relays (backward compat), else the persisted config relays.
+func effectiveRelayURLs(envRelays, cfgRelays []string) []string {
+	if len(envRelays) > 0 {
+		return envRelays
+	}
+	return cfgRelays
+}
+
+// assertTierHasRelay is the config-time / serve-time fail-closed tier guard
+// (dontguess-daa, design §1/§6) — the INVERSE of assertRelayServeHasOperatorConfig
+// (§3.9). A declared team/fleet tier with NO effective relay is a hard error
+// naming the tier and the relay flag: no silent solo downgrade, no default relay.
+// Solo (and the empty/undeclared tier) never trips it.
+func assertTierHasRelay(tier exchange.Tier, relayURLs []string) error {
+	if tier.RequiresRelay() && len(relayURLs) == 0 {
+		return fmt.Errorf(
+			"declared %q tier requires a relay but none is configured — pass --relay <url> (or set DONTGUESS_RELAY_URLS), "+
+				"or clear the persisted tier to run solo; refusing to start SOLO under a declared %s tier "+
+				"(no silent downgrade, no default relay)", tier, tier)
+	}
+	return nil
+}
+
 // relayCursorPath returns the durable Outbox publish-cursor sidecar path for a
 // relay, keyed by a hash of its URL so each configured relay tracks its own
 // publish watermark independently (multiple relays tailing one local log must
@@ -193,6 +305,15 @@ func defaultEmbedScriptPath() string {
 // event log file are created on first run inside dgHome, which this function
 // creates if missing.
 func runServeLocal(dgHome string) error {
+	// Own the signal-driven shutdown context here so runServeLocalCtx can be
+	// driven by tests with a cancelable context (bounded-deadline serve drives)
+	// without racing a process-global SIGINT handler.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	return runServeLocalCtx(ctx, dgHome)
+}
+
+func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 	if err := os.MkdirAll(dgHome, 0700); err != nil {
 		return fmt.Errorf("creating DG_HOME %s: %w", dgHome, err)
 	}
@@ -230,11 +351,31 @@ func runServeLocal(dgHome string) error {
 	}
 	defer localStore.Close() //nolint:errcheck
 
-	// M2 relay transport (dontguess-4bd) is opt-in: when DONTGUESS_RELAY_URL is set,
-	// the local operator additionally federates over NIP-42 relays. The SAME nostr
-	// operator identity minted above signs the Outbox events and drives the NIP-42
-	// handshake — there is no second identity and no engineOperatorKey swap. Unset =>
-	// unchanged campfire-free single-agent mode.
+	logDest, err := buildLogDest(dgHome)
+	if err != nil {
+		return fmt.Errorf("log setup: %w", err)
+	}
+	logger := log.New(logDest, "[exchange] ", log.LstdFlags|log.Lmsgprefix)
+
+	// Config-time tier + relay resolution (dontguess-daa, design §1/§6). Tier is
+	// EXPLICIT and read from the PERSISTED config as the source of truth — never
+	// inferred from relay presence — with env DONTGUESS_RELAY_URLS honored as a
+	// backward-compat override. This runs EARLY (after config load, before any
+	// relay attach; merged-base note 347) and holds the fail-closed guard that is
+	// the INVERSE of the §3.9 assertRelayServeHasOperatorConfig guard below: §3.9
+	// fires when relays ARE present but the operator config is not; this fires
+	// when a team/fleet tier IS declared but no relay is configured. Both stay.
+	effectiveTier, relayURLs, err := resolveServeTierAndRelays(dgHome, operatorIdentity, logger)
+	if err != nil {
+		return err
+	}
+
+	// M2 relay transport (dontguess-4bd) is opt-in: when a relay is configured
+	// (env DONTGUESS_RELAY_URLS or the persisted config), the local operator
+	// additionally federates over NIP-42 relays. The SAME nostr operator identity
+	// minted above signs the Outbox events and drives the NIP-42 handshake — there
+	// is no second identity and no engineOperatorKey swap. No relay => unchanged
+	// campfire-free single-agent mode.
 	//
 	// operatorSigner is the SAME operator identity as a TRUE nil interface when no
 	// relays are attached (individual tier). Assigning the typed-nil
@@ -242,19 +383,12 @@ func runServeLocal(dgHome string) error {
 	// holding a nil pointer (the dontguess-4bed / TrustChecker typed-nil trap), which
 	// would arm encryptedRequired on the individual tier and break the confidential-
 	// only guard's tier gating. Keep it untyped-nil unless a real relay is attached.
-	relayURLs := resolveRelayURLs()
 	var relaySigner *identity.Secp256k1Identity
 	var operatorSigner identity.Signer
 	if len(relayURLs) > 0 {
 		relaySigner = operatorIdentity
 		operatorSigner = relaySigner
 	}
-
-	logDest, err := buildLogDest(dgHome)
-	if err != nil {
-		return fmt.Errorf("log setup: %w", err)
-	}
-	logger := log.New(logDest, "[exchange] ", log.LstdFlags|log.Lmsgprefix)
 
 	// Team/federated-tier admission (dontguess-d53, design §3): when relays are
 	// attached, build ONE TrustChecker from the operator-maintained fleet
@@ -422,7 +556,10 @@ func runServeLocal(dgHome string) error {
 	// key), keeping the individual tier byte-for-byte unchanged.
 	applyLegacyOperatorAlias(eng.State(), legacyOperatorKey, engineOperatorKey, logger.Printf)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	// Child of the caller-owned parentCtx so the relay-shutdown defer's cancel()
+	// still unblocks every reader/outbox/in-flight dial, while a test (or the
+	// signal wrapper) retains control of the parent for bounded-deadline drives.
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
 	// Bind the operator IPC socket BEFORE the relay-attach loop (dontguess-347,
@@ -494,7 +631,7 @@ func runServeLocal(dgHome string) error {
 		}()
 	}
 
-	logger.Printf("exchange serving (campfire-free, %d relay URL(s) configured)", len(relayURLs))
+	logger.Printf("exchange serving (campfire-free, tier=%s, %d relay URL(s) configured)", effectiveTier, len(relayURLs))
 	logger.Printf("  operator:  %s", engineOperatorKey[:16]+"...")
 	logger.Printf("  poll:      %s", servePollInterval)
 	logger.Printf("  auto-accept: %v (max %d)", serveAutoAccept, serveAutoAcceptMax)
