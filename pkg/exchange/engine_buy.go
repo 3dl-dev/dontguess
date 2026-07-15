@@ -748,6 +748,16 @@ func (e *Engine) sendColdCompressionAssign(entry *InventoryEntry) error {
 	if entry.WrappedCEKOperator != "" {
 		return nil // v2 confidential entry: see skipCompressionForV2.
 	}
+	if entry.LegacyPlaintext {
+		// Defense-in-depth (dontguess-765, follow-on to -751): see
+		// sendCompressionAssign above — a GRANDFATHERED pre-climb entry's
+		// ContentHash is sha256(plaintext), the same A1/P1 hash oracle
+		// skipCompressionForV2 guards against for v2 confidential entries.
+		// This cold helper is the medium-loop's PostAssign target
+		// (PostOpenCompressionAssign) and must never embed content_hash for a
+		// grandfathered entry once that callback is wired.
+		return nil
+	}
 	bounty := entry.TokenCost * ColdCompressionBountyPct / 100
 	description := compressionProtocol(entry.EntryID, entry.ContentHash, entry.ContentType, bounty)
 	payload, err := json.Marshal(map[string]any{

@@ -632,6 +632,20 @@ func (l *MediumLoop) postCompressionAssigns(inventory []*exchange.InventoryEntry
 			continue
 		}
 
+		// Skip grandfathered plaintext entries (dontguess-765, follow-on to
+		// -751). This loop scans RAW State.Inventory() and BYPASSES the
+		// findCandidates confidentiality fence — its only demand gate is
+		// PurchaseCount>=threshold, which replayed pre-climb solo-tier
+		// settle(complete) history satisfies. A LegacyPlaintext entry's
+		// ContentHash is sha256(plaintext); emitting a compress assign that
+		// carries it would open the §4.4 A1/P1 hash oracle on the PUBLIC
+		// exchange:assign wire. Fence it here, before the PurchaseCount gate,
+		// so the reachable path is guarded independent of the sendColdCompressionAssign
+		// defense-in-depth check downstream.
+		if entry.LegacyPlaintext {
+			continue
+		}
+
 		// Check purchase threshold.
 		if l.opts.State.PurchaseCount(entry.EntryID) < threshold {
 			continue

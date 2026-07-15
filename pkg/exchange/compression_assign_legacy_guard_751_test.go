@@ -144,3 +144,64 @@ func TestCompressionAssignGuard_LegacyPlaintext_WarmPath(t *testing.T) {
 		t.Fatal("sendWarmCompressionAssign withheld the assign for the genuinely-local control entry — the fix wrongly touched individual-tier behavior")
 	}
 }
+
+// TestCompressionAssignGuard_LegacyPlaintext_ColdPath is the dontguess-765
+// done-gate for sendColdCompressionAssign (the "cold" open, non-exclusive path
+// that is the medium loop's PostAssign target via PostOpenCompressionAssign). This
+// is the REACHABLE path: unlike the hot/warm helpers, the cold one is invoked the
+// instant MediumLoopOptions.PostAssign is wired to Engine.PostOpenCompressionAssign
+// over raw State.Inventory(), which includes grandfathered entries. Same done-gate:
+// a grandfathered entry gets NO exchange:assign and its plaintext hash never appears
+// on any emitted message; the genuinely-local control still gets its assign.
+func TestCompressionAssignGuard_LegacyPlaintext_ColdPath(t *testing.T) {
+	t.Parallel()
+	eng, ls, operatorKey := egressTestEngine(t)
+
+	gf := grandfatheredEntry("gf-cold", newReservationID(), []byte("pre-migration plaintext whose sha256 must never reach a cold compression assign"))
+	ctrl := localPlaintextEntry("ctrl-cold", newReservationID(), []byte("genuinely-local plaintext that must still get its cold compression assign"))
+
+	if err := eng.sendColdCompressionAssign(gf); err != nil {
+		t.Fatalf("sendColdCompressionAssign(grandfathered): %v", err)
+	}
+	if err := eng.sendColdCompressionAssign(ctrl); err != nil {
+		t.Fatalf("sendColdCompressionAssign(control): %v", err)
+	}
+
+	recs, err := ls.ReadAll()
+	if err != nil {
+		t.Fatalf("ls.ReadAll: %v", err)
+	}
+
+	var sawGFAssign, sawCtrlAssign bool
+	gfHashHex := strings.TrimPrefix(gf.ContentHash, "sha256:")
+	for i := range recs {
+		m := &recs[i]
+		if m.Sender != operatorKey {
+			continue
+		}
+		if strings.Contains(string(m.Payload), gfHashHex) {
+			t.Fatalf("sha256(grandfathered plaintext) found in an emitted message (tags=%v) — plaintext-hash oracle leaked straight out of sendColdCompressionAssign", m.Tags)
+		}
+		if !tagPresent(m.Tags, TagAssign) {
+			continue
+		}
+		var ap struct {
+			EntryID string `json:"entry_id"`
+		}
+		if json.Unmarshal(m.Payload, &ap) != nil {
+			continue
+		}
+		switch ap.EntryID {
+		case gf.EntryID:
+			sawGFAssign = true
+		case ctrl.EntryID:
+			sawCtrlAssign = true
+		}
+	}
+	if sawGFAssign {
+		t.Fatal("sendColdCompressionAssign emitted an exchange:assign for a grandfathered (LegacyPlaintext) entry — the helper must refuse")
+	}
+	if !sawCtrlAssign {
+		t.Fatal("sendColdCompressionAssign withheld the assign for the genuinely-local control entry — the fix wrongly touched individual-tier behavior")
+	}
+}

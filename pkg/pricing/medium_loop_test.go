@@ -851,6 +851,62 @@ func TestMediumLoop_CompressionAssign_SkippedWhenDerivativeExists(t *testing.T) 
 	}
 }
 
+// TestMediumLoop_CompressionAssign_SkippedForLegacyPlaintext is the dontguess-765
+// ground-source gate for the REACHABLE fence-bypass: postCompressionAssigns scans
+// raw State.Inventory() (grandfathered LegacyPlaintext entries included), bypassing
+// findCandidates. Its only demand gate is PurchaseCount>=threshold, which replayed
+// pre-climb solo-tier settle(complete) history satisfies. A grandfathered entry's
+// ContentHash is sha256(plaintext); posting a compress assign for it would open the
+// §4.4 A1/P1 plaintext-hash oracle on the public exchange:assign wire. This test
+// puts a LegacyPlaintext=true entry at PurchaseCount=5 (well over threshold) with no
+// derivative and no active assign — the ONLY thing that can withhold the assign is
+// the LegacyPlaintext skip — alongside a genuinely-local plaintext CONTROL
+// (LegacyPlaintext=false) that MUST still get its assign, proving the skip is
+// LegacyPlaintext-specific and not a blanket regression.
+func TestMediumLoop_CompressionAssign_SkippedForLegacyPlaintext(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	st := newMediumStubState()
+
+	const tokenCost int64 = 10000
+	st.inventory = []*exchange.InventoryEntry{
+		{EntryID: "entry-grandfathered", SellerKey: "seller-1", TokenCost: tokenCost, LegacyPlaintext: true},
+		{EntryID: "entry-local", SellerKey: "seller-2", TokenCost: tokenCost, LegacyPlaintext: false},
+	}
+	// Both entries are high-demand (replayed settle-complete history), no
+	// derivative, no active assign. Only the LegacyPlaintext fence differs.
+	st.purchaseCount["entry-grandfathered"] = 5
+	st.purchaseCount["entry-local"] = 5
+	st.compressedVersions["entry-grandfathered"] = false
+	st.compressedVersions["entry-local"] = false
+
+	var postedSpecs []pricing.AssignSpec
+	loop := pricing.NewMediumLoop(pricing.MediumLoopOptions{
+		State: st,
+		Now:   func() time.Time { return now },
+		PostAssign: func(spec pricing.AssignSpec) error {
+			postedSpecs = append(postedSpecs, spec)
+			return nil
+		},
+	})
+
+	result := loop.Tick(context.Background())
+
+	// Exactly one assign — for the local control only.
+	if result.CompressionAssigns != 1 {
+		t.Errorf("expected 1 compression assign (control only), got %d", result.CompressionAssigns)
+	}
+	for _, spec := range postedSpecs {
+		if spec.EntryID == "entry-grandfathered" {
+			t.Fatal("postCompressionAssigns posted a compress assign for a grandfathered (LegacyPlaintext) entry — the reachable fence-bypass leaks the plaintext-hash oracle onto the public exchange:assign wire")
+		}
+	}
+	if len(postedSpecs) != 1 || postedSpecs[0].EntryID != "entry-local" {
+		t.Fatalf("expected exactly the local control entry to get its assign, got %+v — the fix wrongly touched individual-tier behavior", postedSpecs)
+	}
+}
+
 // TestMediumLoop_PurchaseCountBoundary is a table-driven test covering the
 // exact boundary around the default CompressionPurchaseThreshold (3):
 //   - purchaseCount=0: no panic, no assign
