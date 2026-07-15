@@ -661,7 +661,15 @@ func loadLegacyLocalOperatorKey(dgHome string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading %s: %w", path, err)
 	}
-	return strings.TrimSpace(string(b)), nil
+	key := strings.TrimSpace(string(b))
+	// dontguess-cbc: a corrupt/truncated legacy key file (anything shorter than
+	// the 32-hex-char opaque 16-byte key loadOrCreateLocalOperatorKey always
+	// wrote) must be a clear error here, never reach applyLegacyOperatorAlias's
+	// legacyOperatorKey[:16] slice and panic on startup.
+	if key != "" && len(key) < 16 {
+		return "", fmt.Errorf("legacy local operator key at %s is truncated or corrupt (%d chars, expected 32 hex chars): remove or repair the file", path, len(key))
+	}
+	return key, nil
 }
 
 // applyLegacyOperatorAlias registers the opaque pre-P3 local operator key as a
@@ -678,7 +686,14 @@ func applyLegacyOperatorAlias(st *exchange.State, legacyOperatorKey, operatorKey
 	}
 	st.RegisterWireAlias(legacyOperatorKey, operatorKey)
 	if logf != nil {
-		logf("  migration: legacy operator key %s… re-attributed to nostr operator identity (wire-alias, no re-sign)", legacyOperatorKey[:16])
+		// dontguess-cbc: guard the [:16] slice — loadLegacyLocalOperatorKey
+		// rejects anything shorter than 16 chars, but keep this call site safe
+		// against any other caller that doesn't route through that validation.
+		preview := legacyOperatorKey
+		if len(preview) > 16 {
+			preview = preview[:16]
+		}
+		logf("  migration: legacy operator key %s… re-attributed to nostr operator identity (wire-alias, no re-sign)", preview)
 	}
 }
 
