@@ -18,11 +18,35 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 
+	"github.com/3dl-dev/dontguess/pkg/blossom"
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 	"github.com/3dl-dev/dontguess/pkg/identity"
 	"github.com/3dl-dev/dontguess/pkg/relayclient"
 	"github.com/spf13/cobra"
 )
+
+// newBuyerBlobStore resolves the buyer-side BlobStore that pkg/relayclient's
+// settle chain (dontguess-250) uses to fetch >32 KiB encrypted content offloaded
+// to Blossom (dontguess-640). Overridable in tests so an E2E can point the CLI
+// at an in-process blob backend. Default: an HTTP Blossom client rooted at
+// DONTGUESS_BLOSSOM_URL.
+//
+// Fail-open on ABSENCE: when DONTGUESS_BLOSSOM_URL is unset this returns a TRUE
+// nil interface (never a typed-nil), so the ≤32 KiB inline path is unchanged and
+// an oversize blob_pointer deliver LOUD-fails through settle.go's existing
+// nil-store guard rather than silently passing.
+var newBuyerBlobStore = defaultBuyerBlobStore
+
+func defaultBuyerBlobStore() exchange.BlobStore {
+	url := strings.TrimSpace(os.Getenv("DONTGUESS_BLOSSOM_URL"))
+	if url == "" {
+		return nil
+	}
+	return blossom.NewClient(url)
+}
 
 // newBuyCmd builds the buy cobra command. Extracted from init() so tests can
 // construct an isolated instance per case rather than mutating the package-level
@@ -159,6 +183,11 @@ func runBuy(cmd *cobra.Command, args []string) error {
 		Budget:         budget,
 		Preview:        preview,
 		OperatorPubKey: operatorPubKey,
+		// Wire the buyer-side Blossom client so an oversize (>32 KiB) deliver that
+		// references its ciphertext as a blob_pointer is fetchable from the CLI
+		// (dontguess-250/640). nil (no DONTGUESS_BLOSSOM_URL) leaves the ≤32 KiB
+		// inline path untouched; an oversize deliver then LOUD-fails in settle.go.
+		BlobStore: newBuyerBlobStore(),
 	})
 	if serr != nil {
 		return fmt.Errorf("buy %s: settle: %w", result.BuyID, serr)
