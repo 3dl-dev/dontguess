@@ -649,7 +649,7 @@ func isLegacyPlaintextPut(v int, enc *encEnvelope, content string) bool {
 // Fail-closed by construction: it can only ever yield verified plaintext or
 // nothing. sellerPubHex is msg.Sender (the seller wrapped the CEK to the
 // operator, so we open FROM the seller's key).
-func (s *State) decryptV2Put(sellerPubHex string, enc *encEnvelope) (plaintext []byte, ok bool) {
+func (s *State) decryptV2Put(sellerPubHex string, enc *encEnvelope, blobs map[string][]byte) (plaintext []byte, ok bool) {
 	if s.operatorSigner == nil {
 		return nil, false // no operator key to unwrap with — cannot gate, drop
 	}
@@ -658,29 +658,34 @@ func (s *State) decryptV2Put(sellerPubHex string, enc *encEnvelope) (plaintext [
 	}
 	// Resolve the ciphertext bytes. Exactly one of ciphertext / blob_pointer is
 	// set (encWellFormed enforced this). Inline: base64-decode. Offloaded
-	// (dontguess-640, Phase 4): FETCH the CIPHERTEXT from the operator's Blossom
-	// store so the quality/dedup/plausibility gates run on the same plaintext the
-	// inline path would produce — only the ciphertext SOURCE differs. Access
-	// s.blobStore DIRECTLY (not via s.BlobStore()): applyPut already holds s.mu
-	// (State.Apply), so the RLock accessor would deadlock.
+	// (dontguess-640, Phase 4): the CIPHERTEXT was FETCHED from the operator's
+	// Blossom store BEFORE s.mu was taken — prefetchPutBlobs, called by
+	// Apply/Replay off the lock (dontguess-a5e) — and threaded in via blobs. The
+	// gates still run on the same plaintext the inline path would produce; only
+	// the ciphertext SOURCE (a lock-free prefetch) differs. This is the a5e fix:
+	// a slow/hung Blossom HTTP fetch no longer stalls ALL State reads/writes under
+	// s.mu during live-fold / Replay-of-many-offloaded (the -race confidentiality
+	// E2E flaky root cause), because no State lock is ever held across a
+	// BlobStore.Fetch.
 	var ciphertext []byte
 	if enc.BlobPointer != "" {
-		// FAIL-CLOSED: a blob_pointer put with no operator blob store cannot be
-		// fetched, so it cannot be gated. Drop it rather than fold un-gated
-		// content — never trust a blob we could not verify+decrypt (§6).
-		if s.blobStore == nil {
-			return nil, false
-		}
-		fetched, ferr := s.blobStore.Fetch(enc.BlobPointer)
-		if ferr != nil {
+		// FAIL-CLOSED: a blob absent from the prefetch map means the blob was
+		// unavailable when Apply/Replay tried to fetch it off the lock — no blob
+		// store configured, a fetch error, a fetch timeout, or an unknown pointer.
+		// Every one of those is a DROP: never fold un-gated content we could not
+		// verify+decrypt (§6). This is the identical set of drop outcomes the old
+		// under-lock Fetch produced (nil store / fetch error), preserved exactly —
+		// only the lock discipline changed.
+		fetched, present := blobs[enc.BlobPointer]
+		if !present {
 			return nil, false // blob unavailable at fold time → drop (see replay caveat)
 		}
 		// FIX 2 (dontguess-00d): cap a fetched blob at MaxContentBytes BEFORE it
 		// is sha256'd/decrypted. A hostile Blossom store can return gigabytes for
-		// a valid-looking pointer; hashing+decrypting that unbounded under the
-		// State write lock is an alloc/CPU DoS. The plaintext is size-limited to
-		// MaxContentBytes downstream anyway, so a ciphertext exceeding it can
-		// never yield an admissible put — drop it here rather than process it.
+		// a valid-looking pointer; hashing+decrypting that unbounded is an
+		// alloc/CPU DoS. The plaintext is size-limited to MaxContentBytes
+		// downstream anyway, so a ciphertext exceeding it can never yield an
+		// admissible put — drop it here rather than process it.
 		if len(fetched) > MaxContentBytes {
 			return nil, false
 		}
@@ -754,7 +759,7 @@ func (s *State) decryptV2Put(sellerPubHex string, enc *encEnvelope) (plaintext [
 // Legacy plaintext (v<2 or no enc) keeps the base64 "content" path. On team
 // tier (encryptedRequired) the fail-closed §6 guard DROPS any legacy-plaintext
 // or malformed-enc put before it can fold — a downgrade cannot reopen the leak.
-func (s *State) applyPut(msg *Message) {
+func (s *State) applyPut(msg *Message, blobs map[string][]byte) {
 	var payload struct {
 		V               int          `json:"v"`
 		Description     string       `json:"description"`
@@ -841,7 +846,7 @@ func (s *State) applyPut(msg *Message) {
 		ciphertextHash     string
 	)
 	if isV2 {
-		pt, ok := s.decryptV2Put(msg.Sender, payload.Enc)
+		pt, ok := s.decryptV2Put(msg.Sender, payload.Enc, blobs)
 		if !ok {
 			return // undecryptable / tampered / blob-only → drop (fail-closed)
 		}
@@ -1108,4 +1113,94 @@ func stripDomainPrefixes(domains []string) []string {
 		out[i] = stripTagPrefix(d, "exchange:domain:")
 	}
 	return out
+}
+
+// blobFetchDeadline bounds a single off-lock blob fetch during the fold
+// (dontguess-a5e). Moving the fetch off s.mu already stops a slow/hung Blossom
+// host from stalling ALL State reads/writes; this deadline further bounds the
+// fold goroutine itself so a hung HTTP GET cannot wedge live-fold / Replay
+// indefinitely even off the lock. On timeout the blob is treated as unavailable
+// (the put drops, fail-closed, exactly as a fetch error would); the orphaned
+// fetch goroutine drains when the underlying BlobStore hits its own transport
+// timeout (the production blossom.Client carries a bounded http.Client.Timeout).
+const blobFetchDeadline = 30 * time.Second
+
+// prefetchPutBlobs resolves every offloaded-put ciphertext referenced by msgs
+// from the blob store WITHOUT holding s.mu (dontguess-a5e). Apply/Replay call it
+// BEFORE taking the State write lock and thread the returned pointer->ciphertext
+// map into the fold, so decryptV2Put reads a pre-fetched blob instead of calling
+// BlobStore.Fetch under s.mu. This is the whole point of the item: a slow/hung
+// Blossom HTTP fetch must never stall State reads/writes during live-fold or a
+// Replay-of-many-offloaded rebuild.
+//
+// The blob store handle is read via the RLock accessor (BlobStore()) and then
+// RELEASED before any Fetch runs, so no State lock is held across the network
+// call. Each distinct pointer is fetched at most once. A pointer whose fetch
+// fails, times out, or is unknown is simply omitted from the map; decryptV2Put
+// treats an absent pointer as fail-closed (drop) — the identical outcome the old
+// under-lock nil-store / fetch-error paths produced.
+//
+// SetBlobStore is documented as not-concurrent-with Apply/Replay, so reading the
+// handle here (just before the caller takes s.mu) respects the same contract the
+// under-lock access did.
+func (s *State) prefetchPutBlobs(msgs []*Message) map[string][]byte {
+	store := s.BlobStore()
+	if store == nil {
+		return nil
+	}
+	out := make(map[string][]byte)
+	attempted := make(map[string]struct{})
+	for _, msg := range msgs {
+		if msg == nil || exchangeOp(msg.Tags) != TagPut {
+			continue
+		}
+		var p struct {
+			V   int          `json:"v"`
+			Enc *encEnvelope `json:"enc"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			continue
+		}
+		if p.V < 2 || p.Enc == nil || p.Enc.BlobPointer == "" {
+			continue
+		}
+		ptr := p.Enc.BlobPointer
+		if _, done := attempted[ptr]; done {
+			continue
+		}
+		attempted[ptr] = struct{}{}
+		if b, ok := fetchBlobBounded(store, ptr); ok {
+			out[ptr] = b
+		}
+	}
+	return out
+}
+
+// fetchBlobBounded runs store.Fetch(pointer) with a blobFetchDeadline ceiling so
+// a hung blob host cannot wedge the fold goroutine (dontguess-a5e). It returns
+// ok=false on fetch error OR timeout — both drop the put fail-closed. The
+// BlobStore interface has no context parameter, so the deadline is enforced with
+// a watchdog goroutine; on timeout the in-flight fetch is abandoned (it drains
+// when the underlying transport times out) and the caller proceeds.
+func fetchBlobBounded(store BlobStore, pointer string) ([]byte, bool) {
+	type result struct {
+		b   []byte
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		b, err := store.Fetch(pointer)
+		ch <- result{b, err}
+	}()
+	timer := time.NewTimer(blobFetchDeadline)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, false
+		}
+		return r.b, true
+	case <-timer.C:
+		return nil, false
+	}
 }

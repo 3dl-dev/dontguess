@@ -71,6 +71,19 @@ func NewState() *State {
 // Replay builds state from scratch by processing all messages in log order.
 // It resets the state before processing. Thread-safe.
 func (s *State) Replay(msgs []Message) {
+	// Fetch every offloaded-put ciphertext BEFORE taking s.mu (dontguess-a5e).
+	// Replay folds the ENTIRE log under a single write-lock hold; fetching blobs
+	// under that lock (the old behavior) let a slow/hung Blossom host stall ALL
+	// State reads/writes for the whole rebuild — the Replay-of-many-offloaded
+	// stall this item removes, and the root cause of the -race confidentiality
+	// E2E flaky. Pre-fetching off the lock keeps s.mu held only for the pure
+	// in-memory fold; decryptV2Put reads the pre-fetched ciphertext.
+	prefetchTargets := make([]*Message, len(msgs))
+	for i := range msgs {
+		prefetchTargets[i] = &msgs[i]
+	}
+	blobs := s.prefetchPutBlobs(prefetchTargets)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -192,20 +205,27 @@ func (s *State) Replay(msgs []Message) {
 	// profiles created during replay; existing profiles keep their trust_scores.
 
 	for i := range msgs {
-		s.applyLocked(&msgs[i])
+		s.applyLocked(&msgs[i], blobs)
 	}
 }
 
 // Apply processes a single new message, updating state.
 // Thread-safe.
 func (s *State) Apply(msg *Message) {
+	// Fetch any offloaded-put ciphertext BEFORE taking s.mu (dontguess-a5e): a
+	// slow/hung Blossom HTTP fetch must never stall State reads/writes under the
+	// write lock during live-fold. The pre-fetched blobs are threaded into the
+	// fold; decryptV2Put reads them instead of calling BlobStore.Fetch under s.mu.
+	blobs := s.prefetchPutBlobs([]*Message{msg})
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.applyLocked(msg)
+	s.applyLocked(msg, blobs)
 }
 
-// applyLocked applies a message to state. Caller must hold s.mu.
-func (s *State) applyLocked(msg *Message) {
+// applyLocked applies a message to state. Caller must hold s.mu. blobs carries
+// any offloaded-put ciphertext pre-fetched off the lock (dontguess-a5e); it is
+// nil when no blob store is configured or the message references no blob.
+func (s *State) applyLocked(msg *Message, blobs map[string][]byte) {
 	// P3 operator-identity migration (design §6, ADV-17): a pre-P3 solo home signed
 	// its operator records under an opaque local operator key that serve registers
 	// as a wire-alias of the stable nostr operator key (RegisterWireAlias). Canonicalize
@@ -233,7 +253,7 @@ func (s *State) applyLocked(msg *Message) {
 	op := exchangeOp(msg.Tags)
 	switch op {
 	case TagPut:
-		s.applyPut(msg)
+		s.applyPut(msg, blobs)
 	case TagBuy:
 		s.applyBuy(msg)
 	case TagMatch:
