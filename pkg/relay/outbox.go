@@ -118,6 +118,31 @@ func WithEmittedSeeder(seed func(id string)) OutboxOption {
 	return func(o *Outbox) { o.seedEmitted = seed }
 }
 
+// WithClimbFence establishes the solo→fleet CLIMB egress fence (ADV-18,
+// design §6 + §9 Gate A/P4). floor is the climb watermark: the count of
+// Origin=local (operator-authored, publish-candidate) records that already
+// existed in the local log at the instant the operator first attached a relay.
+// Those are PRE-CLIMB records — the individual tier stored content as PLAINTEXT
+// (legal there, §541 §6), and the relay Outbox tails the SAME events.jsonl — so
+// republishing them on the climb would mass-broadcast the solo plaintext corpus
+// in cleartext. The fence seeds the durable publish cursor to floor ONLY when the
+// cursor sidecar did NOT already exist (the first-ever attach = the climb): those
+// floor records are treated as already-handled and NEVER published, while every
+// post-climb record (a v2-encrypted team put, or a DELIBERATE per-entry
+// re-put-as-encrypted, which appends a NEW record above the watermark) publishes
+// normally. On any subsequent restart the sidecar exists, so this is a strict
+// no-op and the durable cursor governs unchanged — the fence is established
+// exactly once, at the climb. floor <= 0 is a no-op (nothing to fence: a
+// born-fleet operator whose log was empty at first attach).
+//
+// A nil/zero fence (the default) is exactly today's behavior — a fresh cursor
+// starts at 0 and publishes the whole log — so the Outbox is drop-in for every
+// caller that does not opt into the climb fence (all existing tests, the
+// individual tier).
+func WithClimbFence(floor int64) OutboxOption {
+	return func(o *Outbox) { o.climbFence = floor }
+}
+
 // WithAliasRegistrar wires the wire→store id alias (dontguess-55c GAP 1,
 // docs/design/settle-wire-id-reconciliation-55c.md). register is invoked with the
 // SIGNED nostr event id (the content-hash WIRE id a relay buyer sees + e-tags) and
@@ -163,6 +188,12 @@ type Outbox struct {
 	// behavior (no alias wiring). See WithAliasRegistrar.
 	aliasRegistrar func(wire, store string)
 
+	// climbFence, if > 0 and the cursor sidecar did NOT already exist at
+	// construction, seeds the durable publish cursor to this value so pre-climb
+	// records stay LOCAL-ONLY (ADV-18, §6). See WithClimbFence. Applied once in
+	// NewOutbox; ignored on any restart where the sidecar already exists.
+	climbFence int64
+
 	lagAlarm int64 // publish_lag threshold for the loud alarm (0 = disabled)
 
 	publishRetry int64 // atomic: total publish attempts that failed and were retried
@@ -185,7 +216,7 @@ func NewOutbox(log localLog, signer identity.Signer, pub EventPublisher, cursorP
 	if pub == nil {
 		return nil, fmt.Errorf("outbox: nil publisher")
 	}
-	cf, err := openCursor(cursorPath)
+	cf, existed, err := openCursor(cursorPath)
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +231,19 @@ func NewOutbox(log localLog, signer identity.Signer, pub EventPublisher, cursorP
 	}
 	for _, opt := range opts {
 		opt(o)
+	}
+	// CLIMB EGRESS FENCE (ADV-18, §6 + §9 Gate A/P4). Seed the durable cursor to
+	// the climb watermark ONLY on the first-ever attach (no pre-existing cursor
+	// sidecar). This fences every pre-climb Origin=local record — the solo
+	// PLAINTEXT corpus — so it is never republished to the relay in cleartext. On
+	// any restart the sidecar exists (existed == true) and this is skipped, so the
+	// durable cursor governs unchanged and the fence is applied exactly once. See
+	// WithClimbFence.
+	if !existed && o.climbFence > 0 {
+		if err := cf.seedTo(o.climbFence); err != nil {
+			return nil, fmt.Errorf("outbox: seed climb fence to %d: %w", o.climbFence, err)
+		}
+		o.logf("outbox: climb egress fence engaged — %d pre-climb local record(s) fenced local-only (never republished in cleartext, ADV-18)", o.climbFence)
 	}
 	return o, nil
 }
@@ -513,32 +557,52 @@ type cursorFile struct {
 }
 
 // openCursor reads the existing cursor value (0 if the sidecar does not yet
-// exist) and returns a cursorFile ready to advance.
-func openCursor(path string) (*cursorFile, error) {
+// exist) and returns a cursorFile ready to advance. existed reports whether the
+// sidecar file was already present — the climb fence (NewOutbox) seeds the cursor
+// only when it was NOT (the first-ever attach = the solo→fleet climb, §6). A
+// present-but-empty sidecar counts as existed (a prior process created it), so a
+// crash between create and first advance never re-engages the fence.
+func openCursor(path string) (*cursorFile, bool, error) {
 	if path == "" {
-		return nil, fmt.Errorf("outbox: empty cursor path")
+		return nil, false, fmt.Errorf("outbox: empty cursor path")
 	}
 	c := &cursorFile{path: path}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return c, nil
+			return c, false, nil
 		}
-		return nil, fmt.Errorf("outbox: read cursor %s: %w", path, err)
+		return nil, false, fmt.Errorf("outbox: read cursor %s: %w", path, err)
 	}
 	s := strings.TrimSpace(string(data))
 	if s == "" {
-		return c, nil
+		return c, true, nil
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("outbox: parse cursor %s (value %q): %w", path, s, err)
+		return nil, false, fmt.Errorf("outbox: parse cursor %s (value %q): %w", path, s, err)
 	}
 	if n < 0 {
-		return nil, fmt.Errorf("outbox: cursor %s has negative value %d", path, n)
+		return nil, false, fmt.Errorf("outbox: cursor %s has negative value %d", path, n)
 	}
 	c.val = n
-	return c, nil
+	return c, true, nil
+}
+
+// seedTo durably sets the cursor to n (the climb watermark), used ONCE by
+// NewOutbox at the first-ever attach to engage the egress fence. It persists n
+// with the same temp→fsync→rename discipline as Advance, so the fence survives a
+// crash immediately after the climb. Caller guarantees this runs only on a fresh
+// (never-persisted) cursor, so it does not guard against lowering an existing
+// value.
+func (c *cursorFile) seedTo(n int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.persistLocked(n); err != nil {
+		return err
+	}
+	c.val = n
+	return nil
 }
 
 // Value returns the current durable cursor value.

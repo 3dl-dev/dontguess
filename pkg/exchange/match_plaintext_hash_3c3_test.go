@@ -105,22 +105,33 @@ func matchResultFor3c3(t *testing.T, h *testHarness, eng *exchange.Engine, task,
 }
 
 // TestMatch_V2_PlaintextHashNeverOnPublicWire is the dontguess-3c3 done-gate.
+//
+// TWO-ENGINE STRUCTURE (post-ADV-7 / design §6): pre-decoupling this test folded
+// BOTH a v2 put and a legacy plaintext put into ONE OperatorSigner-without-
+// ScripStore engine, relying on `encryptedRequired == false` (scrip ANDed with
+// signer) to accept the plaintext. dontguess-e18d decoupled encryptedRequired
+// from scrip — a relay-attached (OperatorSigner != nil) engine is now fail-closed
+// against plaintext regardless of ScripStore — so that single engine now REJECTS
+// the legacy plaintext put. The v2 arm therefore runs on a team-tier engine
+// (OperatorSigner) and the legacy arm on a SEPARATE individual-tier engine (no
+// signer). Every original assertion is preserved: v2 omits content_hash + no
+// compression assign + no plaintext-hash on the wire; legacy keeps content_hash +
+// gets a compression assign. The two tiers use separate harness stores so their
+// operator wires stay isolated (the team engine would otherwise drop the plaintext
+// put, and a shared log could grandfather it — both avoided by isolation).
 func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 	t.Parallel()
+
+	// ── v2 confidential arm: TEAM-tier engine (OperatorSigner ⇒ encryptedRequired
+	//    after ADV-7). A high-entropy plaintext disjoint from its public
+	//    description, so a hash match is a REAL leak, never a metadata coincidence.
 	h := newTestHarness(t)
 	operator, seller, _ := useSecpIdentities(t, h)
-
-	// OperatorSigner set (no ScripStore) ⇒ encryptedRequired == false: BOTH a v2
-	// put (decrypt-then-fold) and a legacy plaintext put fold into the SAME
-	// engine, so the v2-specific fix and the unchanged legacy behavior are proven
-	// on one operator wire.
-	eng := h.newEngineWithOpts(func(o *exchange.EngineOptions) {
+	engTeam := h.newEngineWithOpts(func(o *exchange.EngineOptions) {
 		o.OperatorPublicKey = operator.PubKeyHex()
 		o.OperatorSigner = operator
 	})
 
-	// ── v2 confidential entry: a high-entropy plaintext disjoint from its public
-	//    description, so a hash match is a REAL leak, never a metadata coincidence.
 	const v2Desc = "kubernetes operator reconcile loop backoff jitter tuning recipe"
 	v2Plain := []byte("SECRET-3C3-V2-" + strings.Repeat("reconcile-backoff-jitter-", 8) + "END")
 	sum := sha256.Sum256(v2Plain)
@@ -130,35 +141,21 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 	v2Put := h.sendMessage(h.seller, v2PutPayload,
 		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
 
-	// ── legacy plaintext (individual-tier) entry: distinct domain + plaintext.
-	const legacyDesc = "rust serde zero-copy deserialization borrow lifetime guide"
-	legacyPut := h.sendMessage(h.seller,
-		putPayload(legacyDesc, "sha256:"+fmt.Sprintf("%064x", 7), "code", 8000, 4096),
-		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
-
 	all, _ := h.st.ListMessages(h.cfID, 0)
-	eng.State().Replay(exchange.FromStoreRecords(all))
-
-	if err := eng.AutoAcceptPut(v2Put.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
+	engTeam.State().Replay(exchange.FromStoreRecords(all))
+	if err := engTeam.AutoAcceptPut(v2Put.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut v2: %v", err)
 	}
-	if err := eng.AutoAcceptPut(legacyPut.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
-		t.Fatalf("AutoAcceptPut legacy: %v", err)
-	}
 
-	var v2Entry, legacyEntry *exchange.InventoryEntry
-	for _, e := range eng.State().Inventory() {
-		switch e.PutMsgID {
-		case v2Put.ID:
+	var v2Entry *exchange.InventoryEntry
+	for _, e := range engTeam.State().Inventory() {
+		if e.PutMsgID == v2Put.ID {
 			ee := e
 			v2Entry = ee
-		case legacyPut.ID:
-			ee := e
-			legacyEntry = ee
 		}
 	}
-	if v2Entry == nil || legacyEntry == nil {
-		t.Fatalf("expected both entries in inventory (v2=%v legacy=%v)", v2Entry != nil, legacyEntry != nil)
+	if v2Entry == nil {
+		t.Fatal("expected the v2 entry in the team-tier inventory")
 	}
 	// Preconditions that make the assertions non-vacuous.
 	if v2Entry.WrappedCEKOperator == "" {
@@ -166,6 +163,39 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 	}
 	if v2Entry.ContentHash != v2HashPrefixed {
 		t.Fatalf("v2 entry.ContentHash = %q, want operator-local sha256(plaintext) %q (the oracle value we assert is off-wire)", v2Entry.ContentHash, v2HashPrefixed)
+	}
+
+	// ── legacy plaintext (individual-tier) arm: a SEPARATE individual-tier engine
+	//    (no OperatorSigner ⇒ encryptedRequired == false) folds a legacy plaintext
+	//    entry, proving the v2 content_hash omission + compression skip are
+	//    v2-SPECIFIC, not a blanket removal — individual-tier behavior is
+	//    byte-for-byte unchanged. Distinct domain + plaintext.
+	h2 := newTestHarness(t)
+	op2, _, _ := useSecpIdentities(t, h2)
+	engIndiv := h2.newEngineWithOpts(func(o *exchange.EngineOptions) {
+		o.OperatorPublicKey = op2.PubKeyHex()
+	})
+
+	const legacyDesc = "rust serde zero-copy deserialization borrow lifetime guide"
+	legacyPut := h2.sendMessage(h2.seller,
+		putPayload(legacyDesc, "sha256:"+fmt.Sprintf("%064x", 7), "code", 8000, 4096),
+		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
+
+	all2, _ := h2.st.ListMessages(h2.cfID, 0)
+	engIndiv.State().Replay(exchange.FromStoreRecords(all2))
+	if err := engIndiv.AutoAcceptPut(legacyPut.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
+		t.Fatalf("AutoAcceptPut legacy: %v", err)
+	}
+
+	var legacyEntry *exchange.InventoryEntry
+	for _, e := range engIndiv.State().Inventory() {
+		if e.PutMsgID == legacyPut.ID {
+			ee := e
+			legacyEntry = ee
+		}
+	}
+	if legacyEntry == nil {
+		t.Fatal("expected the legacy entry in the individual-tier inventory")
 	}
 	if legacyEntry.WrappedCEKOperator != "" {
 		t.Fatal("legacy entry unexpectedly has WrappedCEKOperator — it is not an individual-tier plaintext entry")
@@ -175,18 +205,18 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 	}
 
 	// ── MATCH: v2 result OMITS content_hash; legacy result KEEPS it (unchanged). ──
-	v2Match := matchResultFor3c3(t, h, eng,
+	v2Match := matchResultFor3c3(t, h, engTeam,
 		"kubernetes operator reconcile backoff jitter tuning recipe", v2Entry.EntryID)
 	if v2Match.ContentHash != "" {
 		t.Fatalf("LEAK: v2 exchange:match result carried content_hash=%q — sha256(plaintext) must be OMITTED for a v2 entry (§4.4 A1/P1)", v2Match.ContentHash)
 	}
-	legacyMatch := matchResultFor3c3(t, h, eng,
+	legacyMatch := matchResultFor3c3(t, h2, engIndiv,
 		"rust serde zero-copy deserialization borrow lifetime guide", legacyEntry.EntryID)
 	if legacyMatch.ContentHash != legacyEntry.ContentHash {
 		t.Fatalf("REGRESSION: legacy match content_hash = %q, want the entry's %q (individual-tier behavior must be byte-for-byte unchanged)", legacyMatch.ContentHash, legacyEntry.ContentHash)
 	}
 
-	// ── THE CANARY: the v2 plaintext hash appears in NONE of the operator's
+	// ── THE CANARY: the v2 plaintext hash appears in NONE of the team operator's
 	//    public emissions (put-accept, match, any compression assign). ──
 	opMsgs := operatorMessages3c3(t, h)
 	if len(opMsgs) == 0 {
@@ -203,10 +233,9 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 	}
 
 	// ── COMPRESSION GATE: no exchange:assign references the v2 entry (a compressor
-	//    cannot compress ciphertext and the assign would leak the plaintext hash),
-	//    while the legacy entry DID get a compression assign — proving the gate is
-	//    v2-specific, not a blanket disable. ──
-	var sawLegacyAssign bool
+	//    cannot compress ciphertext and the assign would leak the plaintext hash) on
+	//    the team wire, while the legacy entry DID get a compression assign on the
+	//    individual wire — proving the gate is v2-specific, not a blanket disable. ──
 	for _, m := range opMsgs {
 		if !hasTag(m.Tags, exchange.TagAssign) {
 			continue
@@ -220,6 +249,19 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 		}
 		if ap.EntryID == v2Entry.EntryID {
 			t.Fatalf("LEAK/NONSENSE: a compression assign (task_type=%q) was posted for the v2 entry — it embeds sha256(plaintext) and orders impossible ciphertext compression", ap.TaskType)
+		}
+	}
+	var sawLegacyAssign bool
+	for _, m := range operatorMessages3c3(t, h2) {
+		if !hasTag(m.Tags, exchange.TagAssign) {
+			continue
+		}
+		var ap struct {
+			EntryID  string `json:"entry_id"`
+			TaskType string `json:"task_type"`
+		}
+		if json.Unmarshal(m.Payload, &ap) != nil {
+			continue
 		}
 		if ap.EntryID == legacyEntry.EntryID && ap.TaskType == "compress" {
 			sawLegacyAssign = true

@@ -600,14 +600,22 @@ func NewEngine(opts EngineOptions) *Engine {
 	}
 	// Thread the operator signer into State BEFORE any Replay so applyPut can
 	// decrypt-then-gate v2 puts during both live-fold and startup replay
-	// (dontguess-4bed, §3.1(2)/§3.6). Arm the §6 fail-closed ciphertext-only
-	// enforcement only when this is a team tier (ScripStore set) that also HAS an
-	// operator key to unwrap with — an encrypted-required exchange with no signer
-	// could not decrypt anything, so requiring both keeps unit tests that set a
-	// ScripStore but no signer on the legacy plaintext path (no fixture churn)
-	// while production serve (which sets both together) is fail-closed.
+	// (dontguess-4bed, §3.1(2)/§3.6).
+	//
+	// ADV-7 / design §6 + §9 Gate A/P4 — DECOUPLE confidentiality from payment.
+	// encryptedRequired is armed on relay-attachment ALONE (OperatorSigner != nil),
+	// independent of ScripStore. The pre-decouple gate ANDed the two
+	// (ScripStore != nil && OperatorSigner != nil), which meant any future
+	// relay-attached-but-SCRIPLESS rung — an operator with a signer but no scrip
+	// ledger — would silently broadcast PLAINTEXT puts to the relay. Gating on the
+	// signer alone fail-closes that latent leak: the instant an operator can sign
+	// for a relay it MUST require ciphertext, whether or not it charges scrip. In
+	// production the individual tier keeps operatorSigner a TRUE nil interface (no
+	// relay, plaintext-local — §541 §6), so encryptedRequired stays off exactly as
+	// before; the team tier sets a signer and is fail-closed. A relay-attached rung
+	// that has no ScripStore (scripless) now correctly requires encryption too.
 	st.operatorSigner = opts.OperatorSigner
-	st.encryptedRequired = opts.ScripStore != nil && opts.OperatorSigner != nil
+	st.encryptedRequired = opts.OperatorSigner != nil
 	e := &Engine{
 		opts:               opts,
 		state:              st,

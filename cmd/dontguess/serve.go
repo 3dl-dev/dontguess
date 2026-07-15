@@ -448,8 +448,24 @@ func runServeLocal(dgHome string) error {
 	var legs []relayLeg
 	var relayWG sync.WaitGroup
 	if len(relayURLs) > 0 {
+		// CLIMB EGRESS FENCE (ADV-18, design §6 + §9 Gate A/P4). Establish the
+		// solo→fleet climb watermark BEFORE the async legs attach: on the first
+		// relay-attached serve it is the count of operator-authored records already
+		// persisted (the pre-climb PLAINTEXT corpus the individual tier stored in
+		// cleartext, §541 §6); on every later start it is the durable value written
+		// then. Each leg's Outbox seeds its fresh cursor to this watermark so those
+		// pre-climb records stay LOCAL-ONLY and are never republished to a relay in
+		// cleartext. Fail LOUD on a corrupt watermark rather than silently
+		// defaulting to 0 (which would un-fence and mass-broadcast the corpus).
+		climbWatermark, cwerr := establishClimbWatermark(climbWatermarkPath(dgHome), localStore)
+		if cwerr != nil {
+			return fmt.Errorf("climb egress fence: %w", cwerr)
+		}
+		if climbWatermark > 0 {
+			logger.Printf("  climb-fence: %d pre-climb local record(s) fenced local-only (never republished in cleartext, ADV-18)", climbWatermark)
+		}
 		attachRelayLegsAsync(ctx, &relayWG, &legsMu, &legs, relayURLs, localStore, relaySigner,
-			localStorePath, appendNotify, eng, logger)
+			localStorePath, appendNotify, eng, logger, climbWatermark)
 		// Combined shutdown in the dontguess-e35 order: cancel the context FIRST
 		// (unblocks every reader/outbox and every in-flight dial/attach retry),
 		// THEN wait for the attach goroutines to exit, THEN close each attached

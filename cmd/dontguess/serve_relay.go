@@ -32,8 +32,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +77,21 @@ type relayWiringOption func(*relayWiringConfig)
 
 type relayWiringConfig struct {
 	intakeCursorPath string
+	climbWatermark   int64
+}
+
+// WithClimbWatermark threads the solo→fleet CLIMB egress fence (ADV-18, design
+// §6 + §9 Gate A/P4) into the leg's Outbox. watermark is the count of
+// operator-authored (Origin=local) records already in the local log at the FIRST
+// relay attach — the pre-climb PLAINTEXT corpus the individual tier stored in
+// cleartext (§541 §6). buildRelayWiring hands it to relay.WithClimbFence, which
+// seeds the durable publish cursor to it ONLY when this leg's cursor sidecar is
+// absent (the first-ever attach = the climb), so pre-climb plaintext puts stay
+// LOCAL-ONLY and are never republished to the relay. 0 (the default / every
+// existing test call site) disables the fence — a fresh cursor publishes the
+// whole log, exactly as before.
+func WithClimbWatermark(watermark int64) relayWiringOption {
+	return func(c *relayWiringConfig) { c.climbWatermark = watermark }
 }
 
 // WithIntakeCursorPath wires the durable per-relay Intake cursor sidecar
@@ -205,7 +225,11 @@ func buildRelayWiring(
 	// settle antecedent (which carries the wire id) resolves to the store id.
 	outbox, err := relay.NewOutbox(ls, signer, pub, cursorPath,
 		relay.WithEmittedSeeder(func(id string) { seq.MarkEmitted(id) }),
-		relay.WithAliasRegistrar(aliasRegistrar))
+		relay.WithAliasRegistrar(aliasRegistrar),
+		// CLIMB EGRESS FENCE (ADV-18, §6 + §9 Gate A/P4): fence the pre-climb
+		// plaintext corpus local-only. No-op (0) unless WithClimbWatermark was
+		// threaded (serve.go's relay-attach path) AND this leg's cursor is fresh.
+		relay.WithClimbFence(cfg.climbWatermark))
 	if err != nil {
 		return nil, 0, fmt.Errorf("relay wiring: outbox: %w", err)
 	}
@@ -217,6 +241,101 @@ func buildRelayWiring(
 // (Origin "" legacy/default, or "local"). Operator records reach the wire ONLY
 // via the Outbox, which re-signs them with a content-hash id.
 func isOperatorOrigin(origin string) bool { return origin == "" || origin == "local" }
+
+// climbWatermarkPath is the sidecar under dgHome recording the solo→fleet CLIMB
+// egress watermark (ADV-18, design §6 + §9 Gate A/P4): the count of
+// operator-authored (Origin=local) records already in the local log at the FIRST
+// relay attach. Every relay leg's Outbox fences egress below this count so the
+// pre-climb PLAINTEXT corpus (the individual tier stored content in cleartext,
+// §541 §6) is NEVER republished to a relay on the climb.
+func climbWatermarkPath(dgHome string) string {
+	return filepath.Join(dgHome, "climb-egress.watermark")
+}
+
+// establishClimbWatermark returns the durable climb watermark, creating it on the
+// FIRST relay-attached serve as the current count of operator-authored records in
+// ls. It is IDEMPOTENT: once written it is never recomputed, so (a) restarts reuse
+// the original climb point instead of drifting upward as post-climb inventory
+// grows, and (b) a relay added to an already-fleet operator later fences the SAME
+// pre-climb corpus and correctly backfills the post-climb (encrypted) inventory
+// created above the watermark. A born-fleet operator's first start has an empty
+// log ⇒ watermark 0 ⇒ nothing fenced. The write uses temp→fsync→rename so the
+// fence survives a crash immediately after the climb.
+func establishClimbWatermark(path string, ls *dgstore.Store) (int64, error) {
+	b, rerr := os.ReadFile(path)
+	if rerr == nil {
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return 0, nil
+		}
+		n, perr := strconv.ParseInt(s, 10, 64)
+		if perr != nil {
+			return 0, fmt.Errorf("climb watermark %s: parse %q: %w", path, s, perr)
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("climb watermark %s: negative value %d", path, n)
+		}
+		return n, nil
+	}
+	if !errors.Is(rerr, os.ErrNotExist) {
+		return 0, fmt.Errorf("climb watermark %s: read: %w", path, rerr)
+	}
+
+	// First relay attach for this home = the climb. The current operator-authored
+	// record count is the watermark: everything already persisted is pre-climb.
+	recs, err := ls.ReadAll()
+	if err != nil {
+		return 0, fmt.Errorf("climb watermark: read store: %w", err)
+	}
+	var w int64
+	for i := range recs {
+		if isOperatorOrigin(recs[i].Origin) {
+			w++
+		}
+	}
+	if err := writeClimbWatermarkFile(path, w); err != nil {
+		return 0, err
+	}
+	return w, nil
+}
+
+// writeClimbWatermarkFile durably persists the watermark (temp→fsync→rename +
+// best-effort dir fsync), matching the Outbox cursor's crash discipline so a
+// crash right after the climb cannot lose the fence and re-broadcast the corpus.
+func writeClimbWatermarkFile(path string, w int64) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".climb-egress-*.tmp")
+	if err != nil {
+		return fmt.Errorf("climb watermark: create temp in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.WriteString(strconv.FormatInt(w, 10) + "\n"); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("climb watermark: write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("climb watermark: fsync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("climb watermark: close temp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("climb watermark: rename into place: %w", err)
+	}
+	committed = true
+	if d, derr := os.Open(dir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
 
 // seedEmittedFromStore re-seeds seq's emitted-set from the persisted local log
 // so that, after a restart, a re-broadcast OLD operator event — or the
@@ -899,6 +1018,7 @@ func attachRelayLegsAsync(
 	appendNotify *appendNotifier,
 	eng *exchange.Engine,
 	logger *log.Logger,
+	climbWatermark int64,
 ) {
 	for _, relayURL := range relayURLs {
 		relayURL := relayURL
@@ -920,7 +1040,8 @@ func attachRelayLegsAsync(
 				stop, aerr := attachRelayTransport(ctx, localStore, relaySigner, relaySigner.PubKeyHex(),
 					relayCursorPath(localStorePath, relayURL), conn, conn, 5*time.Second, logger.Printf, appendNotify,
 					eng.State().RegisterWireAlias,
-					WithIntakeCursorPath(intakeCursorPath(localStorePath, relayURL)))
+					WithIntakeCursorPath(intakeCursorPath(localStorePath, relayURL)),
+					WithClimbWatermark(climbWatermark))
 				if aerr != nil {
 					_ = conn.Close()
 					if ctx.Err() != nil {
