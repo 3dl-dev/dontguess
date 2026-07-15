@@ -32,7 +32,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -42,6 +44,37 @@ import (
 	"github.com/3dl-dev/dontguess/pkg/identity"
 	"github.com/spf13/cobra"
 )
+
+// errOpItemNotFound is the sentinel a ReadField implementation wraps its
+// returned error with WHEN AND ONLY WHEN it can positively confirm the
+// 1Password item itself does not exist (not a field-rename, not a transient
+// network/auth failure). Export's "does a conflicting item already exist"
+// probe (dontguess-3aa) treats this sentinel as the single condition under
+// which it is safe to proceed to CreateItem; every other ReadField error
+// (auth failure, missing/renamed field, network blip) must block the export
+// rather than risk minting a duplicate 1Password item under the same title.
+var errOpItemNotFound = errors.New("1Password item not found")
+
+// opReadNotFoundMarkers are substrings the real `op` CLI's stderr contains
+// when `op read` fails because the ITEM does not exist (as opposed to a field
+// on an existing item not existing, or an auth/network error). `op` does not
+// expose a structured not-found error, so this is a best-effort text match —
+// deliberately narrow: on any doubt, execOpRunner.ReadField returns the
+// unwrapped error, which export treats as blocking (fail closed).
+var opReadNotFoundMarkers = []string{
+	"isn't an item",
+	"no item found",
+}
+
+func isOpNotFoundStderr(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	for _, m := range opReadNotFoundMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
 
 // --- 1Password backend abstraction ---
 //
@@ -93,7 +126,11 @@ func (execOpRunner) ReadField(vault, title, field string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("op read %s: %w: %s", ref, err, strings.TrimSpace(stderr.String()))
+		errText := strings.TrimSpace(stderr.String())
+		if isOpNotFoundStderr(errText) {
+			return "", fmt.Errorf("op read %s: %w: %s: %s", ref, errOpItemNotFound, err, errText)
+		}
+		return "", fmt.Errorf("op read %s: %w: %s", ref, err, errText)
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
@@ -172,13 +209,18 @@ func importOperatorKey(dgHome, importedPrivHex string) (*identity.Secp256k1Ident
 		}
 		// No existing key file — fall through to persist the imported key.
 	} else if existingHex := strings.TrimSpace(string(existingRaw)); existingHex != "" {
-		if existingHex == importedPrivHex {
-			// Identical key already present — idempotent success, no write needed.
-			return imported, nil
-		}
 		existingID, verr := identity.FromPrivHex(existingHex)
 		if verr != nil {
 			return nil, fmt.Errorf("refusing import: %s already holds operator key material that is not a valid identity (%v); resolve manually before importing", path, verr)
+		}
+		// Compare DECODED scalars (via PrivHex's canonical lowercase
+		// re-encoding), not raw hex strings: a hand-entered 1Password item
+		// may carry mixed/upper-case hex for the SAME key, which a raw
+		// string compare would wrongly treat as a distinct identity
+		// (dontguess-3aa (3)).
+		if existingID.PrivHex() == imported.PrivHex() {
+			// Identical key already present — idempotent success, no write needed.
+			return imported, nil
 		}
 		return nil, fmt.Errorf(
 			"refusing import: this host already has a DISTINCT operator identity at %s (existing npub %s, importing npub %s) — importing would fork the operator (ADV-4); back up/move the existing key first if you really intend to replace it",
@@ -199,7 +241,41 @@ func importOperatorKey(dgHome, importedPrivHex string) (*identity.Secp256k1Ident
 	if err != nil {
 		return nil, fmt.Errorf("reading back persisted operator key at %s: %w", path, err)
 	}
-	return identity.FromPrivHex(strings.TrimSpace(string(persisted)))
+	persistedID, err := identity.FromPrivHex(strings.TrimSpace(string(persisted)))
+	if err != nil {
+		return nil, fmt.Errorf("operator key persisted at %s is not a valid identity after import: %w", path, err)
+	}
+	// TOCTOU guard (dontguess-3aa (1)): LoadOrCreateRawKey's create-or-load
+	// primitive is racer-safe for FILE INTEGRITY (never a torn/empty file),
+	// but a concurrent `serve`/`init` auto-mint can still win the underlying
+	// os.Link race between our existence check and our persist, publishing
+	// a DIFFERENT key than importedPrivHex. Silently reporting the winner's
+	// npub as "imported successfully" would be a silent identity fork
+	// (exactly the ADV-4 failure this command exists to prevent) — verify
+	// the on-disk key is actually ours before declaring success.
+	if persistedID.PrivHex() != imported.PrivHex() {
+		return nil, fmt.Errorf(
+			"import lost a race: a concurrent process minted a DIFFERENT operator key at %s (on-disk npub %s) before our import could persist the intended key (importing npub %s) — this host's operator identity is now %s, NOT the imported one; resolve manually (stop the concurrent process, back up/remove %s, and retry import)",
+			path, persistedID.Npub(), imported.Npub(), persistedID.Npub(), path,
+		)
+	}
+	return persistedID, nil
+}
+
+// hexEqualFold reports whether two hex strings encode the same bytes,
+// tolerating whitespace and case differences (dontguess-3aa (3)): a
+// hand-entered 1Password field may use upper-case or mixed-case hex for the
+// SAME public key, which a raw string compare would wrongly treat as a
+// distinct identity. Falls back to a case-insensitive string compare if
+// either side fails to decode as hex, so a malformed value still gets a
+// deterministic (and conservative — "different") answer rather than a panic.
+func hexEqualFold(a, b string) bool {
+	aRaw, aErr := hex.DecodeString(strings.TrimSpace(a))
+	bRaw, bErr := hex.DecodeString(strings.TrimSpace(b))
+	if aErr == nil && bErr == nil {
+		return bytes.Equal(aRaw, bRaw)
+	}
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // --- CLI commands ---
@@ -221,8 +297,10 @@ var operatorExportCmd = &cobra.Command{
 			return fmt.Errorf("loading operator identity: %w", err)
 		}
 
-		if existingPub, rerr := opRunnerImpl.ReadField(operatorExportVault, operatorExportTitle, operatorPubKeyField); rerr == nil {
-			if existingPub != id.PubKeyHex() {
+		existingPub, rerr := opRunnerImpl.ReadField(operatorExportVault, operatorExportTitle, operatorPubKeyField)
+		switch {
+		case rerr == nil:
+			if !hexEqualFold(existingPub, id.PubKeyHex()) {
 				return fmt.Errorf(
 					"refusing export: 1Password item %q in vault %q already holds a DIFFERENT operator identity (pubkey %s…) than this host's operator (pubkey %s…) — use a different --title or resolve the conflict before exporting",
 					operatorExportTitle, operatorExportVault, short(existingPub), short(id.PubKeyHex()),
@@ -230,6 +308,19 @@ var operatorExportCmd = &cobra.Command{
 			}
 			fmt.Printf("operator identity already exported to op://%s/%s (npub %s) — no changes made\n", operatorExportVault, operatorExportTitle, id.Npub())
 			return nil
+		case errors.Is(rerr, errOpItemNotFound):
+			// Positively confirmed: no conflicting item exists. Safe to create.
+		default:
+			// Any other ReadField failure (transient/auth error, or the item
+			// exists but the pubkey field is missing/renamed) is ambiguous —
+			// we cannot rule out a conflicting item existing under this
+			// title. Refuse rather than risk CreateItem minting a SECOND
+			// item under the same vault/title (op never overwrites, it only
+			// ever appends a duplicate).
+			return fmt.Errorf(
+				"refusing export: could not verify whether 1Password item %q in vault %q already holds a conflicting operator identity (op read failed rather than confirming the item does not exist) — resolve the underlying op error and retry: %w",
+				operatorExportTitle, operatorExportVault, rerr,
+			)
 		}
 
 		tmpl := buildOperatorItemTemplate(operatorExportTitle, id.PrivHex(), id.PubKeyHex(), id.Npub())

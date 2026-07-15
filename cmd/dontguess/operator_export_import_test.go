@@ -30,9 +30,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/3dl-dev/dontguess/pkg/identity"
@@ -67,13 +70,39 @@ func (f *fakeOpRunner) CreateItem(vault string, template []byte) error {
 func (f *fakeOpRunner) ReadField(vault, title, field string) (string, error) {
 	fields, ok := f.items[f.key(vault, title)]
 	if !ok {
-		return "", fmt.Errorf("fake op: item %q not found in vault %q", title, vault)
+		// Genuinely no item at this vault/title — mirrors execOpRunner
+		// wrapping errOpItemNotFound only when `op` positively confirms the
+		// item itself does not exist.
+		return "", fmt.Errorf("fake op: item %q not found in vault %q: %w", title, vault, errOpItemNotFound)
 	}
 	v, ok := fields[field]
 	if !ok {
+		// The item EXISTS but the field is missing/renamed — this must NOT
+		// be treated as "item not found" (dontguess-3aa (2)): a caller that
+		// conflates the two would fall through and mint a duplicate item.
 		return "", fmt.Errorf("fake op: field %q not found on item %q", field, title)
 	}
 	return v, nil
+}
+
+// fakeOpRunnerErrReadField is a variant that simulates a transient/auth
+// ReadField failure that is NOT item-not-found (e.g. a network blip or a
+// permissions error) — used to prove export refuses rather than falls
+// through to CreateItem on an ambiguous ReadField error.
+type erroringOpRunner struct {
+	create func(vault string, template []byte) error
+	err    error
+}
+
+func (e *erroringOpRunner) CreateItem(vault string, template []byte) error {
+	if e.create != nil {
+		return e.create(vault, template)
+	}
+	return nil
+}
+
+func (e *erroringOpRunner) ReadField(vault, title, field string) (string, error) {
+	return "", e.err
 }
 
 // withFakeOpRunner swaps opRunnerImpl for a fresh fake for the duration of fn
@@ -205,6 +234,163 @@ func TestOperatorImport_IdempotentSameKey(t *testing.T) {
 		// Second import of the SAME key must succeed (idempotent), not refuse.
 		if err := operatorImportCmd.RunE(operatorImportCmd, nil); err != nil {
 			t.Fatalf("second (idempotent) import on host B: %v", err)
+		}
+	})
+}
+
+// TestOperatorImport_ConcurrentMintRaceDetected is the (a) ground-source
+// clause for dontguess-3aa: a real concurrent racer that wins the
+// LoadOrCreateRawKey os.Link publish race with a DIFFERENT key than the one
+// being imported must cause import to error loudly (not silently report the
+// racer's npub as import success — the TOCTOU this item exists to close).
+//
+// N goroutines race importOperatorKey concurrently against the SAME fresh
+// path, each with its OWN distinct generated key. Exactly one can win the
+// underlying os.Link publish; every other goroutine's persisted-vs-imported
+// verification MUST catch the mismatch and error — this exercises the REAL
+// identity.LoadOrCreateRawKey atomic-publish primitive under the REAL race,
+// not a simulated/mocked one.
+func TestOperatorImport_ConcurrentMintRaceDetected(t *testing.T) {
+	dgHome := t.TempDir()
+	const n = 8
+
+	keys := make([]string, n)
+	for i := range keys {
+		id, err := identity.Generate()
+		if err != nil {
+			t.Fatalf("generating racer key %d: %v", i, err)
+		}
+		keys[i] = id.PrivHex()
+	}
+
+	var start sync.WaitGroup
+	start.Add(1)
+	var wg sync.WaitGroup
+	results := make([]error, n)
+	winners := make([]*identity.Secp256k1Identity, n)
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			start.Wait() // line every goroutine up at the same starting gate
+			id, err := importOperatorKey(dgHome, keys[i])
+			results[i] = err
+			winners[i] = id
+		}(i)
+	}
+	start.Done() // release all goroutines simultaneously
+	wg.Wait()
+
+	// Whichever key actually ended up on disk is the one true winner.
+	onDiskRaw, err := os.ReadFile(filepath.Join(dgHome, "nostr-operator.key"))
+	if err != nil {
+		t.Fatalf("reading persisted key after race: %v", err)
+	}
+	onDiskHex := trimKey(string(onDiskRaw))
+
+	successes := 0
+	for i := 0; i < n; i++ {
+		if results[i] == nil {
+			successes++
+			// A goroutine that reports success MUST have imported the key
+			// that is actually on disk — never a racer's discarded key.
+			if winners[i].PrivHex() != onDiskHex {
+				t.Fatalf("goroutine %d reported success with npub %s but on-disk key is %s — silent identity fork (the TOCTOU this item fixes)", i, winners[i].Npub(), onDiskHex)
+			}
+			if keys[i] != onDiskHex {
+				t.Fatalf("goroutine %d reported success for key %s but on-disk key is %s — should have errored on mismatch instead", i, keys[i], onDiskHex)
+			}
+		} else if keys[i] == onDiskHex {
+			t.Fatalf("goroutine %d IS the on-disk winner but returned an error: %v", i, results[i])
+		}
+	}
+	if successes == 0 {
+		t.Fatalf("no goroutine reported success even though a key is on disk (%s) — the winner's own import must succeed", onDiskHex)
+	}
+}
+
+// TestOperatorExport_RefusesOnAmbiguousReadFieldError is the (b)
+// ground-source clause for dontguess-3aa: a ReadField failure that is NOT a
+// positive "item does not exist" confirmation (auth error, network blip,
+// missing/renamed field) must refuse export, never fall through to
+// CreateItem — falling through would mint a SECOND item under the same
+// vault/title (op item create never overwrites, allows duplicate titles).
+func TestOperatorExport_RefusesOnAmbiguousReadFieldError(t *testing.T) {
+	setExportImportFlags(t, "test-vault", "dontguess-operator")
+
+	created := false
+	runner := &erroringOpRunner{
+		err: errors.New("op: 401 unauthorized (session expired)"),
+		create: func(vault string, template []byte) error {
+			created = true
+			return nil
+		},
+	}
+	prev := opRunnerImpl
+	opRunnerImpl = runner
+	t.Cleanup(func() { opRunnerImpl = prev })
+
+	hostA := t.TempDir()
+	t.Setenv("DG_HOME", hostA)
+
+	err := operatorExportCmd.RunE(operatorExportCmd, nil)
+	if err == nil {
+		t.Fatalf("expected export to refuse on an ambiguous (non-not-found) ReadField error, got nil error")
+	}
+	if created {
+		t.Fatalf("export called CreateItem despite an ambiguous ReadField error — this mints a duplicate 1Password item under the same vault/title")
+	}
+}
+
+// TestOperatorImport_IdempotentMixedCaseHex is the (c) ground-source clause
+// for dontguess-3aa: a hand-entered 1Password item may carry mixed/upper-case
+// hex for the SAME private key as what's already on disk. Import must treat
+// that as the identical identity (idempotent success), not a false refusal
+// as a distinct identity.
+func TestOperatorImport_IdempotentMixedCaseHex(t *testing.T) {
+	withFakeOpRunner(t, func(_ *fakeOpRunner) {
+		setExportImportFlags(t, "test-vault", "dontguess-operator")
+
+		hostA := t.TempDir()
+		t.Setenv("DG_HOME", hostA)
+		if err := operatorExportCmd.RunE(operatorExportCmd, nil); err != nil {
+			t.Fatalf("export on host A: %v", err)
+		}
+
+		hostB := t.TempDir()
+		t.Setenv("DG_HOME", hostB)
+		if err := operatorImportCmd.RunE(operatorImportCmd, nil); err != nil {
+			t.Fatalf("first import on host B: %v", err)
+		}
+
+		// Mutate host B's on-disk key to mixed/upper-case hex — same bytes,
+		// different textual representation, as if a human had hand-typed it
+		// into 1Password with inconsistent casing.
+		bKeyPath := filepath.Join(hostB, "nostr-operator.key")
+		onDisk, err := os.ReadFile(bKeyPath)
+		if err != nil {
+			t.Fatalf("reading host B key: %v", err)
+		}
+		mixedCase := strings.ToUpper(trimKey(string(onDisk)))
+		if err := os.WriteFile(bKeyPath, []byte(mixedCase+"\n"), 0o600); err != nil {
+			t.Fatalf("seeding mixed-case host B key: %v", err)
+		}
+
+		// Re-importing the SAME key (still lower-case, from the vault) must
+		// succeed as an idempotent no-op, not refuse as a distinct identity.
+		if err := operatorImportCmd.RunE(operatorImportCmd, nil); err != nil {
+			t.Fatalf("re-import against a mixed-case on-disk identical key was wrongly refused: %v", err)
+		}
+
+		// And the file must be UNCHANGED (still the mixed-case string) — a
+		// no-op idempotent success, not a rewrite.
+		after, err := os.ReadFile(bKeyPath)
+		if err != nil {
+			t.Fatalf("reading host B key after idempotent re-import: %v", err)
+		}
+		if trimKey(string(after)) != mixedCase {
+			t.Fatalf("idempotent re-import rewrote the key file: got %s, want unchanged %s", trimKey(string(after)), mixedCase)
 		}
 	})
 }
