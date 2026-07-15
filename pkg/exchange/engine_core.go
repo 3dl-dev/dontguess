@@ -682,24 +682,45 @@ func (e *Engine) LocalStore() *dgstore.Store {
 // opposite of an operator record, which the emitter applies to State and which is
 // NEVER dispatched.
 //
-// ABSOLUTE, IDENTITY-KEYED INGEST (dontguess-e2a3, ratified Design A). Earlier
-// this method advanced localSeen/localDispatched with a RELATIVE `++`, correct
-// ONLY when localSeen == len(store) at append time. Once appendLocalRecord stopped
-// maintaining that invariant (it no longer advances cursors), a `++` here could
-// mis-attribute: an operator record emitted since the last poll sits un-folded
-// below the tail, so `++` would land on ITS slot and leave THIS external record
-// beyond the cursor — re-dispatched by the next poll (a DUPLICATED match/put).
-// The fix routes the append through the SAME foldAndDispatchLocalSnapshot the poll
-// loop uses: the fold cursor and dispatch cursor advance absolutely (to the
+// ABSOLUTE, IDENTITY-KEYED INGEST, FOLD-UNDER-localMu (dontguess-e2a3, ratified
+// Design A + individual-tier regression fix). Earlier this method advanced
+// localSeen/localDispatched with a RELATIVE `++`, correct ONLY when localSeen ==
+// len(store) at append time. Once appendLocalRecord stopped maintaining that
+// invariant (it no longer advances cursors — the team/relay tier violates it via
+// out-of-localMu BatchAppend), a `++` here would mis-attribute: an operator record
+// emitted since the last poll sits un-folded below the tail, so `++` would land on
+// ITS slot and leave THIS external record beyond the cursor — re-dispatched by the
+// next poll (a DUPLICATED match/put). So the cursors advance ABSOLUTELY (to the
 // snapshot length), every record is folded in physical order, and dispatch skips
-// operator-self-applied records by Sender (dispatchLocalGap). A concurrent poll or
-// a second IngestLocalRecord serializes on localMu and claims a monotonic,
-// non-overlapping gap, so each record is dispatched EXACTLY once.
+// operator-self-applied records by Sender (dispatchLocalGap).
+//
+// FOLD-BEFORE-DISPATCH SERIALIZATION (the individual-tier fix). The append, the
+// fold (state.Apply of the whole undispatched fold-gap), and the dispatch-cursor
+// claim are ALL performed under a SINGLE localMu hold; only the dispatch runs
+// OUTSIDE the lock. Holding localMu across the fold is load-bearing on the LIVE
+// operator path: a concurrent IngestLocalRecord (an op-put) fully folds its record
+// into inventory/State and RELEASES localMu before this call (an op-buy) can
+// acquire localMu, claim its gap, and dispatch — so a buy can NEVER dispatch
+// against inventory that has not yet absorbed a concurrent put ("match resolved to
+// no entry"). An earlier e2a3 pass delegated to the poll loop's
+// foldAndDispatchLocalSnapshot, which folds OUTSIDE localMu (correct for the SINGLE
+// self-serialized poll goroutine, but it let two concurrent socket ops race their
+// state.Apply against each other's dispatch). Inlining the fold under localMu
+// restores the pre-e2a3 guarantee WITHOUT reintroducing the relative-`++`.
+//
+// This does NOT regress a5e's off-lock Blossom prefetch: that lives on the
+// TEAM/relay poll path (foldAndDispatchLocalSnapshot), which is untouched.
+// IngestLocalRecord is individual-tier only, and the gap folded here carries at
+// most the one external put's (local) blob plus operator records that reference no
+// blob. Lock ordering is safe: state.Apply takes State.mu while this holds localMu,
+// and no path holds State.mu while acquiring localMu, so localMu -> State.mu never
+// cycles. Dispatch runs outside localMu because dispatch handlers append operator
+// records via appendLocalRecord, which re-takes localMu.
 //
 // Individual tier only (ScripStore==nil / TrustChecker==nil): no scrip, no mint.
-// A store-Append failure is returned; a per-record dispatch failure is logged (as
-// on the poll path) — the gap may span more than this one record, so no single
-// dispatch error is attributable to the caller.
+// A store-Append/Replay failure is returned; a per-record dispatch failure is
+// logged (as on the poll path) — the gap may span more than this one record, so no
+// single dispatch error is attributable to the caller.
 func (e *Engine) IngestLocalRecord(rec dgstore.Record) error {
 	if e.opts.LocalStore == nil {
 		return fmt.Errorf("engine: IngestLocalRecord: no local store configured")
@@ -707,27 +728,41 @@ func (e *Engine) IngestLocalRecord(rec dgstore.Record) error {
 	if rec.ID == "" {
 		return fmt.Errorf("engine: IngestLocalRecord: record ID must not be empty")
 	}
-	msg := rec.ToMessage()
 
 	e.localMu.Lock()
 	if err := e.opts.LocalStore.Append(rec); err != nil {
 		e.localMu.Unlock()
 		return fmt.Errorf("engine: IngestLocalRecord: append %s: %w", shortKey(rec.ID), err)
 	}
-	// Index THIS record now so fetchMessage/antecedent lookups see it immediately;
-	// foldAndDispatchLocalSnapshot re-indexes the gap idempotently below.
-	e.localMsgByID[msg.ID] = &msg
-	e.localMu.Unlock()
-
-	// Fold+dispatch the whole undispatched gap synchronously through the shared
-	// absolute path. This folds any un-folded operator records below the tail
-	// (idempotently) AND dispatches THIS external record (skipping operator-self
-	// records), monotonically and exactly-once against a concurrent poll.
+	// Snapshot under localMu so the tail is authoritative — no concurrent
+	// appendLocalRecord/ingest can interleave a record between this Append and the
+	// fold below, and the fold cursor claimed here is consistent with THIS length.
 	snap, err := e.opts.LocalStore.Replay()
 	if err != nil {
-		return fmt.Errorf("engine: IngestLocalRecord: replay %s: %w", shortKey(msg.ID), err)
+		e.localMu.Unlock()
+		return fmt.Errorf("engine: IngestLocalRecord: replay %s: %w", shortKey(rec.ID), err)
 	}
-	e.foldAndDispatchLocalSnapshot(snap)
+	total := len(snap)
+	// Fold the whole undispatched fold-gap into State under localMu, advancing the
+	// fold cursor absolutely. Guarded so a prior rebuild's already-folded prefix
+	// ([:localSeen]) is never double-folded and the cursor never regresses.
+	foldStart := e.localSeen
+	if total > e.localSeen {
+		e.indexLocalMessages(snap[e.localSeen:total])
+		e.localSeen = total
+	}
+	for i := foldStart; i < total; i++ {
+		e.state.Apply(&snap[i])
+	}
+	// Claim the dispatch gap monotonically, consistent with THIS snapshot length.
+	dispatchStart := e.claimDispatchGap(total)
+	e.localMu.Unlock()
+
+	// Dispatch the undispatched gap OUTSIDE localMu (dispatch handlers re-take
+	// localMu via appendLocalRecord). Operator-self-applied records are folded
+	// above but skipped here (dispatchLocalGap); the external buy/put runs its
+	// handler exactly once.
+	e.dispatchLocalGap(snap, dispatchStart, total)
 	return nil
 }
 
