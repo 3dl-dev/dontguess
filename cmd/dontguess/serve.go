@@ -430,7 +430,17 @@ func runServeLocal(dgHome string) error {
 	// serve start even with a dead/slow relay attached; attachRelayTransport's
 	// initial REQ Send (and, transitively, Conn.dialAndAuth) can block for
 	// seconds against an unreachable relay, so the socket cannot wait behind it.
-	socketCleanup := bindOperatorSocket(ctx, dgHome, eng, logger)
+	//
+	// dontguess-7b2: a bind failure here (including a post-relocation failure
+	// once the path has already been shortened under $XDG_RUNTIME_DIR) is a
+	// HARD startup error — never a WARN-and-continue. A silently unbound socket
+	// leaves the operator half-broken: the relay leg and engine loop run fine,
+	// but every local CLI command ("operator not reachable") looks dead. Fail
+	// loud instead so `up`/serve's caller sees the failure immediately.
+	socketCleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger)
+	if err != nil {
+		return fmt.Errorf("operator socket: %w", err)
+	}
 	if socketCleanup != nil {
 		defer socketCleanup()
 	}
@@ -556,6 +566,53 @@ func loadOrCreateNostrOperatorIdentity(dgHome string) (*identity.Secp256k1Identi
 	return identity.LoadOrCreatePrivHexKey(filepath.Join(dgHome, "nostr-operator.key"))
 }
 
+// maxUnixSocketPathLen is a conservative bound on the socket path length we
+// will attempt to bind directly under DG_HOME (dontguess-7b2). The kernel
+// sockaddr_un.sun_path limit is 108 bytes on Linux and 104 on macOS/BSD,
+// including the NUL terminator; staying comfortably under the smaller of the
+// two (with headroom for the "ipc/dontguess.sock" suffix already included in
+// the candidate path) avoids a bind failure that varies by platform.
+const maxUnixSocketPathLen = 100
+
+// resolveOperatorSocketPath returns the operator IPC socket path to bind for
+// dgHome (dontguess-7b2, design §4/§9 Gate A/P2). The default candidate is
+// $DG_HOME/ipc/dontguess.sock (unchanged from prior behavior); when that path
+// is too long for the platform's unix socket length limit — the original
+// root cause of the long-DG_HOME half-broken-operator bug — the socket is
+// relocated to a short, deterministic path under $XDG_RUNTIME_DIR (falling
+// back to os.TempDir() when XDG_RUNTIME_DIR is unset), hashed from dgHome so
+// repeated serve runs against the same DG_HOME converge on the same socket
+// path (mirrors the ssh-agent/docker sun_path-limit workaround).
+func resolveOperatorSocketPath(dgHome string) string {
+	defaultPath := filepath.Join(dgHome, "ipc", "dontguess.sock")
+	if len(defaultPath) <= maxUnixSocketPathLen {
+		return defaultPath
+	}
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runtimeDir == "" {
+		runtimeDir = os.TempDir()
+	}
+	hash := sha256.Sum256([]byte(dgHome))
+	return filepath.Join(runtimeDir, fmt.Sprintf("dontguess-%x.sock", hash[:8]))
+}
+
+// recordOperatorSocketPath persists the resolved socket path into the
+// exchange config so CLI clients (socketPath() et al.) can find a relocated
+// socket instead of assuming the default DG_HOME-relative path (dontguess-
+// 7b2). Merges into any existing config rather than overwriting it — the
+// team/federated-tier config (operator key, fleet allowlist, etc.) must
+// survive this write. A missing config (individual tier, pre-init) is not an
+// error: a fresh Config carrying only the socket path is written so a later
+// `dontguess init` still LoadConfig-preserves it via its own merge logic.
+func recordOperatorSocketPath(dgHome, sockPath string) error {
+	cfg, err := exchange.LoadConfig(dgHome)
+	if err != nil {
+		cfg = &exchange.Config{}
+	}
+	cfg.OperatorSocketPath = sockPath
+	return exchange.WriteConfig(exchange.ConfigPath(dgHome), cfg)
+}
+
 // bindOperatorSocket binds the operator IPC unix socket and starts serving
 // requests over it in the background (dontguess-347). Extracted out of
 // runEngineLoop so runServeLocal can call it BEFORE the relay-attach loop:
@@ -564,23 +621,33 @@ func loadOrCreateNostrOperatorIdentity(dgHome string) (*identity.Secp256k1Identi
 // (Conn.dialAndAuth) can block for seconds against an unreachable relay — the
 // socket cannot be left waiting behind it. The socket lives inside a 0700
 // subdirectory so the parent-level permissions bound the TOCTOU window at the
-// directory level (dontguess-33a, post-sec-regression fix). Returns a cleanup
-// func that closes the listener and removes the socket file; nil if the
-// socket could not be bound (non-fatal — matches the prior warning-only
-// behavior, an operator without IPC still runs the engine loop).
-func bindOperatorSocket(ctx context.Context, dgHome string, eng *exchange.Engine, logger *log.Logger) func() {
-	sockPath := filepath.Join(dgHome, "ipc", "dontguess.sock")
+// directory level (dontguess-33a, post-sec-regression fix).
+//
+// dontguess-7b2: the socket path is resolved via resolveOperatorSocketPath
+// (relocating under $XDG_RUNTIME_DIR when the DG_HOME-relative path is too
+// long for the platform's unix socket limit), and a bind failure — at either
+// the default path OR the relocated path — is returned as a HARD error, never
+// swallowed into a WARN. The resolved path is recorded into the exchange
+// config on success so CLI clients can find it. Returns a cleanup func that
+// closes the listener and removes the socket file, and a non-nil error if the
+// socket could not be bound or the resolved path could not be persisted.
+func bindOperatorSocket(ctx context.Context, dgHome string, eng *exchange.Engine, logger *log.Logger) (func(), error) {
+	sockPath := resolveOperatorSocketPath(dgHome)
 	ln, err := listenOperatorSocket(sockPath)
 	if err != nil {
-		logger.Printf("warning: operator socket unavailable: %v", err)
-		return nil
+		return nil, fmt.Errorf("bind operator socket at %s: %w", sockPath, err)
+	}
+	if rerr := recordOperatorSocketPath(dgHome, sockPath); rerr != nil {
+		ln.Close()
+		os.Remove(sockPath)
+		return nil, fmt.Errorf("record operator socket path: %w", rerr)
 	}
 	logger.Printf("  operator socket: %s", sockPath)
 	go serveOperatorSocket(ctx, ln, eng)
 	return func() {
 		ln.Close()
 		os.Remove(sockPath)
-	}
+	}, nil
 }
 
 // runEngineLoop wires the operator-facing plumbing shared by both serve

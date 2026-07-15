@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
 // resolveDGHome returns the DG_HOME directory: the DG_HOME environment variable
@@ -16,7 +18,10 @@ import (
 // portfolio key). The legacy campfire SDK config (CF_HOME / ~/.cf) is a separate,
 // campfire-era concern and is unaffected by this default.
 //
-// Socket path: resolveDGHome() + "/ipc/dontguess.sock"
+// Socket path: resolveDGHome() + "/ipc/dontguess.sock" — UNLESS the exchange
+// config records a relocated OperatorSocketPath (dontguess-7b2, a long
+// DG_HOME pushes the default past the platform's unix socket length limit);
+// see resolveOperatorSocketPathFor below, which every CLI socket dialer uses.
 func resolveDGHome() string {
 	if dg := os.Getenv("DG_HOME"); dg != "" {
 		return dg
@@ -26,4 +31,19 @@ func resolveDGHome() string {
 		return ".dontguess"
 	}
 	return filepath.Join(home, ".dontguess")
+}
+
+// resolveOperatorSocketPathFor returns the operator IPC socket path CLI
+// clients should dial for dgHome (dontguess-7b2, design §4/§9 Gate A/P2). It
+// reads the exchange config's OperatorSocketPath — written by serve's
+// bindOperatorSocket after a successful bind — and uses it when present,
+// since a long DG_HOME may have forced serve to relocate the socket under
+// $XDG_RUNTIME_DIR. Falls back to the default DG_HOME-relative path when no
+// config exists yet or it carries no recorded socket path (matches prior
+// behavior byte-for-byte for a short DG_HOME / pre-serve state).
+func resolveOperatorSocketPathFor(dgHome string) string {
+	if cfg, err := exchange.LoadConfig(dgHome); err == nil && cfg.OperatorSocketPath != "" {
+		return cfg.OperatorSocketPath
+	}
+	return filepath.Join(dgHome, "ipc", "dontguess.sock")
 }

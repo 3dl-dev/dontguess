@@ -108,10 +108,11 @@ func TestServeStartup_OperatorSocketRespondsUnder1s_WithDeadRelayLeg(t *testing.
 	startupBegin := time.Now()
 
 	// 1) Bind the operator socket FIRST — exactly the order runServeLocal now
-	// uses (dontguess-347 fix).
-	socketCleanup := bindOperatorSocket(ctx, dgHome, eng, logger)
-	if socketCleanup == nil {
-		t.Fatalf("bindOperatorSocket: socket did not bind")
+	// uses (dontguess-347 fix). bindOperatorSocket now returns a hard error on
+	// bind failure (dontguess-7b2) instead of a nil-cleanup WARN.
+	socketCleanup, bindErr := bindOperatorSocket(ctx, dgHome, eng, logger)
+	if bindErr != nil {
+		t.Fatalf("bindOperatorSocket: %v", bindErr)
 	}
 	defer socketCleanup()
 
@@ -134,7 +135,13 @@ func TestServeStartup_OperatorSocketRespondsUnder1s_WithDeadRelayLeg(t *testing.
 	// 3) Real IPC round-trip over the real operator unix socket, timed from
 	// serve "startup" (socket bind) to response. Must complete well under 1s
 	// even though the relay leg above is still stuck retrying its dial.
-	sockPath := filepath.Join(dgHome, "ipc", "dontguess.sock")
+	//
+	// dontguess-7b2: dial the RESOLVED path, not the hardcoded DG_HOME-
+	// relative default — t.TempDir() embeds the full test name and can push
+	// the default path past the platform's unix socket length limit, in
+	// which case bindOperatorSocket above already relocated it under
+	// $XDG_RUNTIME_DIR.
+	sockPath := resolveOperatorSocketPath(dgHome)
 	deadline := time.Now().Add(2 * time.Second)
 	var conn net.Conn
 	for {

@@ -57,6 +57,16 @@ type Config struct {
 	// individual tier (no relays) never reads it.
 	// See docs/design/nostr-admission-scrip-rehome-3b8.md §6.
 	FleetAllowlist []string `json:"fleet_allowlist,omitempty"`
+	// OperatorSocketPath is the resolved absolute path of the operator IPC
+	// unix socket, written by `serve`'s bindOperatorSocket AFTER a successful
+	// bind (dontguess-7b2, design §4/§9 Gate A/P2). A long DG_HOME can push
+	// $DG_HOME/ipc/dontguess.sock past the platform's sockaddr_un length
+	// limit, so serve relocates the socket to a short
+	// $XDG_RUNTIME_DIR/dontguess-<hash-of-DGHOME>.sock path in that case.
+	// CLI clients (socketPath() et al.) read this field to find the socket
+	// instead of assuming the default DG_HOME-relative path. Empty until the
+	// first successful `serve` bind.
+	OperatorSocketPath string `json:"operator_socket_path,omitempty"`
 }
 
 // DefaultMinReputation is the sell-side reputation floor written into a fresh

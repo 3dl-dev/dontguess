@@ -383,7 +383,7 @@ func readClkTck() int64 {
 // readHeldCount dials the operator socket and sends list-held.
 // On failure, returns nil (means "operator not reachable").
 func readHeldCount(dgHome string) (*int, string) {
-	sockPath := filepath.Join(dgHome, "ipc", "dontguess.sock")
+	sockPath := resolveOperatorSocketPathFor(dgHome)
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		return nil, "operator not reachable"
@@ -421,7 +421,7 @@ func readHeldCount(dgHome string) (*int, string) {
 // a note — mirrors readHeldCount's degrade-gracefully contract so `status`
 // still renders when the operator isn't running.
 func readDegradationMetrics(dgHome string) (*exchange.DegradationCounts, string) {
-	sockPath := filepath.Join(dgHome, "ipc", "dontguess.sock")
+	sockPath := resolveOperatorSocketPathFor(dgHome)
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		return nil, "operator not reachable"

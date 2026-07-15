@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -13,11 +12,13 @@ import (
 
 // socketPath returns the path to the operator unix domain socket.
 // Delegates to resolveDGHome (dgpath.go) — single source of truth for
-// DG_HOME resolution (dontguess-435). The socket lives in a 0700 "ipc"
-// subdirectory (dontguess-33a) to bound the TOCTOU window at the
-// parent-dir level instead of relying on process-global umask tricks.
+// DG_HOME resolution (dontguess-435) — and resolveOperatorSocketPathFor
+// (dontguess-7b2), which reads the exchange config's recorded socket path
+// so a long-DG_HOME operator's relocated $XDG_RUNTIME_DIR socket is found
+// instead of assuming the default "ipc" subdirectory (dontguess-33a) under
+// DG_HOME.
 func socketPath() string {
-	return filepath.Join(resolveDGHome(), "ipc", "dontguess.sock")
+	return resolveOperatorSocketPathFor(resolveDGHome())
 }
 
 // dialSocket dials the operator socket and returns the connection.
