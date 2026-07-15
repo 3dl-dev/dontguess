@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
@@ -319,6 +320,106 @@ func TestLoadConfig_AcceptsMinReputationAtMax(t *testing.T) {
 	}
 	if loaded.MinReputation != exchange.MaxMinReputation {
 		t.Errorf("MinReputation = %d, want %d", loaded.MinReputation, exchange.MaxMinReputation)
+	}
+}
+
+// TestInit_PersistsTier verifies a declared tier is recorded in the config (both
+// returned and on disk) and round-trips through LoadConfig (dontguess-daa).
+func TestInit_PersistsTier(t *testing.T) {
+	t.Parallel()
+
+	dgHome := t.TempDir()
+	cfg, err := exchange.Init(exchange.InitOptions{
+		DGHome:    dgHome,
+		Tier:      exchange.TierTeam,
+		RelayURLs: []string{"ws://r:7777"},
+	})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if cfg.Tier != exchange.TierTeam {
+		t.Errorf("returned tier = %q, want %q", cfg.Tier, exchange.TierTeam)
+	}
+	loaded, err := exchange.LoadConfig(dgHome)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.Tier != exchange.TierTeam {
+		t.Errorf("on-disk tier = %q, want %q", loaded.Tier, exchange.TierTeam)
+	}
+}
+
+// TestInit_RejectsTeamFleetWithoutRelay proves the config-time fail-closed guard:
+// a declared team/fleet tier with an empty RelayURLs set is rejected with a clear
+// error naming the tier and the relay flag — NOT silently downgraded to solo, NOT
+// given a default relay (dontguess-daa DONE clause 1).
+func TestInit_RejectsTeamFleetWithoutRelay(t *testing.T) {
+	t.Parallel()
+
+	for _, tier := range []exchange.Tier{exchange.TierTeam, exchange.TierFleet} {
+		tier := tier
+		t.Run(string(tier), func(t *testing.T) {
+			t.Parallel()
+			dgHome := t.TempDir()
+			_, err := exchange.Init(exchange.InitOptions{DGHome: dgHome, Tier: tier})
+			if err == nil {
+				t.Fatalf("Init(tier=%s, no relay) returned nil — the config-time guard did not fire (silent solo downgrade)", tier)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, string(tier)) {
+				t.Errorf("error does not name the tier %q: %q", tier, msg)
+			}
+			if !strings.Contains(msg, "--relay") {
+				t.Errorf("error does not name the relay flag: %q", msg)
+			}
+		})
+	}
+}
+
+// TestInit_SoloWithoutRelaySucceeds proves solo (and the undeclared tier) never
+// require a relay — the zero-ceremony individual tier still bootstraps with no
+// relay, no tier declaration.
+func TestInit_SoloWithoutRelaySucceeds(t *testing.T) {
+	t.Parallel()
+
+	dgHome := t.TempDir()
+	cfg, err := exchange.Init(exchange.InitOptions{DGHome: dgHome, Tier: exchange.TierSolo})
+	if err != nil {
+		t.Fatalf("Init(solo, no relay): unexpected error: %v", err)
+	}
+	if cfg.Tier != exchange.TierSolo {
+		t.Errorf("tier = %q, want %q", cfg.Tier, exchange.TierSolo)
+	}
+	if len(cfg.RelayURLs) != 0 {
+		t.Errorf("relay_urls = %v, want empty (no default substituted)", cfg.RelayURLs)
+	}
+}
+
+// TestInit_PreservesTierOnReInit proves an idempotent re-init (no Force, empty
+// caller tier) preserves a previously-declared tier rather than silently
+// clearing it to solo.
+func TestInit_PreservesTierOnReInit(t *testing.T) {
+	t.Parallel()
+
+	dgHome := t.TempDir()
+	if _, err := exchange.Init(exchange.InitOptions{
+		DGHome:    dgHome,
+		Tier:      exchange.TierTeam,
+		RelayURLs: []string{"ws://r:7777"},
+	}); err != nil {
+		t.Fatalf("first Init: %v", err)
+	}
+	// Re-init with NO tier and NO relay — must preserve team + relays, not reject
+	// or downgrade.
+	cfg, err := exchange.Init(exchange.InitOptions{DGHome: dgHome})
+	if err != nil {
+		t.Fatalf("idempotent re-init: %v", err)
+	}
+	if cfg.Tier != exchange.TierTeam {
+		t.Errorf("tier after re-init = %q, want preserved %q", cfg.Tier, exchange.TierTeam)
+	}
+	if len(cfg.RelayURLs) != 1 {
+		t.Errorf("relay_urls after re-init = %v, want preserved [ws://r:7777]", cfg.RelayURLs)
 	}
 }
 
