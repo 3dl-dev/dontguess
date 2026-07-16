@@ -241,14 +241,21 @@ happened and what to do next.
 > Full threat model, custody boundaries, and the operator-key rotation runbook:
 > `docs/design/onboarding-tiered-scaling-federation.md` §7.3.
 
-### Per-agent identity (v0.5.0+)
-# Each subagent can sign with its own Ed25519 key. The exchange campfire stays
-# on DG_HOME; only signing changes. Unset AGENT_CF_HOME = identical prior behavior.
-eval $(dontguess agent-init my-agent --fleet-member)   # provision identity + set AGENT_CF_HOME
-# --fleet-member is required for a persistent agent (fail-closed: no default
-# identity is minted). An ephemeral subagent uses --parent <fleet-member> instead.
-# Then: buy/put/settle signed by my-agent's key, not the operator key.
-# See docs/UPGRADING.md for full details and backward-compat guarantee.
+### Per-agent identity (v0.8.3+ — project-local `.dg/`, NO env var)
+# Identity lives in a project-local `.dg/` discovered by walking UP from the cwd
+# (like `.git`). There is NO AGENT_CF_HOME and no per-command flag — run agent-init
+# ONCE in the project root and every buy/put in that tree signs correctly:
+dontguess agent-init my-agent --fleet-member \
+  --relay ws://192.168.2.40:7777,ws://192.168.2.41:7777 \
+  --operator-npub <operator-npub>
+#   → provisions ./.dg/  (identity in .dg/agents/my-agent/, reach-config in .dg/config.json)
+# Then, from anywhere in the tree, with no env var and no flag:
+dontguess buy  --task "..."                 # signs as my-agent, reaches the exchange
+dontguess put  --description "..." --token_cost N --content_type ... --content <b64>
+# --fleet-member is required for a persistent agent (fail-closed: no default mint).
+# An ephemeral subagent in a SUBDIR inherits the parent project's .dg/ for free by
+# walk-up — no agent-init needed. Overrides (advanced/tests): --agent-home <path>,
+# --as <name>. IMPORTANT: `.dg/` holds a signing key — it MUST be gitignored.
 
 ### Domain tags for this project
 matching, exchange, pricing, reputation, trust, economics

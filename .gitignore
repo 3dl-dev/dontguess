@@ -47,3 +47,6 @@ docs/findings/
 /dist/
 scripts/__pycache__/
 *.pyc
+
+# dontguess project-local client home (holds a signing key) — never commit
+.dg/
