@@ -158,6 +158,7 @@ func makeDGHome(t *testing.T, path string) {
 func (s *installerScene) runWrapper(t *testing.T, dgHome, dgOp string, extraEnv ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(s.wrapper, "buy", "--task", "injection probe", "--budget", "100")
+	cmd.Dir = s.testDir // hermetic: never inherit a stray .dg/ from the repo cwd (dontguess-884)
 	env := []string{
 		"HOME=" + s.testDir,
 		"PATH=" + s.binDir + ":" + os.Getenv("PATH"),
@@ -346,6 +347,7 @@ func TestInstall_HealthProbeDeadlineHonored(t *testing.T) {
 		defer func() { _ = syscall.Flock(int(lockF.Fd()), syscall.LOCK_UN) }()
 
 		cmd := exec.Command(wrapperPath, "buy", "--task", "deadline probe", "--budget", "100")
+		cmd.Dir = testDir // hermetic: never inherit a stray .dg/ from the repo cwd (dontguess-884)
 		cmd.Env = []string{
 			"HOME=" + testDir,
 			"PATH=" + binDir + ":" + os.Getenv("PATH"),

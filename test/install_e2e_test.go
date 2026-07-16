@@ -197,6 +197,11 @@ func (s *e2eScene) run(t *testing.T, dgHome string, extraEnv []string, args ...s
 	t.Cleanup(func() { killPidFile(filepath.Join(dgHome, "dontguess.pid")) })
 
 	cmd := exec.Command(s.wrapper, args...)
+	// Run from an isolated cwd (never the repo tree). The wrapper's tier detection
+	// walks UP from the cwd for a .dg/config.json (dontguess-884); a stray .dg/ in
+	// an ancestor (e.g. the dontguess repo's own team-tier .dg/) would otherwise
+	// flip an individual-tier case to team and skip the auto-start under test.
+	cmd.Dir = s.testDir
 	env := []string{
 		"HOME=" + s.testDir,
 		"PATH=" + s.binDir + ":" + os.Getenv("PATH"),

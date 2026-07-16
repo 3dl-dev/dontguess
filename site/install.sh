@@ -88,7 +88,7 @@ main() {
   # --- wrapper script ---
   cat > "${INSTALL_DIR}/dontguess" <<'ENDWRAPPER'
 #!/bin/sh
-# dontguess — turnkey wrapper (v0.7.0, nostr-first)
+# dontguess — turnkey wrapper (v0.8.4, nostr-first)
 #
 # Nostr-first (dontguess-ed2): NO campfire (cf) dependency. Every verb dispatches
 # to the single dontguess-operator binary (operator serve + client put/buy). The
@@ -97,7 +97,8 @@ main() {
 # DG_HOME, the individual-tier auto-start, synthetic tagging, and attempt logging.
 #
 # Tier detection mirrors the operator (design §3.3): DONTGUESS_RELAY_URLS non-empty
-#   ⇒ TEAM (client dials the relay directly, agent-signed); empty ⇒ INDIVIDUAL
+#   OR a walk-up .dg/config.json with relay_urls (dontguess-884) ⇒ TEAM (client dials
+#   the relay directly, agent-signed); neither ⇒ INDIVIDUAL
 #   (client routes through the single local `serve` over the IPC socket).
 #
 # H6 (design §3.10): the flock serve auto-start is gated on the INDIVIDUAL tier
@@ -265,11 +266,39 @@ pid_is_operator() {
   esac
 }
 
+# _dg_config_has_relays: TEAM-tier detection via the project-local .dg/config.json
+# discovered by walking UP from the cwd (dontguess-884). The client binary reads
+# its relay URLs from there, so DONTGUESS_RELAY_URLS is normally UNSET in a
+# team-tier .dg/ project. Without consulting .dg/config.json the wrapper would
+# mistake such a project for the individual tier and auto-start a COMPETING local
+# operator on every client call (the stray-operator regression). Returns 0 (team)
+# when the nearest .dg/config.json declares a non-empty relay_urls.
+_dg_config_has_relays() {
+  _d=$(pwd 2>/dev/null || true)
+  while [ -n "$_d" ]; do
+    if [ -f "$_d/.dg/config.json" ]; then
+      if command -v jq >/dev/null 2>&1; then
+        _n=$(jq -r '(.relay_urls // []) | length' "$_d/.dg/config.json" 2>/dev/null || echo 0)
+        [ "${_n:-0}" -gt 0 ] 2>/dev/null && return 0
+        return 1
+      fi
+      # jq-less fallback: a relay_urls key holding a ws:// or wss:// URL.
+      grep -q '"relay_urls"' "$_d/.dg/config.json" 2>/dev/null &&
+        grep -qE 'wss?://' "$_d/.dg/config.json" 2>/dev/null && return 0
+      return 1
+    fi
+    [ "$_d" = "/" ] && break
+    _d=$(dirname "$_d")
+  done
+  return 1
+}
+
 # H6 (design §3.10): the flock serve auto-start is gated on the INDIVIDUAL tier
-# ONLY. When DONTGUESS_RELAY_URLS is set (team tier) the client dials the relay
-# directly and this whole block is skipped — the wrapper NEVER auto-starts a local
-# operator in team tier, so a rogue competing sequencer cannot be spawned.
-if [ -z "${DONTGUESS_RELAY_URLS:-}" ]; then
+# ONLY. Team tier — DONTGUESS_RELAY_URLS set OR a walk-up .dg/config.json with
+# relay_urls (dontguess-884) — dials the relay directly and skips this whole
+# block, so the wrapper NEVER auto-starts a local operator in team tier and a
+# rogue competing sequencer cannot be spawned.
+if [ -z "${DONTGUESS_RELAY_URLS:-}" ] && ! _dg_config_has_relays; then
   # Individual tier: buy/put route through the single local serve over the IPC
   # socket. The exchange must be bootstrapped first (`dontguess init`).
   if [ ! -f "$CFG" ]; then
