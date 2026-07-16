@@ -58,7 +58,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/bootservice"
@@ -326,7 +325,7 @@ func spawnDetachedServe(dgHome string) (alreadyRunning bool, err error) {
 	if ferr := lockWithTimeout(lockFile, upServeReadyTimeout); ferr != nil {
 		return false, fmt.Errorf("acquire up lock %s: %w", lockPath, ferr)
 	}
-	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
+	defer func() { _ = flockUnlock(lockFile) }()
 
 	if _, ok := dialSocketMaybe(dgHome); ok {
 		return true, nil
@@ -345,7 +344,7 @@ func spawnDetachedServe(dgHome string) (alreadyRunning bool, err error) {
 	cmd.Env = append(os.Environ(), "DG_HOME="+dgHome)
 	cmd.Stdout = devnull
 	cmd.Stderr = devnull
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	setDetachedProcAttr(cmd)
 	if serr := cmd.Start(); serr != nil {
 		return false, fmt.Errorf("spawn %s serve: %w", exe, serr)
 	}
@@ -385,12 +384,12 @@ func upLockFilePath(dgHome string) string {
 func lockWithTimeout(f *os.File, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		ferr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if ferr == nil {
-			return nil
-		}
-		if ferr != syscall.EWOULDBLOCK {
+		acquired, ferr := flockTryExclusive(f)
+		if ferr != nil {
 			return ferr
+		}
+		if acquired {
+			return nil
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out after %s", timeout)
