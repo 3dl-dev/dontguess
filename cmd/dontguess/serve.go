@@ -1067,6 +1067,11 @@ func runEngineLoop(ctx context.Context, dgHome string, eng *exchange.Engine, log
 // calls mkdir under t.TempDir()). Using a restricted parent directory is both
 // race-free and strictly stronger: even a mis-permissioned socket inode would
 // be unreachable through a 0700 parent.
+// operatorSocketProbeTimeout bounds the pre-bind liveness probe in
+// listenOperatorSocket — short so a legitimate first start (stale/absent socket)
+// is not delayed, long enough that a live local operator reliably accepts.
+const operatorSocketProbeTimeout = 500 * time.Millisecond
+
 func listenOperatorSocket(path string) (net.Listener, error) {
 	// Create (or re-use) the restricted parent directory that holds the
 	// socket. Using a dedicated subdirectory (not $DG_HOME itself) means we
@@ -1080,7 +1085,21 @@ func listenOperatorSocket(path string) (net.Listener, error) {
 		return nil, fmt.Errorf("chmod operator socket dir: %w", err)
 	}
 
-	// Remove stale socket file if present.
+	// Refuse to CLOBBER a live operator (dontguess-884). os.Remove below unlinks
+	// the socket file; doing that while another operator is actively listening on
+	// it silently steals the path — the real operator's listener is orphaned and
+	// its pidfile gets overwritten, breaking it. That is the "an unconfigured
+	// client auto-started a serve that clobbered the real operator" failure. Probe
+	// first: a socket that ACCEPTS a connection has a live owner, so fail closed.
+	// Only a STALE socket (crash leftover, nothing listening) is removed and
+	// rebound — os.Remove is required for that case because net.Listen("unix")
+	// returns EADDRINUSE on a pre-existing path even when no process owns it.
+	if conn, derr := net.DialTimeout("unix", path, operatorSocketProbeTimeout); derr == nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("operator already running on this DG_HOME (socket %s is live) — "+
+			"refusing to start a competing operator that would clobber it", path)
+	}
+	// Remove the now-confirmed-stale socket file (crash leftover) if present.
 	_ = os.Remove(path)
 
 	ln, err := net.Listen("unix", path)
