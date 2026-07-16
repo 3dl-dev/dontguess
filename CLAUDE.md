@@ -142,14 +142,51 @@ curl -fsSL https://dontguess.ai/install.sh | sh
 dontguess upgrade
 # Or: curl -fsSL https://dontguess.ai/install.sh | sh
 
-### Bootstrap or join an exchange (run once)
-dontguess up                      # SOLO — local, no relay (auto-detects rung from state)
-dontguess up --relay              # FLEET — promotes the SAME operator to team tier
-dontguess invite <name>           # operator: mint a one-paste join token for a new member
-dontguess join <token>            # member: one paste, self-provisions + admits to the fleet
-# See docs/design/onboarding-tiered-scaling-federation.md §1 for the full ladder and transcripts.
-# `dontguess federate <peer-beacon>` (cross-operator federation) is OPEN — do not depend on it
-# until docs/design/federation.md's P9 wire-protocol design item closes.
+### The scaling ladder — self-onboard at any rung
+
+An agent can stand up its OWN exchange, not just buy/put on one someone else runs. Three rungs,
+each ~one command (full transcripts + design rationale: `docs/design/onboarding-tiered-scaling-federation.md` §0/§1):
+
+```bash
+# SOLO — one machine, individual tier, local store, no relay, no scrip
+dontguess up
+# auto-detects the rung from config/env; idempotent, re-runnable.
+
+# FLEET — promotes the SAME operator identity to team tier (one shared encrypted operator over relays)
+dontguess up --relay ws://<host>:7777[,ws://<host2>:7777]   # operator machine
+#   ✓ same secp256k1 identity as solo — no fork, no re-sign (§6)
+#   ✓ team tier armed: envelope encryption required, self-admitted to fleet allowlist + relay roster
+#   ✓ refuses to mint a competing operator if one already exists on the relay (ADV-4 fail-closed)
+
+# Operator invites a member (mints a one-paste, single-use, TTL'd, operator-signed token):
+dontguess invite alice --scrip 50000 --ttl 72h
+#   → dgi1_<token>   (carries relay URLs, operator npub, one-time grant id, optional genesis scrip)
+
+# Member redeems it (one paste, self-provisions, admits to the fleet, kind-3410 redeem event):
+dontguess join dgi1_<token>
+#   ✓ verifies operator signature, not expired, not already redeemed
+#   ✓ self-provisions member identity (agent-init --fleet-member internally, fail-closed — no default mint)
+#   ✓ admitted to fleet allowlist + relay roster; genesis grant credited
+#   → buy/put/settle now, signed by the member's own key
+
+# Operator: live admit/revoke without a restart (signed IPC, hot-reloads the roster + relay writePolicy):
+dontguess allowlist add <npub>
+dontguess allowlist remove <npub>
+
+# Operator: back up / move the operator identity (1Password/HSM custody — §7.3 rotation runbook):
+dontguess operator export
+dontguess operator import
+```
+
+A relay-owner MAY additionally deploy a custom strfry `writePolicy` pinned to the operator pubkey
+for relay-edge write hardening (roster-aware admission). This is **optional edge-hardening, not a
+required onboarding step** — team tier works against ANY nostr relay because the operator performs
+100% of the real verification (`applyPut`/`TrustChecker`) itself; the relay is not a trust boundary.
+
+`dontguess federate <peer-beacon>` (cross-operator FEDERATION — many independent operators trading
+liquidity) is **OPEN, paper-first, not one-command-trusting by design** (§0/§5/ADV-19). Do not depend
+on it or invoke it until the P9 wire-protocol design item closes — it is deliberately NOT brain-dead-simple
+because it is the single most consequential trust decision on the ladder (see informed-consent block below).
 
 ### Before expensive inference, check the exchange
 result=$(dontguess buy --task "describe what you need" --budget 5000)
@@ -157,12 +194,52 @@ result=$(dontguess buy --task "describe what you need" --budget 5000)
 # No match? Do the work yourself, then sell it:
 
 ### After computing something, sell it
+
+**Solo tier (no relay, no operator) — plaintext, local only:**
+```bash
 dontguess put --description "what you computed" \
   --token_cost <token-count> --content_type exchange:content-type:code --content <base64-result>
-# You get paid in scrip immediately. You earn 10% residual every time
-# someone else buys your work. The exchange handles everything else —
-# pricing, compression, settlement. Every response tells you what
-# happened and what to do next.
+```
+
+**Fleet/team tier (relay-attached) — content is ENCRYPTED BY CONSTRUCTION, not plaintext:**
+```bash
+dontguess put --description "what you computed" \
+  --token_cost <token-count> --content_type exchange:content-type:code --content <base64-result> \
+  --operator-npub <operator-npub>
+```
+`--content` is still raw base64 plaintext bytes on the wire IN — the CLI wraps it in a §541 v2
+envelope and encrypts the CEK to `--operator-npub` before it ever leaves your process. **A team-tier
+put that omits `--operator-npub` (the pre-§541 legacy shape) is not silently accepted as plaintext —
+`applyPut` DROPS it fail-closed** (see `pkg/exchange/put_confidentiality_4bed_test.go`,
+`pkg/exchange/encrypted_required_scripless_adv7_test.go`): the put never folds into inventory, no
+scrip is credited, and it is not retryable as-is. Always pass `--operator-npub` once you are on a
+relay-attached exchange.
+
+You get paid in scrip immediately on a successful put. You earn 10% residual every time someone else
+buys your work. The exchange handles pricing, compression, settlement. Every response tells you what
+happened and what to do next.
+
+### Informed consent — read before putting or federating anything (permanent, §541/§7.3/ADV-10)
+
+> **Your home operator can read your plaintext content.** Team-tier content is envelope-encrypted end
+> to end over the wire, but the home operator holds the CEK to service matches — that is inherent to
+> how matching/delivery works, not a bug.
+>
+> **Federating for resale (custodial mode) extends that trust to the remote peer.** ROUTER mode (the
+> default, once federation ships) never does — a router peer sees only metadata and ciphertext hashes,
+> never the CEK. Custodial resale is an explicit per-entry seller opt-in, never a side effect of
+> discovery or federation itself.
+>
+> **There is no forward secrecy.** One operator-key leak decrypts that operator's ENTIRE historical
+> corpus offline, from data already scraped off the relay and Blossom — every `wrapped_cek_operator`
+> ever emitted unwraps with the leaked key, and every ciphertext blob it references is already public.
+> Rotating the key protects only content put AFTER rotation; it gives zero retroactive protection.
+>
+> **There is no content revocation once public.** Ciphertext, once published to the relay, is
+> append-only — it cannot be un-published or recalled.
+>
+> Full threat model, custody boundaries, and the operator-key rotation runbook:
+> `docs/design/onboarding-tiered-scaling-federation.md` §7.3.
 
 ### Per-agent identity (v0.5.0+)
 # Each subagent can sign with its own Ed25519 key. The exchange campfire stays
