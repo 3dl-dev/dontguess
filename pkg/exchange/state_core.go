@@ -68,47 +68,118 @@ func NewState() *State {
 	}
 }
 
+// replayFoldWindow is the number of log messages folded per Replay window
+// (dontguess-0ba). Replay prefetches only ONE window's offloaded-put ciphertexts
+// off the lock at a time, folds them, then discards them before prefetching the
+// next window — so resident blob memory is bounded to at most this many
+// ciphertexts (≤ replayFoldWindow × MaxContentBytes) regardless of how many
+// offloaded puts the log contains. The old code prefetched EVERY offloaded blob
+// in the whole log into one map before folding, which is O(log) resident and
+// OOMs / stalls a Replay of a large offloaded-put log. A window is a message
+// count, not a byte budget: each individual blob is already separately capped
+// (fetch drop > MaxContentBytes, dontguess-00d), so a fixed count bounds the
+// aggregate. Larger = fewer lock reacquisitions; smaller = tighter memory bound.
+const replayFoldWindow = 128
+
 // Replay builds state from scratch by processing all messages in log order.
 // It resets the state before processing. Thread-safe.
+//
+// Memory-bounded windowed fold (dontguess-0ba): Replay no longer prefetches the
+// WHOLE log's offloaded ciphertexts into one map, nor holds s.mu across the
+// entire fold. It processes the log in replayFoldWindow-sized windows; for each
+// window it prefetches only that window's ciphertexts OFF the lock (preserving
+// the dontguess-a5e discipline that no BlobStore.Fetch ever runs under s.mu),
+// then folds the window under s.mu and releases. Resident blob memory is thus
+// O(window), not O(log). The reset + operator-put-accept pre-scan run under the
+// FIRST window's lock (beginReplayLocked) so the reset and the first fold are
+// atomic; the replay scope (replaying / replayPutAccepts / replayMsgIDs) stays
+// installed across the inter-window lock gaps and is torn down by endReplayLocked
+// after the last window. Because that scope is live during the gaps, every
+// replay-only fold behavior gates on replayMsgIDs (isReplayMsg) rather than the
+// bare s.replaying flag, so a concurrent live Apply interleaving in a gap is
+// never mistaken for replay (see replayMsgIDs doc + isReplayMsg).
 func (s *State) Replay(msgs []Message) {
-	// Fetch every offloaded-put ciphertext BEFORE taking s.mu (dontguess-a5e).
-	// Replay folds the ENTIRE log under a single write-lock hold; fetching blobs
-	// under that lock (the old behavior) let a slow/hung Blossom host stall ALL
-	// State reads/writes for the whole rebuild — the Replay-of-many-offloaded
-	// stall this item removes, and the root cause of the -race confidentiality
-	// E2E flaky. Pre-fetching off the lock keeps s.mu held only for the pure
-	// in-memory fold; decryptV2Put reads the pre-fetched ciphertext.
-	prefetchTargets := make([]*Message, len(msgs))
+	// Build the replay msg-ID set up front (pure, off-lock). This is the scope
+	// every replay-only behavior keys on so a live Apply in a between-window gap
+	// is treated as live, not replay (dontguess-0ba).
+	replaySet := make(map[string]struct{}, len(msgs))
 	for i := range msgs {
-		prefetchTargets[i] = &msgs[i]
+		replaySet[msgs[i].ID] = struct{}{}
 	}
-	blobs := s.prefetchPutBlobs(prefetchTargets)
+
+	first := true
+	for start := 0; start < len(msgs); start += replayFoldWindow {
+		end := start + replayFoldWindow
+		if end > len(msgs) {
+			end = len(msgs)
+		}
+		batch := msgs[start:end]
+
+		// Prefetch ONLY this window's offloaded ciphertexts, off the lock. The
+		// returned map holds at most this window's blobs and is discarded when the
+		// window's fold returns — bounding resident blob memory to O(window).
+		prefetchTargets := make([]*Message, len(batch))
+		for i := range batch {
+			prefetchTargets[i] = &batch[i]
+		}
+		blobs := s.prefetchPutBlobs(prefetchTargets)
+
+		s.mu.Lock()
+		if first {
+			// Reset + install replay scope + pre-scan put-accepts atomically with
+			// the first window's fold, so no reader/Apply observes a reset-but-not-
+			// yet-refolded state gap before folding begins.
+			s.beginReplayLocked(msgs, replaySet)
+			first = false
+		}
+		for i := range batch {
+			s.applyLocked(&batch[i], blobs)
+		}
+		s.mu.Unlock()
+	}
+
+	// Empty log: no window ran, but Replay must still reset state (the pre-0ba
+	// contract that Replay(nil) wipes state) and leave the replay scope cleared.
+	if first {
+		s.mu.Lock()
+		s.beginReplayLocked(msgs, replaySet)
+		s.endReplayLocked()
+		s.mu.Unlock()
+		return
+	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.endReplayLocked()
+	s.mu.Unlock()
+}
 
-	// Suppress fold-guard denial counting for the duration of the replay: the
-	// full log is re-applied on every engine restart / state rebuild, so a
+// beginReplayLocked installs the replay scope, pre-scans the log for operator
+// put-accepts, and resets all log-derived state. Caller holds s.mu. Split out of
+// Replay so the reset runs under the first window's lock (dontguess-0ba).
+func (s *State) beginReplayLocked(msgs []Message, replaySet map[string]struct{}) {
+	// Suppress fold-guard denial counting for messages BELONGING TO the replay:
+	// the full log is re-applied on every engine restart / state rebuild, so a
 	// forged message already on the log must not re-increment the live alarm
-	// counters each time (dontguess-9ed). Only real-time Apply counts.
+	// counters each time (dontguess-9ed). Only real-time Apply counts. Scoped by
+	// replayMsgIDs (not the bare flag) so a live Apply in a between-window gap
+	// still counts (dontguess-0ba).
 	s.replaying = true
-	defer func() { s.replaying = false }()
+	s.replayMsgIDs = replaySet
 
 	// Pre-scan the log for operator put-accepts (dontguess-00d FIX 1). The §6
 	// legacy-plaintext grandfather block in applyPut only fires for a put that
 	// was PREVIOUSLY ACCEPTED — a genuine pre-cutover plaintext put has an
 	// operator put-accept in the log; a post-cutover plaintext put was
-	// fail-closed dropped live and has none. applyPut runs during the fold loop
-	// BELOW, but a put-accept always folds AFTER its put (it e-tags the put as
-	// its antecedent), so applyPut cannot learn "was accepted?" from live fold
-	// order. This pre-scan resolves it: collect the put IDs that any operator
-	// put-accept references so applyPut can gate grandfathering on membership.
-	// The operator-sender guard mirrors applySettlePutAccept exactly (an empty
+	// fail-closed dropped live and has none. applyPut runs during the fold loop,
+	// but a put-accept always folds AFTER its put (it e-tags the put as its
+	// antecedent), so applyPut cannot learn "was accepted?" from live fold order.
+	// This pre-scan resolves it: collect the put IDs that any operator put-accept
+	// references so applyPut can gate grandfathering on membership. The
+	// operator-sender guard mirrors applySettlePutAccept exactly (an empty
 	// OperatorKey accepts any sender; a set key requires a match) so a forged
 	// non-operator put-accept cannot bait a post-cutover plaintext put into
-	// inventory. Cleared on exit — meaningful only for this replay's duration.
+	// inventory. Cleared by endReplayLocked — meaningful only for this replay.
 	s.replayPutAccepts = make(map[string]struct{}, len(msgs))
-	defer func() { s.replayPutAccepts = nil }()
 	for i := range msgs {
 		m := &msgs[i]
 		if exchangeOp(m.Tags) != TagSettle {
@@ -193,7 +264,7 @@ func (s *State) Replay(msgs []Message) {
 	// repopulates the index from the canonical log.
 	s.contentHashIndex = make(map[string]struct{})
 	// Fold-accumulator dedup guards (dontguess-f86) are reset so a full rebuild
-	// starts fresh and repopulates them in log order as the fold loop below runs.
+	// starts fresh and repopulates them in log order as the windowed fold runs.
 	s.foldDenialCounted = make(map[string]struct{})
 	s.hopDepthCounted = make(map[string]struct{})
 	s.consumeCounted = make(map[string]struct{})
@@ -203,10 +274,31 @@ func (s *State) Replay(msgs []Message) {
 	// must survive engine restarts. The HopDepth and FirstSeenAt fields will be
 	// updated as messages replay (via trackSenderHopDepth). New senders will get
 	// profiles created during replay; existing profiles keep their trust_scores.
+}
 
-	for i := range msgs {
-		s.applyLocked(&msgs[i], blobs)
+// endReplayLocked tears down the replay scope installed by beginReplayLocked.
+// Caller holds s.mu. Called once after the final Replay window (dontguess-0ba).
+func (s *State) endReplayLocked() {
+	s.replaying = false
+	s.replayPutAccepts = nil
+	s.replayMsgIDs = nil
+}
+
+// isReplayMsg reports whether id belongs to the log currently being replayed.
+// Caller holds s.mu. Replay-only fold behaviors (the §6 legacy-plaintext
+// grandfather admission and recordFoldDenial suppression) gate on THIS, not the
+// bare s.replaying flag: because Replay folds in memory-bounded windows and
+// releases s.mu between them (dontguess-0ba), a concurrent live Apply can
+// interleave while s.replaying is still true. Such a live message is not part of
+// the replay log — its ID is absent here — so it is treated as live, preserving
+// the fail-closed drop of a live plaintext downgrade and the alarm on a live
+// fold-guard denial that a bare-flag check would wrongly suppress.
+func (s *State) isReplayMsg(id string) bool {
+	if s.replayMsgIDs == nil {
+		return false
 	}
+	_, ok := s.replayMsgIDs[id]
+	return ok
 }
 
 // Apply processes a single new message, updating state.
@@ -298,10 +390,19 @@ func (s *State) applyLocked(msg *Message, blobs map[string][]byte) {
 
 // recordFoldDenial counts + alarms a security-relevant fold-guard rejection
 // (operator-only settlement guard, or the buyer-identity gate) via the callback
-// wired by NewEngine. It is a no-op during Replay (so a re-applied log does not
-// re-inflate the counters) and when no callback is wired (State built directly
-// in tests). Caller must hold s.mu — the callback only touches atomic counters
-// and the logger, so holding s.mu across it introduces no lock-ordering hazard.
+// wired by NewEngine. It is a no-op for a message BELONGING TO the replay log (so
+// a re-applied log does not re-inflate the counters) and when no callback is
+// wired (State built directly in tests). Caller must hold s.mu — the callback
+// only touches atomic counters and the logger, so holding s.mu across it
+// introduces no lock-ordering hazard.
+//
+// Replay suppression is scoped to isReplayMsg, NOT the bare s.replaying flag
+// (dontguess-0ba): Replay now folds in memory-bounded windows and releases s.mu
+// between them, so a concurrent live Apply can run while s.replaying is still
+// true. A live message is not in the replay log, so isReplayMsg is false and its
+// denial IS counted+alarmed — a live forged non-operator settle/consume in a
+// between-window gap must not have its alarm swallowed just because a Replay is
+// in flight. Replay-log messages still suppress exactly as before.
 //
 // Per-message-ID dedup guard (dontguess-f86): foldDenialCounted ensures a given
 // message's denial is counted at most once even if the SAME message is folded
@@ -313,7 +414,10 @@ func (s *State) applyLocked(msg *Message, blobs map[string][]byte) {
 // message re-applied via a standalone Apply after Replay finished still
 // double-counted its denial reason.
 func (s *State) recordFoldDenial(reason foldDenialReason, msg *Message) {
-	if s.replaying || s.onFoldDenial == nil {
+	if s.onFoldDenial == nil {
+		return
+	}
+	if s.replaying && s.isReplayMsg(msg.ID) {
 		return
 	}
 	if _, seen := s.foldDenialCounted[msg.ID]; seen {

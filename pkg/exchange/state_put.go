@@ -829,7 +829,17 @@ func (s *State) applyPut(msg *Message, blobs map[string][]byte) {
 	if s.encryptedRequired {
 		if !isV2 || payload.Content != "" || !encWellFormed(payload.Enc) {
 			_, hadPutAccept := s.replayPutAccepts[msg.ID]
-			if s.replaying && hadPutAccept && isLegacyPlaintextPut(payload.V, payload.Enc, payload.Content) {
+			// Grandfather ONLY a message that is part of the replay log (isReplayMsg),
+			// not merely any message seen while s.replaying is true (dontguess-0ba).
+			// Replay folds in memory-bounded windows and releases s.mu between them,
+			// so a concurrent LIVE Apply of a team-tier plaintext put can interleave
+			// while s.replaying is set. If that live put's ID coincides with a log
+			// put-accept (hadPutAccept true), the bare-flag check would grandfather it
+			// — re-admitting a post-cutover plaintext downgrade the live path just
+			// dropped, a §6 confidentiality regression. Gating on isReplayMsg keeps the
+			// live put fail-closed DROPPED (its ID is not in the replay set) while a
+			// genuine pre-cutover put — which IS in the log — still grandfathers.
+			if s.replaying && s.isReplayMsg(msg.ID) && hadPutAccept && isLegacyPlaintextPut(payload.V, payload.Enc, payload.Content) {
 				grandfathered = true
 			} else {
 				return
