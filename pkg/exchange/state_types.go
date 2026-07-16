@@ -891,6 +891,23 @@ type State struct {
 	// grandfathering requires s.replaying).
 	replayPutAccepts map[string]struct{}
 
+	// replayMsgIDs is the set of message IDs belonging to the log CURRENTLY being
+	// replayed. Populated by beginReplayLocked and torn down by endReplayLocked;
+	// nil outside Replay. It exists because Replay folds the log in memory-bounded
+	// WINDOWS (dontguess-0ba): to keep the prefetched-blob working set O(window)
+	// instead of O(log), Replay releases s.mu between windows and re-prefetches the
+	// next window's ciphertexts off the lock. That lock release opens a gap in which
+	// a concurrent live Apply (poll-loop foldAndDispatchLocalSnapshot) can interleave
+	// while s.replaying is still true. Every replay-ONLY fold behavior — the §6
+	// legacy-plaintext grandfather admission and recordFoldDenial suppression — MUST
+	// therefore gate on THIS set (isReplayMsg), not on the bare s.replaying flag: a
+	// live message is never part of the replay log, so its ID is absent here and it
+	// is correctly treated as live (denial counted; grandfather withheld; a live
+	// team-tier plaintext downgrade whose ID coincides with a log put-accept stays
+	// fail-closed DROPPED instead of being re-admitted — the confidentiality
+	// regression the windowing must not introduce).
+	replayMsgIDs map[string]struct{}
+
 	// Inventory is keyed by EntryID (= put message ID).
 	// Includes only accepted, non-expired entries.
 	inventory map[string]*InventoryEntry
