@@ -18,6 +18,22 @@ const domainPrefix = "exchange:domain:"
 // (seconds).
 const nanosPerSecond = int64(1_000_000_000)
 
+// isPubKeyHex reports whether s is a well-formed 32-byte x-only pubkey: exactly
+// 64 lowercase-or-uppercase hex characters. NIP-01 fixed-size tags (p, e) require
+// this; a value of any other length is rejected by compliant relays.
+func isPubKeyHex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // MaxAntecedents caps the number of causal antecedents (e-tags) a single
 // ingested event may carry. It bounds DAG fan-in and, with it, the orphan-
 // recovery REFETCH AMPLIFICATION a single event can force: the gap-recovery
@@ -82,8 +98,21 @@ func ToNostrEvent(msg *proto.Message) (*Event, error) {
 		}
 	}
 
-	// Author -> p-tag.
-	tags = append(tags, []string{tagP, msg.Sender})
+	// Author -> p-tag, but ONLY when Sender is a well-formed 32-byte (64-hex)
+	// pubkey. A NIP-01 fixed-size p-tag value MUST be 32 bytes; operator-authored
+	// events (settle/match/assign/buy-miss) carry a 16-byte LOCAL operator id as
+	// Sender (the local-fold identity, distinct from the 32-byte nostr operator
+	// key the outbox re-signs the event with). Emitting ["p", <16-byte>] produces
+	// a malformed fixed-size tag that every NIP-01 relay rejects with
+	// "invalid: unexpected size for fixed-size tag: p", which silently wedged the
+	// operator outbox — no settlement/match/assign ever reached the relay
+	// (dontguess-7d5). Dropping it is lossless: FromNostrEvent reconstructs Sender
+	// from PubKey and explicitly ignores the p-tag, and #p filters are unused
+	// (relayclient/settle.go). The re-signed author (PubKey) still carries the
+	// operator's real 32-byte key for VerifyOperatorAuthorship.
+	if isPubKeyHex(msg.Sender) {
+		tags = append(tags, []string{tagP, msg.Sender})
+	}
 
 	// Assign/scrip share a kind: preserve the exact sub-op.
 	if kind == KindAssign || kind == KindScrip {

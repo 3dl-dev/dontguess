@@ -54,14 +54,14 @@ type hookPublisher struct {
 	hook func(ev *identity.Event)
 }
 
-func (p *hookPublisher) PublishEvent(_ context.Context, ev *identity.Event) (bool, error) {
+func (p *hookPublisher) PublishEvent(_ context.Context, ev *identity.Event) (bool, string, error) {
 	p.mu.Lock()
 	p.ids = append(p.ids, ev.ID)
 	p.mu.Unlock()
 	if p.hook != nil {
 		p.hook(ev)
 	}
-	return true, nil
+	return true, "", nil
 }
 
 func (p *hookPublisher) publishedIDs() []string {

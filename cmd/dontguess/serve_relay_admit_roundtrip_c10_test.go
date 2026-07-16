@@ -144,7 +144,7 @@ func TestAdmitRoundTrip_BothGatesLive_NoRestart_c10(t *testing.T) {
 		publishRoster: func(ev *identity.Event) {
 			pctx, pcancel := context.WithTimeout(ctx, 3*time.Second)
 			defer pcancel()
-			if _, perr := legPub.PublishEvent(pctx, ev); perr != nil {
+			if _, _, perr := legPub.PublishEvent(pctx, ev); perr != nil {
 				t.Logf("roster republish over leg failed (non-fatal): %v", perr)
 			}
 		},

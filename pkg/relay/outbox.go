@@ -59,7 +59,11 @@ type localLog interface {
 // (ConnPublisher) rides a relay.Conn; tests inject a fake to drive ACK, reject,
 // and transient-failure paths deterministically.
 type EventPublisher interface {
-	PublishEvent(ctx context.Context, ev *identity.Event) (accepted bool, err error)
+	// PublishEvent returns the relay's OK verdict plus its human-readable message
+	// (the reason string on a reject). The message is surfaced in the retry log so
+	// a persistently-rejected event names its cause instead of retrying blind —
+	// e.g. "invalid: unexpected size for fixed-size tag: p" (dontguess-7d5).
+	PublishEvent(ctx context.Context, ev *identity.Event) (accepted bool, message string, err error)
 }
 
 // isRelayOrigin reports whether a record was ingested from a relay (Origin
@@ -414,7 +418,7 @@ func (o *Outbox) publishWithRetry(ctx context.Context, ev *identity.Event) error
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("outbox: publish %s: %w", ev.ID, err)
 		}
-		accepted, err := o.pub.PublishEvent(ctx, ev)
+		accepted, message, err := o.pub.PublishEvent(ctx, ev)
 		if err == nil && accepted {
 			return nil
 		}
@@ -422,7 +426,7 @@ func (o *Outbox) publishWithRetry(ctx context.Context, ev *identity.Event) error
 		if err != nil {
 			o.logf("outbox: publish %s attempt %d failed: %v", ev.ID, attempt, err)
 		} else {
-			o.logf("outbox: publish %s attempt %d REJECTED by relay (OK=false)", ev.ID, attempt)
+			o.logf("outbox: publish %s attempt %d REJECTED by relay (OK=false): %s", ev.ID, attempt, message)
 		}
 		if o.backoff.MaxAttempts > 0 && attempt >= o.backoff.MaxAttempts {
 			return fmt.Errorf("outbox: publish %s: gave up after %d attempts", ev.ID, attempt)
@@ -512,21 +516,21 @@ func NewConnPublisher(conn frameConn, logf func(format string, args ...interface
 // PublishEvent encodes and sends ev, then blocks reading frames until the relay
 // returns the OK for ev.ID. Frames for other events (or NOTICE/EOSE) are
 // ignored; a malformed frame is loud-logged and skipped.
-func (p *ConnPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (bool, error) {
+func (p *ConnPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (bool, string, error) {
 	frame, err := EncodeEvent(ev)
 	if err != nil {
-		return false, fmt.Errorf("connpublisher: encode EVENT %s: %w", ev.ID, err)
+		return false, "", fmt.Errorf("connpublisher: encode EVENT %s: %w", ev.ID, err)
 	}
 	if err := p.conn.Send(ctx, frame); err != nil {
-		return false, fmt.Errorf("connpublisher: send EVENT %s: %w", ev.ID, err)
+		return false, "", fmt.Errorf("connpublisher: send EVENT %s: %w", ev.ID, err)
 	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return false, fmt.Errorf("connpublisher: await OK for %s: %w", ev.ID, err)
+			return false, "", fmt.Errorf("connpublisher: await OK for %s: %w", ev.ID, err)
 		}
 		raw, err := p.conn.Recv(ctx)
 		if err != nil {
-			return false, fmt.Errorf("connpublisher: await OK for %s: %w", ev.ID, err)
+			return false, "", fmt.Errorf("connpublisher: await OK for %s: %w", ev.ID, err)
 		}
 		f, perr := ParseFrame(raw)
 		if perr != nil {
@@ -534,7 +538,7 @@ func (p *ConnPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (b
 			continue
 		}
 		if f.Type == LabelOK && f.EventID == ev.ID {
-			return f.Accepted, nil
+			return f.Accepted, f.Message, nil
 		}
 		// Any other frame (a NOTICE, an EOSE, or an OK for a different event) is
 		// not ours — keep reading.

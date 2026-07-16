@@ -36,18 +36,18 @@ func newFakePublisher() *fakePublisher {
 	}
 }
 
-func (p *fakePublisher) PublishEvent(_ context.Context, ev *identity.Event) (bool, error) {
+func (p *fakePublisher) PublishEvent(_ context.Context, ev *identity.Event) (bool, string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.attempts[ev.ID]++
 	p.published = append(p.published, ev.ID)
 	if p.reject[ev.ID] {
-		return false, nil
+		return false, "rejected by fake", nil
 	}
 	if n := p.failUntil[ev.ID]; n > 0 && p.attempts[ev.ID] <= n {
-		return false, errors.New("relay unreachable")
+		return false, "", errors.New("relay unreachable")
 	}
-	return true, nil
+	return true, "", nil
 }
 
 func (p *fakePublisher) publishedIDs() []string {
@@ -432,7 +432,7 @@ func TestConnPublisher_SendsEventAwaitsOK(t *testing.T) {
 	fc := &scriptFrameConn{reads: [][]byte{notice, otherOK, ourOK}}
 
 	pub := NewConnPublisher(fc, func(string, ...interface{}) {})
-	accepted, err := pub.PublishEvent(context.Background(), ev)
+	accepted, _, err := pub.PublishEvent(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("PublishEvent: %v", err)
 	}
@@ -464,7 +464,7 @@ type blockingPublisher struct {
 	blockedNow bool
 }
 
-func (b *blockingPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (bool, error) {
+func (b *blockingPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (bool, string, error) {
 	b.mu.Lock()
 	b.count++
 	n := b.count
@@ -476,7 +476,7 @@ func (b *blockingPublisher) PublishEvent(ctx context.Context, ev *identity.Event
 	b.blockedNow = true
 	b.mu.Unlock()
 	<-ctx.Done() // block until the "crash" (context cancellation)
-	return false, ctx.Err()
+	return false, "", ctx.Err()
 }
 
 func (b *blockingPublisher) blocked() bool {

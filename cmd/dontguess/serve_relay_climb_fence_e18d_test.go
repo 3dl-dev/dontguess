@@ -50,11 +50,11 @@ type recordingPublisher struct {
 	events []*identity.Event
 }
 
-func (p *recordingPublisher) PublishEvent(_ context.Context, ev *identity.Event) (bool, error) {
+func (p *recordingPublisher) PublishEvent(_ context.Context, ev *identity.Event) (bool, string, error) {
 	p.mu.Lock()
 	p.events = append(p.events, ev)
 	p.mu.Unlock()
-	return true, nil
+	return true, "", nil
 }
 
 func (p *recordingPublisher) snapshot() []*identity.Event {

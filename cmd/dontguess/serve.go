@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/3dl-dev/dontguess/pkg/embedscript"
 	"github.com/3dl-dev/dontguess/pkg/exchange"
 	"github.com/3dl-dev/dontguess/pkg/identity"
 	"github.com/3dl-dev/dontguess/pkg/matching"
@@ -312,6 +313,15 @@ func defaultEmbedScriptPath() string {
 		if _, err := os.Stat(c); err == nil {
 			return c
 		}
+	}
+
+	// No on-disk cmd/embed/main.py (the normal case for an INSTALLED binary — the
+	// release ships only the binary, not the repo tree). Fall back to the copy
+	// embedded in the binary via go:embed, extracted to a stable cache path. This
+	// is what makes dense embeddings work on an installed operator instead of
+	// silently degrading to TF-IDF (dontguess-6f0).
+	if p, err := embedscript.Path(); err == nil && p != "" {
+		return p
 	}
 	return ""
 }
@@ -667,7 +677,7 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 		legsMu.Unlock()
 		for _, p := range pubs {
 			pctx, pcancel := context.WithTimeout(ctx, rosterPublishTimeout)
-			if _, perr := p.PublishEvent(pctx, ev); perr != nil {
+			if _, _, perr := p.PublishEvent(pctx, ev); perr != nil {
 				logger.Printf("  allowlist: roster republish to a relay leg failed (live KeySet + config already updated; reconciles on next fold): %v", perr)
 			}
 			pcancel()

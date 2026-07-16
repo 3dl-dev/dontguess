@@ -883,7 +883,7 @@ func (w *relayWiring) runReader(ctx context.Context, recv frameReceiver, pub *de
 			}
 		case relay.LabelOK:
 			if pub != nil {
-				pub.routeOK(f.EventID, f.Accepted)
+				pub.routeOK(f.EventID, f.Accepted, f.Message)
 			}
 		}
 	}
@@ -1109,6 +1109,7 @@ func guardOperatorKeyMigration(ls *dgstore.Store, operatorKeyHex string, logf fu
 // re-established (§2.5, the "Outbox publish cannot wedge" invariant).
 type okResult struct {
 	accepted bool
+	message  string // relay's human-readable OK note (reject reason); dontguess-7d5
 	dropped  bool
 }
 
@@ -1133,10 +1134,10 @@ func newDemuxPublisher(send frameSender) *demuxPublisher {
 
 // PublishEvent sends ev and blocks for the reader-routed OK. It registers the
 // waiter BEFORE sending so an OK that races back cannot be missed.
-func (p *demuxPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (bool, error) {
+func (p *demuxPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (bool, string, error) {
 	frame, err := relay.EncodeEvent(ev)
 	if err != nil {
-		return false, fmt.Errorf("demux publish: encode EVENT %s: %w", ev.ID, err)
+		return false, "", fmt.Errorf("demux publish: encode EVENT %s: %w", ev.ID, err)
 	}
 	ch := make(chan okResult, 1)
 	p.mu.Lock()
@@ -1149,11 +1150,11 @@ func (p *demuxPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (
 	}()
 
 	if err := p.send.Send(ctx, frame); err != nil {
-		return false, fmt.Errorf("demux publish: send EVENT %s: %w", ev.ID, err)
+		return false, "", fmt.Errorf("demux publish: send EVENT %s: %w", ev.ID, err)
 	}
 	select {
 	case <-ctx.Done():
-		return false, fmt.Errorf("demux publish: await OK for %s: %w", ev.ID, ctx.Err())
+		return false, "", fmt.Errorf("demux publish: await OK for %s: %w", ev.ID, ctx.Err())
 	case r := <-ch:
 		if r.dropped {
 			// The reader lost the connection with this publish in flight. Return a
@@ -1161,9 +1162,9 @@ func (p *demuxPublisher) PublishEvent(ctx context.Context, ev *identity.Event) (
 			// Outbox's publishWithRetry retries; after the reader re-subscribes the
 			// demux is live again and the retried publish's OK routes normally. This
 			// is what keeps ONE disconnect from wedging Outbox.Run forever (§2.5).
-			return false, fmt.Errorf("demux publish: connection dropped awaiting OK for %s: %w", ev.ID, relay.ErrConnDropped)
+			return false, "", fmt.Errorf("demux publish: connection dropped awaiting OK for %s: %w", ev.ID, relay.ErrConnDropped)
 		}
-		return r.accepted, nil
+		return r.accepted, r.message, nil
 	}
 }
 
@@ -1188,7 +1189,7 @@ func (p *demuxPublisher) failInFlight() {
 // routeOK delivers a relay ACK to the publisher goroutine blocked on eventID. An
 // OK for an unknown/already-resolved id is a harmless no-op (the send is
 // non-blocking on a buffered-1 channel).
-func (p *demuxPublisher) routeOK(eventID string, accepted bool) {
+func (p *demuxPublisher) routeOK(eventID string, accepted bool, message string) {
 	p.mu.Lock()
 	ch := p.waiters[eventID]
 	p.mu.Unlock()
@@ -1196,7 +1197,7 @@ func (p *demuxPublisher) routeOK(eventID string, accepted bool) {
 		return
 	}
 	select {
-	case ch <- okResult{accepted: accepted}:
+	case ch <- okResult{accepted: accepted, message: message}:
 	default:
 	}
 }

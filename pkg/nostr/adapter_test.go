@@ -331,6 +331,64 @@ func TestAuthorMapsToPTagAndPubkey(t *testing.T) {
 	}
 }
 
+// TestOperatorLocalIdSenderOmitsPTag is the dontguess-7d5 regression: operator-
+// authored events (settle/match/assign/buy-miss) carry a 16-byte LOCAL operator
+// id as Sender (distinct from the 32-byte nostr key the outbox re-signs with).
+// A NIP-01 fixed-size p-tag MUST be 32 bytes, so emitting ["p", <16-byte>]
+// produced "invalid: unexpected size for fixed-size tag: p" and every compliant
+// relay rejected the event — silently wedging the operator outbox. ToNostrEvent
+// must omit the p-tag entirely when Sender is not a well-formed 32-byte pubkey.
+func TestOperatorLocalIdSenderOmitsPTag(t *testing.T) {
+	const localOperatorID = "028c7e1e6c71d2939bbe647347751f9e" // 16 bytes = 32 hex
+
+	// A realistic operator settle event: settle + phase + verdict tags.
+	in := &proto.Message{
+		ID:          sampleID,
+		Sender:      localOperatorID,
+		Tags:        []string{exchange.TagSettle, "exchange:phase:put-accept", "exchange:verdict:accepted"},
+		Antecedents: []string{sampleAnte0},
+		Timestamp:   1784215384169701254,
+		CampfireID:  "local",
+	}
+	ev, err := ToNostrEvent(in)
+	if err != nil {
+		t.Fatalf("ToNostrEvent: %v", err)
+	}
+
+	// No p-tag at all — the 16-byte id has no valid NIP-01 fixed-size home.
+	for _, tag := range ev.Tags {
+		if len(tag) > 0 && tag[0] == tagP {
+			t.Fatalf("p-tag emitted for a 16-byte local operator id: %v (relay would reject the whole event)", tag)
+		}
+	}
+
+	// Every fixed-size tag that IS emitted (e/p) must carry a 32-byte hex value,
+	// so no compliant relay rejects the event.
+	for _, tag := range ev.Tags {
+		if len(tag) >= 2 && (tag[0] == tagE || tag[0] == tagP) {
+			if !isPubKeyHex(tag[1]) {
+				t.Errorf("fixed-size tag %q has non-32-byte value %q", tag[0], tag[1])
+			}
+		}
+	}
+
+	// A well-formed 32-byte sender still gets its p-tag (guard the guard).
+	in.Sender = sampleSender
+	ev2, err := ToNostrEvent(in)
+	if err != nil {
+		t.Fatalf("ToNostrEvent (valid sender): %v", err)
+	}
+	found := false
+	for _, tag := range ev2.Tags {
+		if len(tag) >= 2 && tag[0] == tagP && tag[1] == sampleSender {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("p-tag missing for a valid 32-byte sender")
+	}
+}
+
 func TestDomainMapsToTopicTag(t *testing.T) {
 	in := mkMsg(exchange.TagPut, []string{"exchange:domain:matching"}, nil)
 	ev, err := ToNostrEvent(in)

@@ -575,7 +575,9 @@ func reSignPersisted(t *testing.T, ls *dgstore.Store, operator identity.Signer, 
 // publish leg is irrelevant to the property under test (the restart-seed).
 type nopPublisher struct{}
 
-func (nopPublisher) PublishEvent(context.Context, *identity.Event) (bool, error) { return true, nil }
+func (nopPublisher) PublishEvent(context.Context, *identity.Event) (bool, string, error) {
+	return true, "", nil
+}
 
 // --- 3. HOT-PATH ISOLATION ---------------------------------------------------
 
