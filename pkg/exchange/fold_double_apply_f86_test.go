@@ -280,3 +280,190 @@ func TestFoldDoubleApply_RecordFoldDenial(t *testing.T) {
 		t.Fatalf("denials = %d after poll-vs-rebuild interleave, want exactly 1", denials)
 	}
 }
+
+// TestFoldDoubleApply_HopDepthCounter proves the poll-vs-rebuild fold
+// interleave double-samples senderHopDepth (trackSenderHopDepth,
+// state_federation.go) absent the hopDepthCounted guard. trackSenderHopDepth
+// is called unconditionally from applyLocked for EVERY message with a
+// non-empty Sender (state_core.go ~line 250), so a single arbitrary message
+// is sufficient to reproduce the race — no settle chain required.
+//
+// Pre-fix this appends a duplicate hop-depth sample (len(SenderHopDepths) ==
+// 2) and skews the median-based FederationNodeProfile.TrustScore hop-depth
+// term. Post-fix (hopDepthCounted dedup guard) it must observe exactly one
+// sample no matter how many times the same message is re-applied.
+func TestFoldDoubleApply_HopDepthCounter(t *testing.T) {
+	operatorKey := newReservationID()
+	sender := newReservationID()
+
+	st := NewState()
+	st.OperatorKey = operatorKey
+
+	msg := Message{
+		ID:          newReservationID(),
+		Sender:      sender,
+		Tags:        []string{TagBuy},
+		Antecedents: []string{newReservationID(), newReservationID()}, // hop depth 2
+		Timestamp:   time.Now().UnixNano(),
+	}
+	msg.Payload = localBuyDropBuyPayload(t, "medieval French troubadour poetry translation", 400)
+
+	full := []Message{msg}
+
+	// Model the poll loop: it claimed the fold gap [0:1) under localMu and is
+	// about to apply the single message, UNLOCKED, when it is preempted
+	// BEFORE its own Apply call runs — i.e. this message has not yet been
+	// live-folded by the poll loop.
+	if depths := st.SenderHopDepths(sender); len(depths) != 0 {
+		t.Fatalf("precondition: SenderHopDepths(sender) = %v, want 0 samples before any fold", depths)
+	}
+
+	// A concurrent rebuildAndDispatchGapLocal now wins the race: its own
+	// snapshot has total > localSeen, so it runs a FULL state.Replay over the
+	// whole log — including the message the poll loop has not yet reached.
+	// This is the EXACT call the grow branch of rebuildAndDispatchGapLocal
+	// makes (engine_core.go ~1177: `e.state.Replay(msgs)`). Replay resets and
+	// rebuilds senderHopDepth from scratch, so this contributes exactly one
+	// sample.
+	st.Replay(full)
+	if depths := st.SenderHopDepths(sender); len(depths) != 1 {
+		t.Fatalf("after rebuild's full Replay, SenderHopDepths(sender) = %v, want exactly 1 sample (rebuild folds the log exactly once)", depths)
+	}
+
+	// The poll loop resumes, unaware the rebuild already folded its claimed
+	// message via Replay, and applies its own stale reference to the SAME
+	// message a second time — reproducing the exact engine_core.go call
+	// (foldAndDispatchLocalSnapshot's unlocked continuation of State.Apply).
+	st.Apply(&full[0])
+
+	depthsAfter := st.SenderHopDepths(sender)
+	if len(depthsAfter) != 1 {
+		t.Fatalf("SenderHopDepths(sender) = %v (len %d) after poll-vs-rebuild interleave, want exactly 1 sample — "+
+			"trackSenderHopDepth was double-applied (dontguess-f86): once inside rebuildAndDispatchGapLocal's "+
+			"full state.Replay, once by foldAndDispatchLocalSnapshot's stale unlocked Apply continuation",
+			depthsAfter, len(depthsAfter))
+	}
+}
+
+// TestFoldDoubleApply_SmallContentDisputeCounter proves the poll-vs-rebuild
+// fold interleave double-applies the small-content auto-refund penalty
+// (applySettleSmallContentDispute, state_settle.go) absent the disputeCounted
+// guard: smallContentDisputes[entryID]++ and stats.SmallContentRefundCount++
+// are raw counter increments with no natural per-message-ID map to dedup
+// against.
+//
+// Pre-fix this double-counts both smallContentDisputes[entryID] and the
+// seller's SmallContentRefundCount (a -3 reputation penalty applied twice).
+// Post-fix (disputeCounted dedup guard) both counters must observe exactly
+// one dispute no matter how many times the dispute message is re-applied.
+func TestFoldDoubleApply_SmallContentDisputeCounter(t *testing.T) {
+	dir := t.TempDir()
+	ls, err := dgstore.Open(filepath.Join(dir, "events.jsonl"))
+	if err != nil {
+		t.Fatalf("dgstore.Open: %v", err)
+	}
+	t.Cleanup(func() { ls.Close() }) //nolint:errcheck
+
+	operatorKey := newReservationID()
+	seller := newReservationID()
+	buyer := newReservationID()
+
+	eng := NewEngine(EngineOptions{
+		CampfireID:        "local",
+		LocalStore:        ls,
+		OperatorPublicKey: operatorKey,
+		Logger:            func(format string, args ...any) { t.Logf("[engine] "+format, args...) },
+	})
+	if err := eng.replayAll(); err != nil {
+		t.Fatalf("initial replayAll: %v", err)
+	}
+
+	// Put content with token_cost below SmallContentThreshold (500) but ≥
+	// MinTokenCost (200, the ed1 quality-gate floor) so applyPut accepts it
+	// and applySettleSmallContentDispute's isSmall check passes.
+	put1 := newReservationID()
+	mustAppend(t, ls, dgstore.Record{
+		ID:         put1,
+		CampfireID: "local",
+		Sender:     seller,
+		Payload:    localBuyDropPutPayload(t, "one-line shell alias", 250),
+		Tags:       []string{TagPut, "exchange:content-type:code", "exchange:domain:shell"},
+		Timestamp:  time.Now().UnixNano(),
+	})
+	if err := eng.AutoAcceptPut(put1, 180, time.Now().Add(72*time.Hour)); err != nil {
+		t.Fatalf("AutoAcceptPut(put1): %v", err)
+	}
+	inv := eng.State().Inventory()
+	if len(inv) != 1 {
+		t.Fatalf("expected 1 inventory entry after accept, got %d", len(inv))
+	}
+	entryID := inv[0].EntryID
+
+	msgs := buildDeliverChainMessages(t, ls, operatorKey, seller, buyer, entryID)
+
+	// Append a buyer-initiated small-content dispute, antecedent = the deliver
+	// message (the last message in the chain).
+	deliverID := msgs[len(msgs)-1].ID
+	disputeID := newReservationID()
+	disputePayload, _ := json.Marshal(map[string]any{
+		"entry_id": entryID,
+	})
+	mustAppend(t, ls, dgstore.Record{
+		ID:          disputeID,
+		CampfireID:  "local",
+		Sender:      buyer,
+		Payload:     disputePayload,
+		Tags:        []string{TagSettle, TagPhasePrefix + SettlePhaseStrSmallContentDispute},
+		Antecedents: []string{deliverID},
+		Timestamp:   time.Now().UnixNano(),
+	})
+
+	allMsgs, err := ls.Replay()
+	if err != nil {
+		t.Fatalf("ls.Replay: %v", err)
+	}
+
+	st := NewState()
+	st.OperatorKey = operatorKey
+
+	// Model the poll loop: it has applied every message EXCEPT the dispute
+	// (the last message in the log) when it is preempted.
+	last := len(allMsgs) - 1
+	for i := 0; i < last; i++ {
+		st.Apply(&allMsgs[i])
+	}
+	if n := st.SmallContentDisputeCount(entryID); n != 0 {
+		t.Fatalf("precondition: SmallContentDisputeCount = %d before dispute applied, want 0", n)
+	}
+	if n := st.SellerSmallContentRefundCount(seller); n != 0 {
+		t.Fatalf("precondition: SellerSmallContentRefundCount = %d before dispute applied, want 0", n)
+	}
+
+	// A concurrent rebuildAndDispatchGapLocal now wins the race: its own
+	// snapshot (the SAME full log) has total > localSeen, so it runs a FULL
+	// state.Replay over every message — including the dispute the poll loop
+	// has not yet reached. This is the EXACT call the grow branch of
+	// rebuildAndDispatchGapLocal makes (engine_core.go ~1177: `e.state.Replay(msgs)`).
+	st.Replay(allMsgs)
+	if n := st.SmallContentDisputeCount(entryID); n != 1 {
+		t.Fatalf("after rebuild's full Replay, SmallContentDisputeCount = %d, want 1 (rebuild folds the log exactly once)", n)
+	}
+	if n := st.SellerSmallContentRefundCount(seller); n != 1 {
+		t.Fatalf("after rebuild's full Replay, SellerSmallContentRefundCount = %d, want 1 (rebuild folds the log exactly once)", n)
+	}
+
+	// The poll loop resumes, unaware the rebuild already folded its claimed
+	// tail via Replay, and applies its own stale reference to the SAME
+	// dispute message a second time — reproducing the exact engine_core.go call.
+	st.Apply(&allMsgs[last])
+
+	if n := st.SmallContentDisputeCount(entryID); n != 1 {
+		t.Fatalf("SmallContentDisputeCount = %d after poll-vs-rebuild interleave, want exactly 1 — "+
+			"small-content dispute was double-applied (dontguess-f86): once inside rebuildAndDispatchGapLocal's "+
+			"full state.Replay, once by foldAndDispatchLocalSnapshot's stale unlocked Apply continuation", n)
+	}
+	if n := st.SellerSmallContentRefundCount(seller); n != 1 {
+		t.Fatalf("SellerSmallContentRefundCount = %d after poll-vs-rebuild interleave, want exactly 1 — "+
+			"the -3 reputation penalty was double-applied (dontguess-f86)", n)
+	}
+}
