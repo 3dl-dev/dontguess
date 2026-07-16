@@ -45,3 +45,5 @@ docs/findings/
 *.pem
 /seller
 /dist/
+scripts/__pycache__/
+*.pyc
