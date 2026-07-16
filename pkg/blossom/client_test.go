@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
@@ -110,19 +109,19 @@ func TestClient_Put_Idempotent(t *testing.T) {
 // so an unauthenticated peer could OOM the caller).
 func TestClient_Fetch_OversizeResponse_Rejected(t *testing.T) {
 	const chunk = 1 << 20 // 1 MiB per write
-	var bytesWritten int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
 		buf := bytes.Repeat([]byte{0x41}, chunk)
-		// Stream well past maxFetchBytes (1 MiB + 64 KiB) so this proves the
-		// client itself stops reading rather than relying on the host to be
-		// well-behaved. Cap the loop so a passing client (which aborts early)
-		// doesn't hang the test if something regresses.
+		// Stream well past maxFetchBytes (1 MiB + 64 KiB). The server keeps
+		// writing until the client's conn-close propagates, which is
+		// timing-dependent (and lags further under -race CPU starvation) —
+		// so this test must NOT assert on how many bytes the server managed
+		// to write (dontguess-676). It only needs to offer more than the cap
+		// so the client's own io.LimitReader is what stops the read. Cap the
+		// loop so a regressed (unbounded) client doesn't hang the test.
 		for i := 0; i < 64; i++ { // up to 64 MiB, far beyond the ~1.06 MiB cap
-			n, err := w.Write(buf)
-			atomic.AddInt64(&bytesWritten, int64(n))
-			if err != nil {
+			if _, err := w.Write(buf); err != nil {
 				// Client closed the connection after hitting the cap — expected.
 				return
 			}
@@ -134,12 +133,21 @@ func TestClient_Fetch_OversizeResponse_Rejected(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := NewClient(srv.URL)
-	_, err := c.Fetch("deadbeef")
+	got, err := c.Fetch("deadbeef")
 	if err == nil {
 		t.Fatalf("Fetch of oversize response: want error, got nil (unbounded read — OOM risk)")
 	}
-	if w := atomic.LoadInt64(&bytesWritten); w > maxFetchBytes*8 {
-		t.Fatalf("server wrote %d bytes before client gave up; want the client to stop close to the %d-byte cap, not read unbounded", w, maxFetchBytes)
+	if got != nil {
+		t.Fatalf("Fetch of oversize response: want nil body on error, got %d bytes", len(got))
+	}
+	// The guarantee under test is the client-side io.LimitReader cap
+	// (maxFetchBytes+1, see Fetch in client.go): the error must be the
+	// specific "exceeds max fetch size" rejection produced once the capped
+	// reader is exhausted, not some other read error (e.g. a connection
+	// reset) that would also make err non-nil but prove nothing about the
+	// cap actually engaging.
+	if !strings.Contains(err.Error(), "exceeds max fetch size") {
+		t.Fatalf("Fetch of oversize response: want size-cap rejection error, got: %v", err)
 	}
 }
 
