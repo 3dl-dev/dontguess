@@ -9,6 +9,13 @@ from this document. Custodial mode remains a separate later item** — but its i
 **Date:** 2026-07-15
 **Author:** Convention Designer (Opus) — dontguess-f03
 **Model tier:** Opus (federation trust + crypto), never Fable.
+
+**AMENDED 2026-07-16 (operator ruling, dontguess-f03):** the cross-operator settlement rail is
+re-based off cash. x402/USDC is **removed entirely** from federation; §8 is rewritten as a
+**local-mint scrip + token-cost mutual-credit clearing** model (a leeching peer accrues durable scrip
+debt against its own operator identity). §0.8, §2, §3.1/§3.2/§3.4/§3.7, §7, §9, §10, §11-Q2 are updated
+to match. All non-settlement rulings (§1 transport, §4 integrity, §5 resell, §6 router flow, §7
+trust-from-local-observation, §9 revoke semantics) stand unchanged.
 **Depends on / source of truth:**
 `docs/design/onboarding-tiered-scaling-federation.md` §5/§9/§10 (the ruled ladder — authoritative),
 `docs/design/content-confidentiality-envelope-541.md` (§541 — the confidentiality invariant that gates everything),
@@ -30,18 +37,18 @@ Where this doc and federation.md/federation-modes.md conflict, **this doc wins f
 5. **ROUTER mode** cross-operator match/deliver flow with the §541 plaintext set held at exactly `{A}` (§6).
 6. **ADV-9 custodial content-integrity rebuild** — RULED per §10 Q2: **seller-signed salted plaintext commitment, revealed post-purchase** (Option A). Option B (operator-B provenance chain) rejected with reasons (§4).
 7. **ADV-11 trust-signal ruling** formalized: the exact local-observation signals, and the exact self-report signals that are **structurally excluded** (§7).
-8. **x402 pre-funded escrow** settlement for un-graduated operators — pre-fund → per-match debit → reconcile → graduate (§8).
+8. **Cross-operator settlement** via local-mint scrip + a token-cost mutual-credit clearing ledger — no cash rail; per-match debit → graduated credit limit → reconcile-as-netting; a leeching peer accrues durable scrip debt (§8).
 9. **Revocation** semantics — bilateral instant-revoke, what survives it, in-flight match handling (§9).
 10. **§541 reconciliation** — cross-operator wire-id/store-id aliasing reuses the 55c `RegisterWireAlias` seam; the dedup fold stays home-operator-local (§6.4).
 
 **NOT decided here (stays DEFERRED / needs a human ruling — §11):**
 
 - **Mode 5 open/global liquidity** — DEFERRED per `onboarding-tiered-scaling-federation.md` §10 Q3.
-  This doc rules bilateral-only + x402-stake and does **not** design open-network sybil economics.
+  This doc rules bilateral-only + earned-credit (no cash stake) and does **not** design open-network sybil economics.
 - **Custodial mode *implementation*** ships as a later item after router (P10) lands. Its integrity
   mechanism is ruled here; its E2E re-wrap proof is a separate gate.
-- Exact numeric x402 escrow floor / exposure cap / graduation threshold values (§8 leaves the
-  mechanism ruled and the constants as an operator-tunable config with recommended defaults).
+- Exact numeric credit-limit / graduation-increment / exposure-cap values (§8 leaves the mechanism
+  ruled and the constants as operator-tunable config with recommended defaults).
 
 ---
 
@@ -98,9 +105,7 @@ pubkey to a scoped roster slot on your relay (§3.1).
   "relays": ["wss://relay-a.example:7777", "wss://relay-a2.example:7777"],
   "display_name": "baron.dontguess",
   "domains": ["matching","exchange","pricing"],       // advisory topical hint, tainted
-  "x402_receiver": "<usdc receiving address for un-graduated escrow, §8>",
-  "min_stake_usdc": "5.00",                             // advertised escrow floor to open a bilateral (§8)
-  "modes_offered": ["router"]                           // "custodial" appears ONLY after custodial ships
+  "modes_offered": ["router"]                          // "custodial" appears ONLY after custodial ships
 }
 ```
 
@@ -137,7 +142,7 @@ A: propose ──▶ B: accept ──▶ (agreement live)
                       │
    B: inventory-offer ◀── (each operator streams its offered, resell-eligible inventory metadata)
                       │
-A-buyer match ─▶ A: match-request ──▶ B: match-confirm ──▶ A delivers (router) ──▶ A: reconcile (escrow debit)
+A-buyer match ─▶ A: match-request ──▶ B: match-confirm ──▶ A delivers (router) ──▶ A: reconcile (net-owed true-up)
                       │
    either: revoke ──▶ (agreement dead; §9)
 ```
@@ -157,8 +162,8 @@ Operator A offers a bilateral, scoped, revocable agreement to B.
     "direction": "bidirectional",           // or "a-offers" / "a-consumes" — reciprocal-ratio terms live here
     "max_in_flight_matches": 64,            // A's cap on concurrent un-reconciled cross-operator matches
     "settlement": {
-      "rail": "x402-escrow",                // un-graduated default (§8); "bilateral-credit" only post-graduation
-      "escrow_floor_usdc": "5.00",
+      "rail": "scrip-clearing",             // §8 — the only rail; token-cost mutual-credit ledger, no cash
+      "credit_limit_initial": 0,            // token-cost; cold-start floor, grows by graduation (§8.3)
       "reconcile_cadence": "1h"
     }
   },
@@ -189,16 +194,16 @@ confirm out-of-band key verification and stake (§8) before this event is emitte
   "agreement_id": "<sha256(sorted(A||B) || proposed_at)>",   // deterministic bilateral id, both sides compute identically
   "accepted_scope": { "...": "B's counter-scope; the effective scope is the INTERSECTION of propose∩accept" },
   "b_relays": ["wss://relay-b.example:7777"],
-  "b_x402_receiver": "<usdc addr>",
-  "escrow_funding_ref": "<x402 pre-fund receipt id, §8>",     // REQUIRED if either side is un-graduated
   "accepted_at": 1731700100
 }
 ```
 
 - **Effective scope = `propose.scope ∩ accept.accepted_scope`** — neither side can widen the other's
   terms. Both operators persist the effective scope keyed by `agreement_id`.
-- If either operator is un-graduated (§8), `escrow_funding_ref` MUST reference a confirmed pre-fund;
-  an accept without it is dropped by the counterparty's fold (fail-closed, no free credit — ADV-12).
+- No pre-funding: a fresh agreement starts at credit limit L = 0 on both sides (§8.3). Neither side can
+  draw before it contributes, so the first cross-operator matches must flow from the *contributing*
+  direction. Cold-start liquidity is **earned, not deposited** — ADV-12 sybil-resistance is the L = 0
+  cold start + graduation, not a cash stake.
 
 ### 3.3 `federation:inventory-offer`
 
@@ -251,17 +256,18 @@ reservation to B.
   "entry_id": "<B-origin entry id>",
   "buyer_pubkey": "<A's buyer x-only pubkey — DERIVED FROM A's antecedent chain, never payload-supplied>",
   "a_match_wire_id": "<A's match event wire id (post-Outbox re-sign, per 55c)>",
-  "reservation_proof": {
-    "escrow_debit_ref": "<x402 escrow line A is committing for this match, §8>",   // un-graduated
-    "or_bilateral_credit_ref": "<post-graduation credit line id>"                   // graduated
+  "credit_debit": {
+    "token_cost": 1234,                     // §8.2 — debited to net_owed(A→B); refused if it exceeds L(B→A)
+    "net_owed_after": 4567                  // A's asserted running balance post-debit; B checks it against its own view
   },
   "requested_at": 1731700300
 }
 ```
 
-- A only emits this **after** A's own buyer holds a live scrip reservation on A's ledger (the
+- A only emits this **after** A's own buyer holds a live A-scrip reservation on A's ledger (the
   local deliver gate, engine_settle.go:994-1000, is unchanged — scrip stays local, F2). The
-  cross-operator settlement is a **separate** x402/credit line (§8), not a scrip transfer.
+  cross-operator obligation is a **separate token-cost debit** on the mutual-credit ledger (§8) —
+  never a scrip transfer and never cash.
 
 ### 3.5 `federation:match-confirm`
 
@@ -309,7 +315,7 @@ Either operator kills the agreement. Instant, unilateral, unconditional (F1).
 ### 3.7 `federation:reconcile`
 
 Periodic (per `reconcile_cadence`) bilateral settlement of cross-operator matches. Reuses the local
-settle vocabulary but over the x402/credit line, not scrip.
+settle vocabulary but over the token-cost mutual-credit clearing ledger, not scrip.
 
 ```json
 {
@@ -318,17 +324,18 @@ settle vocabulary but over the x402/credit line, not scrip.
   "from_operator": "<A pubkey>",
   "period": { "from": 1731696900, "to": 1731700500 },
   "matches": [
-    { "a_match_wire_id": "<...>", "entry_id": "<...>", "amount_usdc": "0.012", "outcome": "delivered" }
+    { "a_match_wire_id": "<...>", "entry_id": "<...>", "token_cost": 1234, "outcome": "delivered" }
   ],
-  "escrow_settlement_ref": "<x402 settlement tx, §8>",
+  "net_owed_asserted": 4567,     // §8.4 — sender's view of the running balance; receiver asserts it equals its own or disputes
   "running_reputation_note": "advisory — receiver recomputes trust from ITS OWN observations (§7), never trusts this",
   "reconciled_at": 1731700500
 }
 ```
 
-- **Overdue reconcile → trust penalty (-10, federation.md §4) → possible auto-revoke.** Because
-  un-graduated settlement is **pre-funded escrow**, an overdue reconcile never means A got content free
-  — the escrow already debited (§8). Reconcile is a bookkeeping true-up, not a payment on credit.
+- **Overdue reconcile → trust penalty (−10, federation.md §4) → possible auto-revoke.** Live exposure
+  is hard-bounded by the credit limit L at all times (§8.3), so an overdue reconcile never means
+  unbounded free content — the creditor simply stops extending credit once L is hit. Reconcile moves no
+  value; it is a netting true-up confirming both sides' `net_owed` views agree (§8.4).
 
 ---
 
@@ -462,7 +469,7 @@ Concretely, extending §541 §3.4 across the operator boundary:
 1. A's buyer matches B-origin `entry_id` (metadata was in B's `inventory-offer`, §3.3).
 2. A emits `federation:match-request` carrying **A's buyer pubkey** (derived from A's antecedent
    chain, never payload-supplied — §541 §3.4 anti-replay binding) + a funded reservation proof (§8).
-3. B verifies the reservation proof (escrow line committed), then B computes
+3. B verifies the reservation proof (the match's `token_cost` fits within A's credit limit L, §8.3), then B computes
    `wrapped_cek_buyer = NIP-44(B_priv, A_buyerPub, CEK)` and emits a **standard §541 deliver (kind
    3404, phase=deliver)** on **B's exchange**, addressed (`recipient`) to A's buyer pubkey, referencing
    B's already-public ciphertext + `ciphertext_hash`. B also emits `federation:match-confirm` (§3.5) to
@@ -536,7 +543,8 @@ admissible and which are **structurally excluded**.
 
 Start 50/100; soft-suspend (exclude B's inventory from A's match results) < 40; auto-revoke < 20
 (federation.md §4). All Δ are computed from events **A folded on A's own exchange** — never from a
-number B sent.
+number B sent. The same score gates the §8 credit limit `L(A→peer)`: L graduates up above trust 80,
+freezes below 40, and any default / buyer-favor dispute that drops trust also drops L (§8.3).
 
 **Structurally excluded (never weighted, even as a tiebreak):**
 
@@ -549,42 +557,74 @@ number B sent.
 
 **Why this is sound:** the trust score is a function purely of `A`'s local event log. A malicious B
 cannot move its own score on A except by actually delivering good outcomes to A's real buyers (which is
-indistinguishable from honesty) or by paying real x402 (§8). Self-report has **zero** weight, so
+indistinguishable from honesty) or by delivering real reciprocal value that earns credit (§8). Self-report has **zero** weight, so
 sybil trust-inflation has no attack surface.
 
 ---
 
-## 8. x402 pre-funded escrow settlement — RULING
+## 8. Cross-operator settlement — RULING: local-mint scrip + a token-cost mutual-credit clearing ledger (NO cash)
 
-Un-graduated / untrusted operators settle cross-operator matches via **pre-funded x402 escrow, never
-trailing bilateral credit** (F4 / ADV-12). Trailing credit lets a defaulting operator rotate to a
-fresh identity before reconciling and get content free; pre-funding makes default impossible.
+**There is no cash rail.** x402/USDC is removed entirely from federation. It returns only if a future
+multi-party buy-in is explicitly proposed and *all* participating operators agree — deferred
+indefinitely (v1 assumes one operator plus invited peers, no cash demand). Cross-operator value moves
+as **scrip cleared through a bilateral mutual-credit ledger denominated in token-cost**, the one unit
+no operator can mint.
+
+**Invariant (F2, strengthened — mint stays strictly local):** every operator mints its own scrip and
+spends it only inside its own economy. **No operator ever accepts another operator's mint at face.** A
+buyer on A always pays *A-scrip* to A; the cross-operator obligation is tracked separately, in
+token-cost, and the two ledgers never merge. There is no scrip FX (a rate between two freely-mintable
+currencies is gamed by whoever mints faster) — the cross-operator unit of account is **token-cost**
+(the inference tokens the cached work saves, already scrip's denomination base), which is *earned* by
+delivering value and cannot be minted.
 
 **Mechanism (ruled; constants operator-tunable with recommended defaults):**
 
-1. **Pre-fund at accept.** Before `federation:accept` completes, the un-graduated operator deposits
-   USDC to the peer's `x402_receiver` (beacon §2) up to at least `escrow_floor_usdc` (recommended
-   default: `$5`, or `max_in_flight_matches × typical_match_price`, whichever is larger). The
-   `escrow_funding_ref` on the accept (§3.2) references the confirmed deposit. No pre-fund ⇒ accept
-   dropped fail-closed.
-2. **Per-match debit at match-request.** Each `federation:match-request` (§3.4) carries an
-   `escrow_debit_ref` committing a line against the pre-funded balance. If the remaining balance <
-   match price, the match is refused (`match-confirm.confirmed=false`, reason `escrow-exhausted`) —
-   the buyer on A is refunded its local scrip hold; A must top up escrow to continue. **Content is
-   never delivered against an uncommitted line.**
-3. **Reconcile as true-up.** `federation:reconcile` (§3.7) settles the debited lines against actual
-   outcomes (delivered / refunded) and the x402 settlement tx moves the net. Because the money was
-   pre-committed, reconcile is bookkeeping, not a payment-on-credit — an overdue or absent reconcile
-   costs the debtor nothing it hasn't already funded.
-4. **Graduation → bilateral credit unlocks, bounded.** After a configurable clean history (recommended:
-   trust ≥ 80 sustained over ≥ N reconcile cycles with zero buyer-favor disputes), the pair MAY switch
-   `settlement.rail` to `bilateral-credit` with a **bounded exposure cap** (recommended: one
-   `reconcile_cadence` window of typical volume). Exceeding the cap forces a reconcile before more
-   matches. Graduation is per-agreement, revocable (a single default drops the pair back to escrow).
+1. **The clearing ledger.** For each agreement both operators maintain a running signed balance
+   `net_owed(A→B)` in token-cost = Σ(`token_cost` of B-origin entries A's buyers consumed) −
+   Σ(`token_cost` of A-origin entries B's buyers consumed). One scalar per pair plus a per-match log
+   for audit/reconcile. Positive ⇒ A owes B (symmetric for B). Genuinely reciprocal trade trends the
+   balance toward zero.
+2. **Per-match debit.** Each `federation:match-request` (§3.4) commits a debit of the entry's
+   `token_cost` to the requester's side of the ledger (replaces the removed x402 escrow line). The
+   "reservation proof" is now simply: *this match fits within the requester's remaining credit with the
+   peer*. Content is never delivered against a match that would exceed the credit limit (step 3).
+3. **Credit limit + graduation (the leech bound).** B extends A a bounded credit limit `L(B→A)` in
+   token-cost — the maximum net debt B tolerates before refusing further matches. **Cold start L = 0**
+   (or a small floor): a brand-new / zero-history peer cannot draw before it contributes — *sell in to
+   earn draw*. L grows by **graduation**: as A contributes (A-origin entries B's buyers consume,
+   delivered-and-not-disputed), A's demonstrated reciprocal value raises L, driven by the §7 trust
+   score (trust ≥ threshold ⇒ L increments; a default / buyer-favor dispute drops trust and L).
+   Exceeding L ⇒ `federation:match-confirm.confirmed=false`, reason `credit-exhausted` ⇒ A's buyer is
+   refunded its local A-scrip hold; A must contribute (or let reconcile net the balance down) to free
+   credit.
+4. **Reconcile as netting true-up (no payment).** `federation:reconcile` (§3.7) periodically confirms
+   both sides' match logs and asserts their `net_owed` views agree; a divergence is a dispute and a
+   trust penalty. It moves **no cash and no scrip** — the balance simply persists. An overdue reconcile
+   ⇒ trust penalty (−10, §7) ⇒ possible auto-revoke. Because nothing was ever pre-paid, an overdue
+   reconcile costs the creditor only *unrealized* reciprocal value it can stop extending at once — live
+   exposure is hard-capped at L (step 3) throughout.
+5. **Revocation freezes the balance (§9).** On revoke, `net_owed` is *frozen*, not settled (there is
+   no cash to settle in). Outstanding debt becomes a **permanent record against the debtor's operator
+   identity** — the durable leech signal. A peer that leeches to its limit and revokes carries that
+   debt on its identity forever; it cannot resume under the same identity without clearing it, and a
+   fresh identity restarts at L = 0.
+6. **Sybil-resistance falls out (F4 / ADV-12, re-grounded without cash).** A defaulter cannot *inflate*
+   out (minting never touches the token-cost ledger) and cannot *rotate* out (a fresh identity starts
+   at zero credit and must re-earn L from scratch — abandoning a debt means abandoning all borrowing
+   power). Trust is computed only from the creditor's own local outcomes (§7), so a sybil cannot
+   self-report its way to a higher limit. Live exposure to any peer is hard-bounded by L at all times.
 
-**Scrip stays strictly local (F2)** — x402 (real USDC) is the *only* cross-operator value rail for
-un-graduated operators. No cross-operator scrip mint, ever. The buyer on A pays A in scrip (local); A
-settles with B in x402/credit (cross-operator). The two ledgers never merge.
+**The economics — why this exists (the whole point).** The clearing balance *is* the market signal on
+cross-team token caching: reciprocal contributors trend to a near-zero balance and high credit limits
+(frictionless liquidity); leechers accumulate debt, hit L, get throttled, and carry the debt on their
+identity. Market discipline on cache sharing with **zero cash and zero cross-mint** — the point of the
+whole exercise is to bring economics to token caching, and the debt balance is the legible signal.
+
+**Constants (operator-tunable, recommended defaults):** cold-start floor `L₀ = 0`; graduation increment
+per clean reconcile cycle; trust thresholds gating L changes (raise at trust ≥ 80, freeze below 40,
+force-reconcile-before-more at the cap); max limit cap = one `reconcile_cadence` window of typical
+reciprocal volume. Config, not a P10 blocker.
 
 ---
 
@@ -597,13 +637,15 @@ settles with B in x402/credit (cross-operator). The two ledgers never merge.
    A's match results immediately.
 2. **Stop admitting** the peer's operator key on the scoped federation roster slot (§3.1) — the peer
    can no longer write `federation:*` to your relay. (This is a live roster republish, onboarding §3.)
-3. **Handle in-flight matches** per `revoke.in_flight_policy`:
+3. **Handle in-flight matches** per `revoke.in_flight_policy`, then **freeze `net_owed`** (§8.5 — the
+   balance becomes a permanent record against the peer identity, never settled in cash):
    - `settle` (default): matches already `match-confirm`ed but not yet reconciled are honored — the
-     content was already delivered (escrow already debited, §8), so settling the reconcile is correct
-     and costs nothing extra. This avoids punishing a buyer mid-transaction for an operator-level revoke.
-   - `refund`: matches not yet delivered are cancelled; A refunds its buyer's local scrip hold and
-     releases the escrow line. Used when revoking *because* the peer turned malicious (`reason:
-     scope-violation` / `trust-floor`).
+     content was already delivered and its `token_cost` already debited to `net_owed` (§8.2), so folding
+     them into the frozen balance is correct. This avoids punishing a buyer mid-transaction for an
+     operator-level revoke.
+   - `refund`: matches not yet delivered are cancelled; A refunds its buyer's local A-scrip hold and
+     reverses the pending `net_owed` debit. Used when revoking *because* the peer turned malicious
+     (`reason: scope-violation` / `trust-floor`).
 4. **No transitive effect** (F1): revoking A↔B does not touch A↔C or B↔C.
 
 Revocation is **not** cryptographic content revocation — content already delivered to a buyer stays
@@ -620,15 +662,16 @@ readable (§541: no revocation once the CEK is out). Revoke stops *future* liqui
 - `federation:*` fold handlers (the seven ops, §3) + the `federatedInventory` overlay + cross-operator
   `RegisterWireAlias` reuse (§6.4).
 - Router deliver path: origin operator re-wraps CEK to the remote buyer + cross-relay deliver mirror (§6.1/§6.3).
-- Trust overlay (§7) + x402 escrow client (§8) + `federate`/`revoke` CLI verbs (deliberate, §2/§9).
+- Trust overlay (§7) + scrip-clearing mutual-credit ledger & graduated credit-limit engine (§8) +
+  `federate`/`revoke` CLI verbs (deliberate, §2/§9).
 - Discovery: multi-directory beacon publish/query + `known_peers` pin + out-of-band confirm prompt (§2).
 
 **Follow-on items to create (rd):**
 1. **P10 — `dontguess federate` (router mode)** — implement the above. Blocked on nothing now.
 2. **Custodial federation** — §4 commitment + §6.2 re-wrap-to-peer + the "peer never receives CEK in
    router / does in custodial" E2E confidentiality split. Gated on P10 landing first.
-3. **x402 escrow integration** — the actual USDC rail wiring (§8); may be its own item if x402 client
-   is not yet in-tree.
+3. **(REMOVED) x402 / cash rail** — deleted from federation entirely (§8); no USD wiring. A cash rail
+   returns only behind an explicit, unanimous multi-operator buy-in (deferred indefinitely, §11 Q2).
 4. **strfry writePolicy: scoped federation roster slot** (`d`-tag=`fed:<peer>`, §3.1) — out-of-repo
    relay policy change, mirrors the fleet-roster writePolicy work (onboarding §2/§9 HUMAN GATE ef1).
 5. **Ground-source E2E (router):** two nostr-attached exchanges → propose/accept → cross-operator
@@ -641,13 +684,16 @@ readable (§541: no revocation once the CEK is out). Revoke stops *future* liqui
 ## 11. Open questions needing a human ruling
 
 1. **Mode 5 open/global liquidity** (`onboarding-tiered-scaling-federation.md` §10 Q3) — this doc rules
-   **bilateral-only + x402-stake** and leaves Mode 5 **DEFERRED**. Confirm it stays deferred for v1, or
+   **bilateral-only + earned-credit (no cash stake)** and leaves Mode 5 **DEFERRED**. Confirm it stays deferred for v1, or
    open a separate design item for open-network sybil economics. **Recommendation: keep DEFERRED** — it
    is in direct tension with the ruled agent-level-WoT rejection (federation.md §3.3) and needs its own
    adversarial pass. *No P10 dependency either way.*
-2. **x402 escrow constants** (§8) — recommended defaults given (floor `$5`, cap = one reconcile window,
-   graduation at trust ≥ 80 over N cycles). Confirm or set org-specific values. *Mechanism is ruled;
-   only the numbers are open — not a P10 blocker (config-tunable).*
+2. **Cash rail — REMOVED (operator-ruled 2026-07-16).** x402/USDC is deleted from federation entirely;
+   cross-operator value moves only as local-mint scrip cleared through the token-cost mutual-credit
+   ledger (§8). A cash rail returns *only* if a future multi-party buy-in is explicitly proposed and
+   **all** participating operators agree — deferred indefinitely (v1 has no cash demand). The open
+   *numbers* are now the §8 credit-limit / graduation constants (recommended defaults given; ruled
+   mechanism; config-tunable; not a P10 blocker).
 3. **Federation roster slot on strfry** (§3.1) — confirm the `d`-tag=`fed:<peer>` scoped writePolicy
    slot is the mechanism (vs a second relay per peer). Ties to HUMAN GATE ef1 (roster-aware writePolicy
    deploy). *P10 relay-side dependency.*
