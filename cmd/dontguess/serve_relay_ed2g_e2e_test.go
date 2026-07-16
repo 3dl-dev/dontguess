@@ -268,7 +268,7 @@ func (s *e2eStack) operatorDeliverContentCount(t *testing.T) int {
 // --- agent identity ----------------------------------------------------------
 
 // newAgentIdentity provisions an isolated per-agent home and returns the signer
-// + its home dir. AGENT_CF_HOME is set by the caller right before the RunE that
+// + its home dir. the buyer/seller identity is passed via --agent-home on the RunE that
 // must sign with this identity (runPut/runBuy resolve it via loadAgentSigner).
 func newAgentIdentity(t *testing.T) (identity.Signer, string) {
 	t.Helper()
@@ -499,12 +499,12 @@ func TestE2E_TeamRoundTrip_PutBuyMatchSettle_ClientRunE_NotifyDriven(t *testing.
 	hub := newE2EHub(t, st.conn)
 
 	// --- allowlisted `dontguess put` RunE → matchable inventory ---
-	t.Setenv("AGENT_CF_HOME", sellerHome)
 	putCmd := newPutCmd()
 	var putOut, putErr bytes.Buffer
 	putCmd.SetOut(&putOut)
 	putCmd.SetErr(&putErr)
 	setPutFlags(t, putCmd, map[string]string{
+		"agent-home":    sellerHome,
 		"description":   ed2cPutDesc,
 		"content":       base64.StdEncoding.EncodeToString(ed2cContent),
 		"token_cost":    "8000",
@@ -529,17 +529,17 @@ func TestE2E_TeamRoundTrip_PutBuyMatchSettle_ClientRunE_NotifyDriven(t *testing.
 
 	// --- minted `dontguess buy` RunE → match → settle → content + scrip ---
 	st.mint(t, buyer.PubKeyHex(), wireIDBuyerMint)
-	t.Setenv("AGENT_CF_HOME", buyerHome)
 
 	buyCmd := newBuyCmd()
 	var buyOut, buyErr bytes.Buffer
 	buyCmd.SetOut(&buyOut)
 	buyCmd.SetErr(&buyErr)
 	setBuyFlags(t, buyCmd, map[string]string{
-		"task":    ed2cBuyTask,
-		"budget":  "1000000",
-		"relay":   hub.wsURL(),
-		"timeout": "20s", // < the 30s tick: a green settle here is the H1 proof
+		"agent-home": buyerHome,
+		"task":       ed2cBuyTask,
+		"budget":     "1000000",
+		"relay":      hub.wsURL(),
+		"timeout":    "20s", // < the 30s tick: a green settle here is the H1 proof
 	})
 	start := time.Now()
 	if err := runBuy(buyCmd, nil); err != nil {
@@ -613,12 +613,12 @@ func TestE2E_NonAllowlistedPut_SurfacesLoudPutReject_ClientRunE(t *testing.T) {
 	t.Cleanup(func() { cancel(); st.stop() })
 	hub := newE2EHub(t, st.conn)
 
-	t.Setenv("AGENT_CF_HOME", attackerHome)
 	cmd := newPutCmd()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	setPutFlags(t, cmd, map[string]string{
+		"agent-home":    attackerHome,
 		"description":   "Reverse a linked list in place, iterative",
 		"content":       base64.StdEncoding.EncodeToString([]byte("some content the operator must never make matchable")),
 		"token_cost":    "8500",
@@ -696,17 +696,17 @@ func TestE2E_UnderfundedBuyerAccept_ReceivesLoudReject_ClientRunE(t *testing.T) 
 	})
 
 	st.mint(t, buyer.PubKeyHex(), e2eUnderfundedMint) // passes D1, fails the hold
-	t.Setenv("AGENT_CF_HOME", buyerHome)
 
 	cmd := newBuyCmd()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	setBuyFlags(t, cmd, map[string]string{
-		"task":    ed2cBuyTask,
-		"budget":  "1000000", // the buyer LIES about willingness; the BALANCE gates the hold
-		"relay":   hub.wsURL(),
-		"timeout": "20s",
+		"agent-home": buyerHome,
+		"task":       ed2cBuyTask,
+		"budget":     "1000000", // the buyer LIES about willingness; the BALANCE gates the hold
+		"relay":      hub.wsURL(),
+		"timeout":    "20s",
 	})
 	err = runBuy(cmd, nil)
 	if err == nil {
@@ -889,7 +889,6 @@ func TestE2E_ConnDropMidAwait_RecoversMatch_ClientRunE(t *testing.T) {
 	})
 
 	st.mint(t, buyer.PubKeyHex(), wireIDBuyerMint)
-	t.Setenv("AGENT_CF_HOME", buyerHome)
 
 	// Arm the one-shot drop: the FIRST buy EVENT injected will close the client ws.
 	hub.armDropOnNextBuy()
@@ -899,10 +898,11 @@ func TestE2E_ConnDropMidAwait_RecoversMatch_ClientRunE(t *testing.T) {
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	setBuyFlags(t, cmd, map[string]string{
-		"task":    ed2cBuyTask,
-		"budget":  "1000000",
-		"relay":   hub.wsURL(),
-		"timeout": "25s",
+		"agent-home": buyerHome,
+		"task":       ed2cBuyTask,
+		"budget":     "1000000",
+		"relay":      hub.wsURL(),
+		"timeout":    "25s",
 	})
 	if err := runBuy(cmd, nil); err != nil {
 		t.Fatalf("runBuy did not recover from the mid-await conn drop: %v\nstderr:\n%s", err, stderr.String())
@@ -975,18 +975,18 @@ func TestE2E_PreviewFlag_SettlesContentByteExact_ClientRunE(t *testing.T) {
 	})
 
 	st.mint(t, buyer.PubKeyHex(), wireIDBuyerMint)
-	t.Setenv("AGENT_CF_HOME", buyerHome)
 
 	cmd := newBuyCmd()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	setBuyFlags(t, cmd, map[string]string{
-		"task":    ed2cBuyTask,
-		"budget":  "1000000",
-		"relay":   hub.wsURL(),
-		"timeout": "20s",
-		"preview": "true",
+		"agent-home": buyerHome,
+		"task":       ed2cBuyTask,
+		"budget":     "1000000",
+		"relay":      hub.wsURL(),
+		"timeout":    "20s",
+		"preview":    "true",
 	})
 	if err := runBuy(cmd, nil); err != nil {
 		t.Fatalf("runBuy --preview returned error: %v\nstderr:\n%s", err, stderr.String())

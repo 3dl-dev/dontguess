@@ -9,7 +9,9 @@ package main
 // campfire identity flow was removed as part of the nostr-first cutover
 // (docs/design/nostr-first-rebuild-decision.md); see the be4 finding.
 //
-// Prints "export AGENT_CF_HOME=<path>" for the user to eval.
+// Provisions the identity under $DG_HOME/agents/<name>/ and prints the name.
+// Sign with it explicitly via `dontguess put --as <name>` / `buy --as <name>` —
+// there is NO environment variable to eval (dontguess-884).
 //
 // Idempotent: re-running with the same name loads the existing identity
 // and skips re-generation. The export line is printed again either way.
@@ -30,6 +32,7 @@ package main
 // and docs/design/convergence-sybil-defense.md.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,17 +46,17 @@ var agentInitCmd = &cobra.Command{
 	Use:   "agent-init <name>",
 	Short: "Provision a per-agent secp256k1 nostr identity",
 	Long: `Create a per-agent secp256k1/schnorr nostr identity under $DG_HOME/agents/<name>/.
-Prints the export AGENT_CF_HOME line for the user to eval.
+Prints the agent name; sign with it explicitly via --as <name> (no env var).
 
 Idempotent: re-running with the same name does not regenerate the identity.
-The export line is printed regardless.
 
 One of --fleet-member or --parent is REQUIRED (fail-closed — there is no
 default that mints an identity):
 
   dontguess agent-init alice --fleet-member     # persistent fleet member, own npub
   dontguess agent-init sub1 --parent alice      # ephemeral subagent, signs as alice
-  eval $(dontguess agent-init alice --fleet-member)   # sets AGENT_CF_HOME in current shell`,
+  dontguess put --as alice ...                  # sign with alice's identity
+  dontguess buy --as alice ...`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAgentInit,
 }
@@ -63,17 +66,90 @@ func init() {
 		"provision an ephemeral subagent that signs under this parent fleet member's npub (no new key is minted)")
 	agentInitCmd.Flags().Bool("fleet-member", false,
 		"provision a persistent fleet member with its own npub (required when --parent is not given; fail-closed default)")
+	agentInitCmd.Flags().String("relay", "",
+		"exchange relay URL(s) to record in .dg/config.json (comma-separated) — so put/buy need no DONTGUESS_RELAY_URLS")
+	agentInitCmd.Flags().String("operator-npub", "",
+		"exchange operator npub to record in .dg/config.json — so put/buy need no --operator-npub")
 	rootCmd.AddCommand(agentInitCmd)
 }
 
 func runAgentInit(cmd *cobra.Command, args []string) error {
 	parent := ""
 	fleetMember := false
+	relay := ""
+	operatorNpub := ""
 	if cmd != nil {
 		parent, _ = cmd.Flags().GetString("parent")
 		fleetMember, _ = cmd.Flags().GetBool("fleet-member")
+		relay, _ = cmd.Flags().GetString("relay")
+		operatorNpub, _ = cmd.Flags().GetString("operator-npub")
 	}
-	return runAgentInitCore(resolveDGHome(), args[0], parent, fleetMember)
+	name := args[0]
+
+	// Root at the project-local .dg/ discovered from (or created at) the cwd —
+	// NOT a global DG_HOME (dontguess-884). The identity lives next to the work
+	// and is found by walk-up; no env var, no per-command flag.
+	dgDir, derr := agentInitDgDir()
+	if derr != nil {
+		return derr
+	}
+	if err := runAgentInitCore(dgDir, name, parent, fleetMember); err != nil {
+		return err
+	}
+
+	// Record this identity as the project default + carry exchange-reach config so
+	// put/buy in this tree need nothing else. Merge over any existing config.
+	cfg, _ := loadClientConfigAt(dgDir)
+	if fleetMember {
+		cfg.AgentName = name
+	}
+	if r := strings.TrimSpace(relay); r != "" {
+		cfg.RelayURLs = splitRelays(r)
+	}
+	if o := strings.TrimSpace(operatorNpub); o != "" {
+		cfg.OperatorNpub = o
+	}
+	if werr := writeClientConfig(dgDir, cfg); werr != nil {
+		return fmt.Errorf("write %s: %w", filepath.Join(dgDir, dgConfigFile), werr)
+	}
+	return nil
+}
+
+// agentInitDgDir returns the .dg/ to provision into: the nearest existing one
+// discovered by walk-up, else a new .dg/ in the current working directory.
+func agentInitDgDir() (string, error) {
+	if dg := discoverDgDir(); dg != "" {
+		return dg, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve working directory: %w", err)
+	}
+	return filepath.Join(cwd, dgDirName), nil
+}
+
+// loadClientConfigAt loads .dg/config.json from a specific .dg/ dir (not walk-up).
+func loadClientConfigAt(dgDir string) (clientConfig, error) {
+	var cfg clientConfig
+	data, err := os.ReadFile(filepath.Join(dgDir, dgConfigFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return cfg, err
+	}
+	return cfg, json.Unmarshal(data, &cfg)
+}
+
+// splitRelays splits a comma-separated relay list into a trimmed slice.
+func splitRelays(s string) []string {
+	var out []string
+	for _, u := range strings.Split(s, ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // runAgentInitCore provisions agent <name> under dgHome. Exactly one of the
@@ -219,7 +295,7 @@ func runAgentInitCore(dgHome, name, parent string, fleetMember bool) error {
 	// Calling it here (rather than trusting the BorrowParent/LoadOrCreate
 	// return values, which happen to hold the same identity) wires Resolve
 	// into the one production path that provisions an identity home, so any
-	// future signing call site (buy/put/settle under AGENT_CF_HOME, the NIP-42
+	// future signing call site (buy/put/settle via --as <name>, the NIP-42
 	// relay handshake) reuses this exact function instead of re-deriving the
 	// parent-pointer-vs-own-key dispatch a second time.
 	nostrID, err := identity.Resolve(agentHome)
@@ -227,12 +303,16 @@ func runAgentInitCore(dgHome, name, parent string, fleetMember bool) error {
 		return fmt.Errorf("resolve signing identity for agent %q: %w", name, err)
 	}
 
-	// Step 3: print the export line to stdout (for eval) and info to stderr.
-	fmt.Printf("export AGENT_CF_HOME=%s\n", agentHome)
+	// Step 3: report the identity. No environment-variable emission (dontguess-884):
+	// the identity lives in the project-local .dg/ (found by walk-up) and is the
+	// project default, so put/buy just work with no flag and no env var. Print the
+	// agent NAME to stdout so a script can capture it; detail to stderr.
+	fmt.Println(name)
 	if !jsonOutput {
 		fmt.Fprintf(os.Stderr, "agent-init: %s identity for %q\n", nostrAction, name)
-		fmt.Fprintf(os.Stderr, "  agent home: %s\n", agentHome)
+		fmt.Fprintf(os.Stderr, "  identity:   %s\n", agentHome)
 		fmt.Fprintf(os.Stderr, "  npub:       %s\n", nostrID.Npub())
+		fmt.Fprintf(os.Stderr, "  use it:     dontguess put ...   |   dontguess buy ...   (from anywhere in this tree — no flag, no env var)\n")
 	}
 
 	return nil

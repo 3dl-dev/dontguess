@@ -163,7 +163,7 @@ type HitRateReport struct {
 	// the toolrank lineage — an entry that 3+ independent agents bought and used is
 	// reliably valuable. The count is 0 when all buys arrive from a single shared
 	// identity (current default), and rises as agents adopt distinct identities via
-	// per-agent AGENT_CF_HOME (dontguess-a99/04f). See §4.6 of
+	// per-agent identity selected by --as <name> (dontguess-a99/04f). See §4.6 of
 	// docs/design/exchange-per-agent-identity-decision.md.
 	//
 	// Sourced from opts.EntryBuyerMap (populated by BuildConvergenceMap). When

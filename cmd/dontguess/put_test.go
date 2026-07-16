@@ -12,7 +12,7 @@ package main
 //     server's default behavior — a real operator behaves identically for an
 //     allowlisted seller, per engine_pricing.go autoAcceptPutLocked).
 //   - a non-allowlisted put surfaces the operator's put-reject reason.
-//   - missing AGENT_CF_HOME (team tier, --relay explicit) fails loud before
+//   - missing agent identity (team tier, --relay explicit) fails loud before
 //     any network I/O.
 //   - no relay configured routes to the individual tier (ed2-E,
 //     dontguess-2b4) instead of erroring, and that path itself fails loud
@@ -73,19 +73,21 @@ func TestRunPut_NoRelayConfigured_RoutesIndividualTier(t *testing.T) {
 }
 
 func TestRunPut_MissingAgentIdentity(t *testing.T) {
-	t.Setenv("AGENT_CF_HOME", "")
 	op, _ := identity.Generate()
 	cmd := newPutCmd()
 	setPutFlags(t, cmd, map[string]string{
-		"description":   "x",
-		"content":       base64.StdEncoding.EncodeToString([]byte("y")),
-		"token_cost":    "1000",
-		"relay":         "ws://127.0.0.1:1",
+		"description": "x",
+		"content":     base64.StdEncoding.EncodeToString([]byte("y")),
+		"token_cost":  "1000",
+		"relay":       "ws://127.0.0.1:1",
+		// --agent-home points at a dir with no identity: put must fail LOUD before
+		// publishing, not sign with the operator key (dontguess-884).
+		"agent-home":    t.TempDir(),
 		"operator-npub": op.Npub(),
 	})
 	err := runPut(cmd, nil)
-	if err == nil || !strings.Contains(err.Error(), "AGENT_CF_HOME") {
-		t.Fatalf("expected AGENT_CF_HOME error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "resolve agent identity") {
+		t.Fatalf("expected agent-identity resolution error, got %v", err)
 	}
 }
 
@@ -97,11 +99,11 @@ func TestRunPut_AllowlistedRelay_NoRejectObserved_Succeeds(t *testing.T) {
 	if _, _, err := identity.LoadOrCreate(agentHome); err != nil {
 		t.Fatalf("LoadOrCreate agent: %v", err)
 	}
-	t.Setenv("AGENT_CF_HOME", agentHome)
 
 	op, _ := identity.Generate()
 	cmd := newPutCmd()
 	setPutFlags(t, cmd, map[string]string{
+		"agent-home":    agentHome,
 		"description":   "reusable CI path filter",
 		"content":       base64.StdEncoding.EncodeToString([]byte("computed content")),
 		"token_cost":    "1000",
@@ -131,10 +133,10 @@ func TestRunPut_NonAllowlistedRelay_SurfacesRejectAndFails(t *testing.T) {
 	if _, _, err := identity.LoadOrCreate(agentHome); err != nil {
 		t.Fatalf("LoadOrCreate agent: %v", err)
 	}
-	t.Setenv("AGENT_CF_HOME", agentHome)
 
 	cmd := newPutCmd()
 	setPutFlags(t, cmd, map[string]string{
+		"agent-home":    agentHome,
 		"description":   "test content",
 		"content":       base64.StdEncoding.EncodeToString([]byte("computed content")),
 		"token_cost":    "1000",

@@ -15,8 +15,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"os"
-	"strings"
 
 	"github.com/3dl-dev/dontguess/pkg/identity"
 	"github.com/3dl-dev/dontguess/pkg/relayclient"
@@ -31,7 +29,7 @@ func newPutCmd() *cobra.Command {
 		Use:   "put",
 		Short: "Publish a put (sell cached inference) to the team exchange",
 		Long: `put publishes an exchange:put event directly to the team relay, signed with
-the AGENT key from AGENT_CF_HOME (never the operator key).
+the AGENT key from the project-local .dg/ found by walk-up (never the operator key).
 
 A relay ["OK", ...] is a TRANSPORT RECEIPT ONLY, not proof the operator
 admitted the put. put REQ-subscribes for a settle(put-reject) referencing this
@@ -48,6 +46,8 @@ yet wired to this command.`,
 	cmd.Flags().String("content_type", "exchange:content-type:text", "full exchange content-type tag")
 	cmd.Flags().StringSlice("domains", nil, "domain tags (comma-separated)")
 	cmd.Flags().String("relay", "", "relay websocket URL (default: first of DONTGUESS_RELAY_URLS)")
+	cmd.Flags().String("as", "", "override the identity: sign as .dg/agents/<name> (default: the .dg/ found by walk-up)")
+	cmd.Flags().String("agent-home", "", "override the identity home directory (advanced/tests; bypasses .dg/ walk-up)")
 	cmd.Flags().String("operator-npub", "", "operator npub to wrap the content key to (required for team tier — content is encrypted to the operator)")
 	cmd.Flags().Duration("timeout", relayclient.DefaultTimeout, "bounded end-to-end timeout (dial, publish, await OK + put-reject)")
 	cmd.Flags().Bool("relay-auth", false, "opt into the NIP-42 client AUTH handshake (default: WithoutClientAuth)")
@@ -76,7 +76,8 @@ func runPut(cmd *cobra.Command, args []string) error {
 	contentType, _ := cmd.Flags().GetString("content_type")
 	domains, _ := cmd.Flags().GetStringSlice("domains")
 	relayURL, _ := cmd.Flags().GetString("relay")
-	operatorNpub, _ := cmd.Flags().GetString("operator-npub")
+	operatorNpubFlag, _ := cmd.Flags().GetString("operator-npub")
+	operatorNpub := resolveOperatorNpub(operatorNpubFlag)
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	relayAuth, _ := cmd.Flags().GetBool("relay-auth")
 
@@ -117,7 +118,9 @@ func runPut(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("put: --operator-npub is not a valid npub: %w", err)
 	}
 
-	signer, err := loadAgentSigner()
+	agentName, _ := cmd.Flags().GetString("as")
+	agentHome, _ := cmd.Flags().GetString("agent-home")
+	signer, err := loadAgentSigner(agentName, agentHome)
 	if err != nil {
 		return fmt.Errorf("put: %w", err)
 	}
@@ -185,20 +188,4 @@ func runPutIndividual(cmd *cobra.Command, description string, content []byte, to
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "put %s accepted (individual tier, zero relay)\n", result.PutID)
 	return nil
-}
-
-// loadAgentSigner resolves the AGENT signing identity from AGENT_CF_HOME (set
-// by `eval $(dontguess agent-init <name> ...)`). It is deliberately distinct
-// from the operator key: team-tier put/buy/settle are always signed by the
-// agent identity, never the operator's (design §3.1).
-func loadAgentSigner() (identity.Signer, error) {
-	dir := strings.TrimSpace(os.Getenv("AGENT_CF_HOME"))
-	if dir == "" {
-		return nil, fmt.Errorf("AGENT_CF_HOME is not set — run: eval $(dontguess agent-init <name> --fleet-member)")
-	}
-	id, err := identity.Resolve(dir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve agent identity at AGENT_CF_HOME=%s: %w", dir, err)
-	}
-	return id, nil
 }

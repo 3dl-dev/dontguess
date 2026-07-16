@@ -92,7 +92,7 @@ main() {
 #
 # Nostr-first (dontguess-ed2): NO campfire (cf) dependency. Every verb dispatches
 # to the single dontguess-operator binary (operator serve + client put/buy). The
-# client reads DONTGUESS_RELAY_URLS (tier), AGENT_CF_HOME (agent signing key), and
+# client reads DONTGUESS_RELAY_URLS (tier) and its identity + reach-config from the
 # DG_HOME (exchange home) from the environment itself — the wrapper only sets up
 # DG_HOME, the individual-tier auto-start, synthetic tagging, and attempt logging.
 #
@@ -107,7 +107,7 @@ main() {
 #
 # DG_HOME pins all singleton exchange state (operator identity, event log, IPC
 #   socket, PID). Defaults to ~/.dontguess to match dgpath.go resolveDGHome.
-# AGENT_CF_HOME: per-agent secp256k1 signing identity for buy/put. The operator
+# .dg/ walk-up: per-agent secp256k1 signing identity + reach-config for buy/put. The operator
 #   binary reads it directly; the wrapper records the signing agent for telemetry.
 # Observability: attempt log at $DG_HOME/dontguess-attempts.log (JSONL).
 # DG_SYNTHETIC: dev/CI synthetic-tag injection (dontguess-18c).
@@ -125,7 +125,7 @@ DG_OP="${DG_OP:-${HOME}/.local/bin/dontguess-operator}"
 
 # DG_HOME pins all singleton exchange state, independent of any per-session env.
 # Default matches the operator binary (cmd/dontguess/dgpath.go resolveDGHome):
-# ~/.dontguess. Subagents with a per-session AGENT_CF_HOME still find the real
+# ~/.dontguess. Subagents inherit the parent project .dg/ by walk-up and still find the real
 # exchange here.
 DG_HOME="${DG_HOME:-${HOME}/.dontguess}"
 
@@ -154,11 +154,27 @@ _attempt_log_write() {
   _cwd=$(pwd 2>/dev/null | sed 's/"/\\"/g' || true)
   _cmd=$(printf '%s' "$_ATTEMPT_CMD" | sed 's/"/\\"/g')
   _caller=null
-  # Prefer the AGENT_CF_HOME nostr identity (the actual signing agent).
+  # Identify the signing agent from the project-local .dg/ found by walking UP
+  # from the cwd (dontguess-884) — no AGENT_CF_HOME. Best-effort for the log.
   _id_src=""
-  if [ -n "${AGENT_CF_HOME:-}" ] && [ -f "${AGENT_CF_HOME}/nostr-identity.json" ]; then
-    _id_src="${AGENT_CF_HOME}/nostr-identity.json"
-  fi
+  _d=$(pwd 2>/dev/null || true)
+  while [ -n "$_d" ]; do
+    if [ -d "$_d/.dg" ]; then
+      _dg="$_d/.dg"
+      _an=""
+      if command -v jq >/dev/null 2>&1 && [ -f "$_dg/config.json" ]; then
+        _an=$(jq -r '.agent_name // empty' "$_dg/config.json" 2>/dev/null || true)
+      fi
+      if [ -n "$_an" ] && [ -f "$_dg/agents/${_an}/nostr-identity.json" ]; then
+        _id_src="$_dg/agents/${_an}/nostr-identity.json"
+      elif [ -f "$_dg/nostr-identity.json" ]; then
+        _id_src="$_dg/nostr-identity.json"
+      fi
+      break
+    fi
+    [ "$_d" = "/" ] && break
+    _d=$(dirname "$_d")
+  done
   if command -v jq >/dev/null 2>&1 && [ -n "$_id_src" ]; then
     _pk=$(jq -r '.pub_key_hex // .public_key // empty' "$_id_src" 2>/dev/null | cut -c1-8 2>/dev/null || true)
     case "$_pk" in
@@ -180,7 +196,7 @@ _classify_tag() {
     _tag="no_exchange_configured"
   elif printf '%s' "$_stderr" | grep -qE "operator not running|operator not reachable|server failed"; then
     _tag="operator_down"
-  elif printf '%s' "$_stderr" | grep -qE "AGENT_CF_HOME is not set|resolve agent identity"; then
+  elif printf '%s' "$_stderr" | grep -qE "no .dg/ found|resolve agent identity"; then
     _tag="identity_missing"
   elif printf '%s' "$_stderr" | grep -qE "not allowlisted|put-reject|dropped_unlisted|underfunded"; then
     _tag="not_admitted"
@@ -399,7 +415,7 @@ if [ "$_DG_INJECT_SYNTHETIC" -eq 1 ]; then
 fi
 
 # Dispatch to the dontguess binary subcommand (NOT cf). The binary reads
-# DONTGUESS_RELAY_URLS (tier), AGENT_CF_HOME (agent key), and DG_HOME from the
+# DONTGUESS_RELAY_URLS (tier), the project-local .dg/ (agent identity + reach), and DG_HOME from the
 # environment itself. Tee stderr to both the terminal and a capture file,
 # classify, attempt-log, exit.
 _STDERR_TMP=$(mktemp 2>/dev/null) || _STDERR_TMP=""

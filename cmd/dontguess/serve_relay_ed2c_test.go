@@ -342,17 +342,17 @@ func newEd2cFixture(t *testing.T) *ed2cFixture {
 	return &ed2cFixture{st: st, hub: hub, seller: seller, operator: operator, ls: ls}
 }
 
-// newBuyerAgent creates an agent identity home, points AGENT_CF_HOME at it, and
-// returns the loaded signer — the identity `dontguess buy` RunE signs with.
-func newBuyerAgent(t *testing.T) identity.Signer {
+// newBuyerAgent creates an agent identity home and returns the loaded signer plus
+// the home path — the caller passes the home via the buy command's --agent-home
+// flag (dontguess-884: identity is selected explicitly, never via an env var).
+func newBuyerAgent(t *testing.T) (identity.Signer, string) {
 	t.Helper()
 	agentHome := t.TempDir()
 	id, _, err := identity.LoadOrCreate(agentHome)
 	if err != nil {
 		t.Fatalf("LoadOrCreate buyer agent: %v", err)
 	}
-	t.Setenv("AGENT_CF_HOME", agentHome)
-	return id
+	return id, agentHome
 }
 
 // matchStoreID reads the operator's local log and returns the STORE id of the first
@@ -378,7 +378,7 @@ func (f *ed2cFixture) matchStoreID(t *testing.T) string {
 // IsMatchSettled true.
 func TestEd2C_RunBuy_TeamHit_SettlesContentAndMovesScrip(t *testing.T) {
 	fx := newEd2cFixture(t)
-	buyer := newBuyerAgent(t)
+	buyer, buyerHome := newBuyerAgent(t)
 	fx.st.mintBuyer(t, buyer)
 	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got != wireIDBuyerMint {
 		t.Fatalf("buyer balance before buy = %d, want minted %d", got, wireIDBuyerMint)
@@ -389,10 +389,11 @@ func TestEd2C_RunBuy_TeamHit_SettlesContentAndMovesScrip(t *testing.T) {
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	setBuyFlags(t, cmd, map[string]string{
-		"task":    ed2cBuyTask,
-		"budget":  "1000000",
-		"relay":   fx.hub.wsURL(),
-		"timeout": "30s",
+		"agent-home": buyerHome,
+		"task":       ed2cBuyTask,
+		"budget":     "1000000",
+		"relay":      fx.hub.wsURL(),
+		"timeout":    "30s",
 	})
 	if err := runBuy(cmd, nil); err != nil {
 		t.Fatalf("runBuy (team hit) returned error: %v\nstderr:\n%s", err, stderr.String())
@@ -438,7 +439,7 @@ func TestEd2C_RunBuy_TeamHit_SettlesContentAndMovesScrip(t *testing.T) {
 // reject asserted below.
 func TestEd2C_RunBuy_UnderfundedBuyer_ReceivesRejectViaPerPhaseFilter(t *testing.T) {
 	fx := newEd2cFixture(t)
-	buyer := newBuyerAgent(t) // deliberately NOT minted
+	buyer, buyerHome := newBuyerAgent(t) // deliberately NOT minted
 	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got != 0 {
 		t.Fatalf("unminted buyer balance = %d, want 0", got)
 	}
@@ -448,10 +449,11 @@ func TestEd2C_RunBuy_UnderfundedBuyer_ReceivesRejectViaPerPhaseFilter(t *testing
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	setBuyFlags(t, cmd, map[string]string{
-		"task":    ed2cBuyTask,
-		"budget":  "1000000",
-		"relay":   fx.hub.wsURL(),
-		"timeout": "30s",
+		"agent-home": buyerHome,
+		"task":       ed2cBuyTask,
+		"budget":     "1000000",
+		"relay":      fx.hub.wsURL(),
+		"timeout":    "30s",
 	})
 	err := runBuy(cmd, nil)
 	if err == nil {
@@ -507,7 +509,7 @@ func TestEd2C_RunBuy_UnderfundedBuyer_ReceivesRejectViaPerPhaseFilter(t *testing
 // not the match, so the ONLY resolution route was previewToMatch.
 func TestEd2C_PreviewPath_SettlesContentAndMovesScripViaPreviewBranch(t *testing.T) {
 	fx := newEd2cFixture(t)
-	buyer := newBuyerAgent(t)
+	buyer, _ := newBuyerAgent(t)
 	fx.st.mintBuyer(t, buyer)
 	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got != wireIDBuyerMint {
 		t.Fatalf("buyer balance before buy = %d, want minted %d", got, wireIDBuyerMint)
@@ -589,7 +591,7 @@ func TestEd2C_PreviewPath_SettlesContentAndMovesScripViaPreviewBranch(t *testing
 // preview branch, and it is the ONLY test exercising the --preview flag via cobra.
 func TestEd2C_RunBuy_PreviewFlag_SettlesContentAndMovesScrip(t *testing.T) {
 	fx := newEd2cFixture(t)
-	buyer := newBuyerAgent(t)
+	buyer, buyerHome := newBuyerAgent(t)
 	fx.st.mintBuyer(t, buyer)
 	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got != wireIDBuyerMint {
 		t.Fatalf("buyer balance before buy = %d, want minted %d", got, wireIDBuyerMint)
@@ -600,11 +602,12 @@ func TestEd2C_RunBuy_PreviewFlag_SettlesContentAndMovesScrip(t *testing.T) {
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	setBuyFlags(t, cmd, map[string]string{
-		"task":    ed2cBuyTask,
-		"budget":  "1000000",
-		"relay":   fx.hub.wsURL(),
-		"timeout": "30s",
-		"preview": "true",
+		"agent-home": buyerHome,
+		"task":       ed2cBuyTask,
+		"budget":     "1000000",
+		"relay":      fx.hub.wsURL(),
+		"timeout":    "30s",
+		"preview":    "true",
 	})
 	if err := runBuy(cmd, nil); err != nil {
 		t.Fatalf("runBuy (team hit, --preview) returned error: %v\nstderr:\n%s", err, stderr.String())

@@ -104,6 +104,13 @@ func resolveRelayURLs() []string {
 	if v := strings.TrimSpace(os.Getenv("DONTGUESS_RELAY_URL")); v != "" {
 		raw = append(raw, v)
 	}
+	// No env override → fall back to the project-local .dg/config.json discovered by
+	// walk-up (dontguess-884), so a client needs no DONTGUESS_RELAY_URLS env var.
+	if len(raw) == 0 {
+		if cfg, _ := loadClientConfig(); len(cfg.RelayURLs) > 0 {
+			raw = append(raw, cfg.RelayURLs...)
+		}
+	}
 	seen := make(map[string]struct{})
 	out := make([]string, 0, len(raw))
 	for _, u := range raw {

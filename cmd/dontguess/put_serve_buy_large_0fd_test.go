@@ -161,12 +161,12 @@ func TestE2E_0fd_LargeContent_PutServeBuy_CrossProcess_RoundTrips(t *testing.T) 
 	const buyTask = "rust tokio async mutex deadlock concurrency avoidance guide"
 
 	// ── SELLER: real `dontguess put` RunE offloads the ciphertext to Blossom ──
-	t.Setenv("AGENT_CF_HOME", sellerHome)
 	putCmd := newPutCmd()
 	var putOut, putErr bytes.Buffer
 	putCmd.SetOut(&putOut)
 	putCmd.SetErr(&putErr)
 	setPutFlags(t, putCmd, map[string]string{
+		"agent-home":    sellerHome,
 		"description":   putDesc,
 		"content":       base64.StdEncoding.EncodeToString(largeSecret),
 		"token_cost":    "60000",
@@ -205,17 +205,17 @@ func TestE2E_0fd_LargeContent_PutServeBuy_CrossProcess_RoundTrips(t *testing.T) 
 
 	// ── BUYER: real `dontguess buy` RunE fetches the blob and round-trips ──
 	st.mint(t, buyer.PubKeyHex(), wireIDBuyerMint)
-	t.Setenv("AGENT_CF_HOME", buyerHome)
 
 	buyCmd := newBuyCmd()
 	var buyOut, buyErr bytes.Buffer
 	buyCmd.SetOut(&buyOut)
 	buyCmd.SetErr(&buyErr)
 	setBuyFlags(t, buyCmd, map[string]string{
-		"task":    buyTask,
-		"budget":  "1000000",
-		"relay":   hub.wsURL(),
-		"timeout": "60s",
+		"agent-home": buyerHome,
+		"task":       buyTask,
+		"budget":     "1000000",
+		"relay":      hub.wsURL(),
+		"timeout":    "60s",
 	})
 	getsBeforeBuy := atomic.LoadInt32(&backend.gets)
 	if err := runBuy(buyCmd, nil); err != nil {

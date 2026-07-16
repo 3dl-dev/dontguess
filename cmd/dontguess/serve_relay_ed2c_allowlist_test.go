@@ -84,7 +84,7 @@ func newEd2cFixtureSellerOnlyAllowlist(t *testing.T) *ed2cFixture {
 // printed guidance names the real fix.
 func TestEd2C_RunBuy_MintedButNotAllowlistedBuyer_SettleGoesAmbiguous_GuidanceEnumeratesAllowlist(t *testing.T) {
 	fx := newEd2cFixtureSellerOnlyAllowlist(t)
-	buyer := newBuyerAgent(t)
+	buyer, _ := newBuyerAgent(t)
 	// Minted (funded) — but never allowlisted. This is the exact gap: minting
 	// alone is not sufficient for a team-tier buyer to complete a purchase.
 	fx.st.mintBuyer(t, buyer)

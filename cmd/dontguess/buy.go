@@ -52,7 +52,7 @@ func newBuyCmd() *cobra.Command {
 		Use:   "buy",
 		Short: "Buy cached inference from the team exchange (await a match)",
 		Long: `buy publishes an exchange:buy event directly to the team relay, signed with
-the AGENT key from AGENT_CF_HOME (never the operator key), after SUBSCRIBING
+the AGENT key from the project-local .dg/ found by walk-up (never the operator key), after SUBSCRIBING
 FIRST for the operator's response so a fast match cannot be missed.
 
 It then awaits a discriminated outcome within a bounded timeout:
@@ -72,6 +72,8 @@ yet wired to this command.`,
 	cmd.Flags().Int("freshness_hours", 0, "max age of cached content in hours (0 = any)")
 	cmd.Flags().Int("max_results", 0, "max ranked results to return (0 = operator default)")
 	cmd.Flags().String("relay", "", "relay websocket URL (default: first of DONTGUESS_RELAY_URLS)")
+	cmd.Flags().String("as", "", "override the identity: sign as .dg/agents/<name> (default: the .dg/ found by walk-up)")
+	cmd.Flags().String("agent-home", "", "override the identity home directory (advanced/tests; bypasses .dg/ walk-up)")
 	cmd.Flags().String("operator-npub", "", "operator npub to require as response author (optional, belt-and-suspenders)")
 	cmd.Flags().Duration("timeout", relayclient.DefaultBuyTimeout, "bounded end-to-end timeout for the whole buy->settle chain (dial, subscribe, publish, await)")
 	cmd.Flags().Bool("relay-auth", false, "opt into the NIP-42 client AUTH handshake (default: WithoutClientAuth)")
@@ -94,7 +96,8 @@ func runBuy(cmd *cobra.Command, args []string) error {
 	freshness, _ := cmd.Flags().GetInt("freshness_hours")
 	maxResults, _ := cmd.Flags().GetInt("max_results")
 	relayURL, _ := cmd.Flags().GetString("relay")
-	operatorNpub, _ := cmd.Flags().GetString("operator-npub")
+	operatorNpubFlag, _ := cmd.Flags().GetString("operator-npub")
+	operatorNpub := resolveOperatorNpub(operatorNpubFlag)
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	relayAuth, _ := cmd.Flags().GetBool("relay-auth")
 	preview, _ := cmd.Flags().GetBool("preview")
@@ -126,7 +129,9 @@ func runBuy(cmd *cobra.Command, args []string) error {
 		operatorPubKey = fmt.Sprintf("%x", raw)
 	}
 
-	signer, err := loadAgentSigner()
+	agentName, _ := cmd.Flags().GetString("as")
+	agentHome, _ := cmd.Flags().GetString("agent-home")
+	signer, err := loadAgentSigner(agentName, agentHome)
 	if err != nil {
 		return fmt.Errorf("buy: %w", err)
 	}

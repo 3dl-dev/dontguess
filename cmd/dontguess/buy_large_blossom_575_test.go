@@ -156,7 +156,6 @@ func TestE2E_575_LargeContent_BuyFromCLI_FetchesFromBlossom(t *testing.T) {
 
 	// ── (1) LARGE: buy the offloaded entry FROM THE CLI, fetching over HTTP ──
 	t.Run("large_offloaded_content_fetches_from_CLI", func(t *testing.T) {
-		t.Setenv("AGENT_CF_HOME", buyerHome)
 		t.Setenv("DONTGUESS_BLOSSOM_URL", backend.URL)
 
 		buyCmd := newBuyCmd()
@@ -164,10 +163,11 @@ func TestE2E_575_LargeContent_BuyFromCLI_FetchesFromBlossom(t *testing.T) {
 		buyCmd.SetOut(&out)
 		buyCmd.SetErr(&errb)
 		setBuyFlags(t, buyCmd, map[string]string{
-			"task":    largeTask,
-			"budget":  "1000000",
-			"relay":   hub.wsURL(),
-			"timeout": "60s",
+			"agent-home": buyerHome,
+			"task":       largeTask,
+			"budget":     "1000000",
+			"relay":      hub.wsURL(),
+			"timeout":    "60s",
 		})
 		if err := runBuy(buyCmd, nil); err != nil {
 			t.Fatalf("runBuy (large, from CLI) returned error: %v\nstderr:\n%s", err, errb.String())
@@ -183,7 +183,6 @@ func TestE2E_575_LargeContent_BuyFromCLI_FetchesFromBlossom(t *testing.T) {
 
 	// ── (2) INLINE: the ≤32 KiB path is unchanged with NO buyer BlobStore ──
 	t.Run("inline_content_unchanged_without_blossom", func(t *testing.T) {
-		t.Setenv("AGENT_CF_HOME", buyerHome)
 		// Explicitly no DONTGUESS_BLOSSOM_URL: newBuyerBlobStore() -> nil, so the
 		// inline path must round-trip with no Blossom capability at all.
 		if v := strings.TrimSpace(os.Getenv("DONTGUESS_BLOSSOM_URL")); v != "" {
@@ -195,10 +194,11 @@ func TestE2E_575_LargeContent_BuyFromCLI_FetchesFromBlossom(t *testing.T) {
 		buyCmd.SetOut(&out)
 		buyCmd.SetErr(&errb)
 		setBuyFlags(t, buyCmd, map[string]string{
-			"task":    inlineTask,
-			"budget":  "1000000",
-			"relay":   hub.wsURL(),
-			"timeout": "60s",
+			"agent-home": buyerHome,
+			"task":       inlineTask,
+			"budget":     "1000000",
+			"relay":      hub.wsURL(),
+			"timeout":    "60s",
 		})
 		if err := runBuy(buyCmd, nil); err != nil {
 			t.Fatalf("runBuy (inline, no blossom) returned error: %v\nstderr:\n%s", err, errb.String())
