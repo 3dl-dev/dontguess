@@ -98,18 +98,23 @@ func TestWrapper_NoCfDispatch(t *testing.T) {
 }
 
 // TestWrapper_ServeAutoStartGatedOnIndividualTier asserts the H6 gate: the flock
-// serve auto-start is wrapped in `if [ -z "$DONTGUESS_RELAY_URLS" ]` so it runs on
-// the individual tier ONLY. Structurally: the DONTGUESS_RELAY_URLS empty-check must
-// appear BEFORE the single flock auto-start, proving the auto-start is nested
-// inside the individual-tier guard and never runs in team tier.
+// serve auto-start is wrapped in the individual-tier guard so it runs on the
+// individual tier ONLY. The guard is empty DONTGUESS_RELAY_URLS AND no walk-up
+// .dg/config.json relay_urls (dontguess-884) — team tier under EITHER signal must
+// never auto-start. Structurally: the guard must appear BEFORE the single flock
+// auto-start, proving the auto-start is nested inside the individual-tier branch.
 func TestWrapper_ServeAutoStartGatedOnIndividualTier(t *testing.T) {
 	w := extractWrapperFromInstaller(t)
 
-	// The H6 gate literal.
-	const gate = `if [ -z "${DONTGUESS_RELAY_URLS:-}" ]; then`
+	// The H6 gate literal — both tier signals must gate the auto-start.
+	const gate = `if [ -z "${DONTGUESS_RELAY_URLS:-}" ] && ! _dg_config_has_relays; then`
 	gateIdx := strings.Index(w, gate)
 	if gateIdx < 0 {
 		t.Fatalf("wrapper is missing the H6 individual-tier gate %q around the serve auto-start", gate)
+	}
+	// The .dg/config team-tier detector must be defined before the gate uses it.
+	if di := strings.Index(w, "_dg_config_has_relays()"); di < 0 || di > gateIdx {
+		t.Fatalf("wrapper: _dg_config_has_relays must be defined before the auto-start gate (def=%d gate=%d)", di, gateIdx)
 	}
 
 	// The serve auto-start is a flock on the start lock. There must be exactly one,

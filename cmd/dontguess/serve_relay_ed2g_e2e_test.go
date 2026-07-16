@@ -469,6 +469,7 @@ func (h *e2eHub) pump(c *ed2cClientConn) {
 // published one outbox tick late would arrive at t=30s, far past the buy timeout,
 // and the buy would time out AMBIGUOUS instead of settling).
 func TestE2E_TeamRoundTrip_PutBuyMatchSettle_ClientRunE_NotifyDriven(t *testing.T) {
+	t.Chdir(t.TempDir()) // hermetic: isolate walk-up .dg/ config resolution from an ambient repo .dg/ (dontguess-884)
 	// Capture the standard logger (Outbox FATAL is emitted there) FIRST so it is
 	// restored LAST — after the stack cleanup drains the outbox goroutine (d52).
 	var logbuf syncLogBuf
@@ -660,6 +661,7 @@ func TestE2E_NonAllowlistedPut_SurfacesLoudPutReject_ClientRunE(t *testing.T) {
 // per-phase #e:[buyer-accept] filter (H3) and surfaced by the client as a
 // DISTINGUISHED UNDERFUNDED outcome with the mint hint — never a bare timeout.
 func TestE2E_UnderfundedBuyerAccept_ReceivesLoudReject_ClientRunE(t *testing.T) {
+	t.Chdir(t.TempDir()) // hermetic: isolate walk-up .dg/ config resolution from an ambient repo .dg/ (dontguess-884)
 	hushRelayLogs(t)
 	dir := t.TempDir()
 	ls, err := dgstore.Open(dir + "/events.jsonl")
@@ -857,6 +859,7 @@ func TestE2E_UnderfundedDeliver_NoFreeContent_ThroughServeStack(t *testing.T) {
 // full sale then settles: content byte-exact + REAL scrip moved — proving recovery
 // is complete, not partial.
 func TestE2E_ConnDropMidAwait_RecoversMatch_ClientRunE(t *testing.T) {
+	t.Chdir(t.TempDir()) // hermetic: isolate walk-up .dg/ config resolution from an ambient repo .dg/ (dontguess-884)
 	hushRelayLogs(t)
 	dir := t.TempDir()
 	ls, err := dgstore.Open(dir + "/events.jsonl")
@@ -942,6 +945,7 @@ func TestE2E_ConnDropMidAwait_RecoversMatch_ClientRunE(t *testing.T) {
 // (The relayclient-level SettleResult decomposition is proven separately by
 // TestEd2C_RunBuy_PreviewFlag_SettlesContentAndMovesScrip.)
 func TestE2E_PreviewFlag_SettlesContentByteExact_ClientRunE(t *testing.T) {
+	t.Chdir(t.TempDir()) // hermetic: isolate walk-up .dg/ config resolution from an ambient repo .dg/ (dontguess-884)
 	hushRelayLogs(t)
 	dir := t.TempDir()
 	ls, err := dgstore.Open(dir + "/events.jsonl")
