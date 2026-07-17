@@ -53,6 +53,15 @@ import (
 // exercises the real production dispatch path (design §4: individual tier stays
 // byte-for-byte).
 func newIndividualTierEngine(t *testing.T) *exchange.Engine {
+	eng, _ := newIndividualTierEngineWithOperator(t)
+	return eng
+}
+
+// newIndividualTierEngineWithOperator is newIndividualTierEngine but also returns
+// the engine's operator public key, so a test can fold operator-authored records
+// (e.g. a settle(put-accept) that promotes an entry WITHOUT the hot compression
+// assign AutoAcceptPut would fire — dontguess-20e) directly via IngestLocalRecord.
+func newIndividualTierEngineWithOperator(t *testing.T) (*exchange.Engine, string) {
 	t.Helper()
 	dgHome := t.TempDir()
 
@@ -106,7 +115,40 @@ func newIndividualTierEngine(t *testing.T) *exchange.Engine {
 		<-done
 	})
 
-	return eng
+	return eng, operatorKey
+}
+
+// foldPutAcceptNoHot promotes a pending put (putID) to active inventory by folding a
+// settle(put-accept) authored by operatorKey DIRECTLY into the engine's local store,
+// WITHOUT the hot compression assign eng.AutoAcceptPut fires as a side effect
+// (autoAcceptPutLocked's exclusive-to-seller offer). dontguess-20e:
+// PostOpenCompressionAssign now atomically DEFERS to any active assign, so a standing
+// hot assign at post time would (correctly) suppress the open/cold assign a listing /
+// e2e-claim test exercises — the entry must reach inventory with zero active assigns,
+// the state the production medium loop actually posts from. IngestLocalRecord folds
+// the record into State synchronously.
+func foldPutAcceptNoHot(t *testing.T, eng *exchange.Engine, operatorKey, putID string, price int64) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"phase":      "put-accept",
+		"entry_id":   putID,
+		"price":      price,
+		"expires_at": time.Now().UTC().Add(72 * time.Hour).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("foldPutAcceptNoHot: marshal put-accept: %v", err)
+	}
+	if err := eng.IngestLocalRecord(dgstore.Record{
+		ID:          randomLocalMsgID(t),
+		CampfireID:  "local",
+		Sender:      operatorKey,
+		Payload:     payload,
+		Tags:        []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrPutAccept, exchange.TagVerdictPrefix + "accepted"},
+		Antecedents: []string{putID},
+		Timestamp:   time.Now().UnixNano() + 1,
+	}); err != nil {
+		t.Fatalf("foldPutAcceptNoHot: IngestLocalRecord(put-accept): %v", err)
+	}
 }
 
 // TestOpPut_Individual_ThenOpBuy_ReturnsMatchedContent proves the ed2-E
@@ -457,7 +499,7 @@ func TestIndividualTier_ConcurrentOpPutOpBuy_NoFoldCursorCorruption(t *testing.T
 func TestOpListAssigns_Individual_SurfacesOpenCompressAssign(t *testing.T) {
 	t.Parallel()
 
-	eng := newIndividualTierEngine(t)
+	eng, operatorKey := newIndividualTierEngineWithOperator(t)
 	sockPath, _ := startSocketServer(t, eng)
 
 	const tokenCost int64 = 15000
@@ -472,12 +514,13 @@ func TestOpListAssigns_Individual_SurfacesOpenCompressAssign(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("IngestLocalRecord(put): %v", err)
 	}
-	if err := eng.AutoAcceptPut(putID, tokenCost*70/100, time.Now().UTC().Add(72*time.Hour)); err != nil {
-		t.Fatalf("AutoAcceptPut: %v", err)
-	}
+	// Promote WITHOUT the hot assign (dontguess-20e): a standing hot assign would make
+	// the cold post below atomically defer, leaving nothing for OpListAssigns to
+	// surface. See foldPutAcceptNoHot.
+	foldPutAcceptNoHot(t, eng, operatorKey, putID, tokenCost*70/100)
 	inv := eng.State().Inventory()
 	if len(inv) != 1 {
-		t.Fatalf("inventory after AutoAcceptPut = %d entries, want 1", len(inv))
+		t.Fatalf("inventory after put-accept = %d entries, want 1", len(inv))
 	}
 	entryID := inv[0].EntryID
 

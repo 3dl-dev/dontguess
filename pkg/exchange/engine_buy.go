@@ -828,13 +828,57 @@ func (e *Engine) sendWarmCompressionAssign(entry *InventoryEntry, buyerKey strin
 
 // PostOpenCompressionAssign posts a non-exclusive cold compression assign for the
 // given entry. This is the public entry point used by the medium loop's PostAssign
-// callback. The bounty is ColdCompressionBountyPct (20%) of token_cost.
+// callback (cmd/dontguess/serve.go runEngineLoop, dontguess-ffb). The bounty is
+// ColdCompressionBountyPct (20%) of token_cost.
 //
-// Returns an error if the entry is not found or the assign cannot be sent.
+// CONCURRENCY (dontguess-20e). The medium-loop goroutine that drives this is the
+// THIRD concurrent operator-broadcast writer, alongside the auto-accept ticker
+// (RunAutoAccept) and the operator-socket handler (AutoAcceptPut/RejectPut) named in
+// the engine_core.go opMu contract. Posting an assign is a check-then-act: read the
+// dedup guard (HasCompressedVersion / ActiveAssigns), then a compound
+// sendOperatorMessage WRITE + state.Apply. If the guard read and the post are NOT
+// under a single opMu critical section, a same-tick warm/hot compression assign from
+// an opMu-holding dispatch path (autoAcceptPutLocked's hot offer, or the operator
+// path's handleBuy warm offer) can be applied AFTER this reads ActiveAssigns()==0 but
+// BEFORE it posts — so two AssignRecords land for one compression unit and two agents
+// can each claim + complete + be paid task_reward for one unit of work (a scrip
+// double-pay leak). We therefore acquire opMu and RE-CHECK the dedup guard atomically
+// with the post, exactly like the auto-accept ticker's contract. The pricing layer's
+// postCompressionAssigns pre-checks the same guard, but only this opMu-held recheck is
+// authoritative against the other operator-broadcast writers.
+//
+// Re-entrancy: this method is only ever reached from the medium-loop PostAssign
+// callback (and tests) — never from a path that already holds opMu — so acquiring
+// opMu here cannot self-deadlock. The lower-level send helpers deliberately do NOT
+// lock opMu themselves: sendCompressionAssign already runs under opMu via
+// autoAcceptPutLocked, and sendWarmCompressionAssign runs under opMu via the
+// operator-path dispatch (refreshBeforeOperatorOp -> rebuildAndDispatchGapLocal ->
+// handleBuy). Making them lock would double-acquire and deadlock; they must stay as
+// they are.
+//
+// Returns an error if the entry is not found or the assign cannot be sent. A guard
+// skip (a compressed derivative or an active assign already exists) is a no-op
+// success (returns nil) — the same outcome the medium loop's own guard produces.
 func (e *Engine) PostOpenCompressionAssign(entryID string) error {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+
 	entry := e.state.GetInventoryEntry(entryID)
 	if entry == nil {
 		return fmt.Errorf("entry %s not found in inventory", entryID)
+	}
+	// Atomic dedup recheck under opMu (dontguess-20e): never stack a cold assign on
+	// top of an existing compressed derivative or an already-active assign for this
+	// entry. Mirrors pkg/pricing postCompressionAssigns' guard, but here it is
+	// serialized against every other operator-broadcast writer so the check-then-act
+	// cannot race a same-tick warm/hot assign into a double post. State accessors
+	// take State.mu internally; opMu is held first, matching the documented lock
+	// ordering (engine_core.go opMu contract).
+	if e.state.HasCompressedVersion(entryID) {
+		return nil
+	}
+	if len(e.state.ActiveAssigns(entryID)) > 0 {
+		return nil
 	}
 	return e.sendColdCompressionAssign(entry)
 }

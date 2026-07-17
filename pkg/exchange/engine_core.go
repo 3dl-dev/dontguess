@@ -311,10 +311,24 @@ type Engine struct {
 	opts       EngineOptions
 	state      *State
 	matchIndex *matching.Index
-	// opMu serializes state-mutating operations across concurrent goroutines:
-	// RunAutoAccept (auto-accept ticker goroutine) and AutoAcceptPut/RejectPut
-	// (operator socket handler goroutine). Lock ordering: acquire opMu FIRST,
-	// then any State-internal locks (acquired via the existing State helpers).
+	// opMu serializes state-mutating operations across concurrent goroutines. The
+	// operator-broadcast writers it serializes are:
+	//   1. RunAutoAccept          — the auto-accept ticker goroutine.
+	//   2. AutoAcceptPut/RejectPut — the operator socket handler goroutine.
+	//   3. PostOpenCompressionAssign — the medium-loop goroutine (cmd/dontguess
+	//      serve.go runEngineLoop -> pkg/pricing MediumLoop.Tick, dontguess-ffb).
+	//      Added dontguess-20e: it posts open (cold) compression assigns as a
+	//      check-then-act (ActiveAssigns/HasCompressedVersion guard, then a compound
+	//      sendOperatorMessage broadcast). Without opMu it could pass a stale guard
+	//      concurrently with a warm/hot assign from writer 1 or 2 and double-post an
+	//      assign for one compression unit (scrip double-pay). It acquires opMu around
+	//      the guard+post so the whole check-then-act is atomic, exactly like the
+	//      auto-accept ticker. The lower-level sendCompressionAssign /
+	//      sendWarmCompressionAssign helpers are NOT independent writers here: they
+	//      already run under opMu via writers 1 and 2 (autoAcceptPutLocked and the
+	//      operator-path dispatch), so they must never lock opMu themselves.
+	// Lock ordering: acquire opMu FIRST, then any State-internal locks (acquired via
+	// the existing State helpers).
 	opMu sync.Mutex
 	// ctx is the shutdown context passed to Start. Stored atomically so that
 	// handler goroutines can read it without a data race against the Start write.
