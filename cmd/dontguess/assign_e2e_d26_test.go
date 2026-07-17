@@ -394,6 +394,16 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 		case <-time.After(45 * time.Second):
 			t.Fatalf("timed out after 45s waiting for step to complete (starvation guard, not the 10m harness timeout): eng.Start(ctx) goroutine did not observe ctx cancellation")
 		}
+		// Close the socket BEFORE stop() (dontguess-8b9). stop() is
+		// attachRelayTransport's wg.Wait(); runReaderReconnect's reader is blocked in
+		// relay.Conn.Recv's raw ws.ReadMessage(), which does NOT observe ctx.Done() on
+		// its own — only closing the underlying socket unblocks it. This is exactly the
+		// order shutdownRelayTransport documents (cancel -> closeConn -> stop). Without
+		// it, stop() hangs until the guard fires — which is what turned up as a hard CI
+		// failure under -race (the reader stays in the blocking recv, never sees cancel).
+		// The separate conn.Close cleanup above is LIFO-ordered AFTER this block, so it
+		// cannot unblock stop(); closing here (idempotent, error ignored) is what does.
+		_ = conn.Close()
 		stopDone := make(chan struct{})
 		go func() { defer close(stopDone); stop() }()
 		select {
