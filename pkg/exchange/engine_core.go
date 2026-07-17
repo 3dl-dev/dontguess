@@ -484,6 +484,21 @@ type DegradationMetrics struct {
 	// > 0). Every increment is paired with a LOUD alarm (never a silent drop).
 	DroppedUnderfundedBuy atomic.Int64
 
+	// DemandOnlyRegistered counts D1-dropped unfunded misses that were registered
+	// as a DEMAND-ONLY signal (67e0 ruling): emitted into the demand backlog with
+	// NO scrip movement and NO funded offer, and NOT folded into matching/pricing.
+	// One increment == one distinct task_hash newly surfaced to `dontguess demand`.
+	DemandOnlyRegistered atomic.Int64
+	// DemandOnlyDeduped counts unfunded misses that were NOT re-emitted because a
+	// demand-only registration for the same task_hash already existed — the
+	// anti-Sybil dedup that collapses a flood (same or different identities) into
+	// one entry. A loud counter, not a silent drop.
+	DemandOnlyDeduped atomic.Int64
+	// DemandOnlyCapped counts unfunded misses whose demand-only registration was
+	// refused by the per-sender rolling-window cap or the global backstop cap —
+	// the bound on volume-flooding by one unfunded identity. Loudly counted.
+	DemandOnlyCapped atomic.Int64
+
 	// FoldDenialNotOperator counts STATE-fold rejections where an operator-only
 	// settlement fold guard (applySettlePutAccept / applySettlePutReject /
 	// applySettleDeliver in state_settle.go) dropped a message whose Sender is
@@ -529,6 +544,9 @@ type DegradationCounts struct {
 	DroppedLowReputation      int64 `json:"dropped_low_reputation"`
 	DroppedDedupPoison        int64 `json:"dropped_dedup_poison"`
 	DroppedUnderfundedBuy     int64 `json:"dropped_underfunded_buy"`
+	DemandOnlyRegistered      int64 `json:"demand_only_registered"`
+	DemandOnlyDeduped         int64 `json:"demand_only_deduped"`
+	DemandOnlyCapped          int64 `json:"demand_only_capped"`
 	FoldDenialNotOperator     int64 `json:"fold_denial_not_operator"`
 	FoldDenialBuyerIdentity   int64 `json:"fold_denial_buyer_identity"`
 	FoldDenialAssignExclusive int64 `json:"fold_denial_assign_exclusive"`
@@ -779,6 +797,9 @@ func (e *Engine) DegradationSnapshot() DegradationCounts {
 		DroppedLowReputation:      e.degradation.DroppedLowReputation.Load(),
 		DroppedDedupPoison:        e.degradation.DroppedDedupPoison.Load(),
 		DroppedUnderfundedBuy:     e.degradation.DroppedUnderfundedBuy.Load(),
+		DemandOnlyRegistered:      e.degradation.DemandOnlyRegistered.Load(),
+		DemandOnlyDeduped:         e.degradation.DemandOnlyDeduped.Load(),
+		DemandOnlyCapped:          e.degradation.DemandOnlyCapped.Load(),
 		FoldDenialNotOperator:     e.degradation.FoldDenialNotOperator.Load(),
 		FoldDenialBuyerIdentity:   e.degradation.FoldDenialBuyerIdentity.Load(),
 		FoldDenialAssignExclusive: e.degradation.FoldDenialAssignExclusive.Load(),

@@ -66,6 +66,17 @@ func (s *State) applyMatch(msg *Message) {
 	if s.OperatorKey != "" && msg.Sender != s.OperatorKey {
 		return
 	}
+	// Demand-only registration (67e0 ruling): a D1-dropped unfunded miss is
+	// emitted as [TagBuyMiss, TagMatch, TagDemandOnly] so `dontguess demand` sees
+	// it, but it MUST NOT fold into matching/ranking/pricing (the D1 anti-Sybil
+	// invariant). Route it to the dedup/cap bookkeeper and return BEFORE touching
+	// any match-state map (matchedOrders / matchToBuyer / matchToEntry /
+	// matchToResults). The operator-sender guard above still applies, so a forged
+	// demand-only from a non-operator is dropped.
+	if tagsContain(msg.Tags, TagDemandOnly) {
+		s.applyDemandOnly(msg)
+		return
+	}
 	if len(msg.Antecedents) == 0 {
 		return
 	}
@@ -103,4 +114,43 @@ func (s *State) applyMatch(msg *Message) {
 		}
 		s.matchToResults[msg.ID] = entryIDs
 	}
+}
+
+// applyDemandOnly folds a DEMAND-ONLY buy-miss message (67e0 ruling). It records
+// ONLY the dedup + per-sender-cap bookkeeping needed by registerDemandOnly and
+// never mutates any matching/ranking/pricing state — that is the whole point of
+// the demand-only path (preserve the D1 anti-Sybil invariant). Caller holds s.mu
+// (invoked from applyMatch, itself under applyLocked). buyer_key and task_hash
+// are carried in the operator-authored payload because msg.Sender is the operator.
+//
+// Idempotent per message ID via demandOnlyCounted: the emitted message is folded
+// once directly (e.state.Apply after emit) and again by the poll-loop snapshot
+// fold, so the per-sender time list must be appended EXACTLY once — otherwise the
+// window cap would trip at half the intended volume.
+func (s *State) applyDemandOnly(msg *Message) {
+	if _, seen := s.demandOnlyCounted[msg.ID]; seen {
+		return
+	}
+	var p struct {
+		TaskHash string `json:"task_hash"`
+		BuyerKey string `json:"buyer_key"`
+	}
+	if err := json.Unmarshal(msg.Payload, &p); err != nil || p.TaskHash == "" {
+		return
+	}
+	s.demandOnlyCounted[msg.ID] = struct{}{}
+	s.demandOnlyTaskHashes[p.TaskHash] = struct{}{}
+	if p.BuyerKey != "" {
+		s.demandOnlySenderTimes[p.BuyerKey] = append(s.demandOnlySenderTimes[p.BuyerKey], msg.Timestamp)
+	}
+}
+
+// tagsContain reports whether tags includes want.
+func tagsContain(tags []string, want string) bool {
+	for _, t := range tags {
+		if t == want {
+			return true
+		}
+	}
+	return false
 }

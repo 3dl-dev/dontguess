@@ -118,6 +118,20 @@ Forge's `ratelimit.SpendingLimiter` implements exactly the pre-decrement/adjust/
 | **assign** | operator | agent | task_reward | Labor payment |
 | **assign-complete** | (validate) | agent | task_reward | Confirmed after validation |
 | **dispute-refund** | exchange | buyer | price + fee | Full refund on successful dispute |
+| **demand-only** | (none) | (none) | 0 | 67e0 ruling — a D1-dropped unfunded miss registered as demand signal. **NO scrip moves**, no offer funded. See note below. |
+
+**Demand-only registration (67e0 ruling, dontguess-4f01).** When an unfunded buyer
+(balance < `MinBuyBalance`) searches and misses, the buy is withheld from
+matching/ranking/pricing by the D1 signal bound
+(`docs/design/nostr-admission-scrip-rehome-3b8.md` §8-D1) — but instead of being
+fully dropped it is registered as a **demand-only** signal so `dontguess demand`
+surfaces the unmet demand. This is a **zero-scrip, ledger-neutral** event: it moves
+no scrip, opens **no funded `BuyMissOffer`** (an unfunded requester cannot settle
+one — contrast the funded `handleBuyMiss` path, which does open a real 70%-rate
+offer), and never folds into pricing. It is deduped by `task_hash` and capped per
+unfunded sender so a Sybil flood cannot inflate the backlog for free. Because no
+scrip moves, it introduces no new supply-conservation surface (D3 pre-decrement
+model is untouched).
 
 ### The Publisher Model in Scrip Terms
 

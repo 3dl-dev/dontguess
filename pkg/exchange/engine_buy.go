@@ -47,6 +47,14 @@ func (e *Engine) handleBuy(msg *Message) error {
 		e.degradation.DroppedUnderfundedBuy.Add(1)
 		e.opts.log("SECURITY ALARM: anonymous buy dropped by demand-signal bound (D1): buyer=%s min_balance=%d order=%s -- not folded into matching/demand/pricing",
 			shortKey(msg.Sender), e.opts.MinBuyBalance, shortKey(msg.ID))
+		// 67e0 ruling: the buy is still WITHHELD from matching/ranking/pricing (the
+		// D1 invariant above is unchanged), but instead of being fully dropped it is
+		// registered as a DEMAND-ONLY signal so `dontguess demand` sees the unmet
+		// demand. This moves NO scrip and opens NO funded BuyMissOffer; it is deduped
+		// by task_hash and capped per unfunded sender.
+		if err := e.registerDemandOnly(msg, payload.Task, isSyntheticRequest(payload.Task, payload.Synthetic)); err != nil {
+			e.opts.log("engine: demand-only registration failed order=%s: %v", shortKey(msg.ID), err)
+		}
 		return nil
 	}
 
@@ -438,6 +446,95 @@ func (e *Engine) handleBuyMiss(msg *Message, task string, budget int64, syntheti
 
 	e.opts.log("engine: buy-miss: order=%s task_hash=%s expires=%s synthetic=%v",
 		msg.ID[:8], taskHash[:16], expiresAt.Format(time.RFC3339), synthetic)
+	return nil
+}
+
+// registerDemandOnly registers a D1-DROPPED unfunded buy as a DEMAND-ONLY signal
+// (67e0 operator ruling). It is DISTINCT from handleBuyMiss (the funded zero-match
+// path, sibling dontguess-909):
+//
+//   - NO scrip moves and NO funded BuyMissOffer is created — the operator makes no
+//     70%-rate promise on an unfunded miss (an unfunded buyer cannot settle it).
+//   - The emitted message carries [TagBuyMiss, TagMatch, TagDemandOnly] so the
+//     demand CLI's buyMissFilter surfaces it in `dontguess demand`, but applyMatch
+//     routes TagDemandOnly to applyDemandOnly and NEVER folds it into
+//     matching/ranking/pricing (the load-bearing D1 anti-Sybil invariant).
+//   - It is DEDUPED by task_hash: repeated identical misses — same OR different
+//     Sybil identities — collapse to ONE demand entry (HasDemandOnly gate).
+//   - It is CAPPED per unfunded sender per rolling window (and a global backstop
+//     cap) so volume-flooding by one identity is bounded.
+//
+// A skipped emission (dedup / cap) is loudly counted (DemandOnlyDeduped /
+// DemandOnlyCapped), never a silent drop. Returns an error only on a marshal /
+// send failure; a dedup or cap skip returns nil.
+func (e *Engine) registerDemandOnly(msg *Message, task string, synthetic bool) error {
+	taskHash := TaskDescriptionHash(task)
+
+	// DEDUP by task_hash — this is what collapses a Sybil flood on one task to a
+	// single demand entry.
+	if e.state.HasDemandOnly(taskHash) {
+		e.degradation.DemandOnlyDeduped.Add(1)
+		e.opts.log("engine: demand-only dedup: task_hash=%s already registered (buyer=%s) -- not re-emitted",
+			taskHash[:16], shortKey(msg.Sender))
+		return nil
+	}
+
+	// Global backstop cap on distinct demand-only tasks.
+	if e.state.DemandOnlyTotal() >= DemandOnlyGlobalCap {
+		e.degradation.DemandOnlyCapped.Add(1)
+		e.opts.log("engine: demand-only global cap reached (%d) -- dropping registration task_hash=%s buyer=%s",
+			DemandOnlyGlobalCap, taskHash[:16], shortKey(msg.Sender))
+		return nil
+	}
+
+	// Per-sender rolling-window cap: bound one unfunded identity flooding many
+	// distinct task hashes.
+	if e.state.DemandOnlyCountForSender(msg.Sender, time.Now(), DemandOnlyPerSenderWindow) >= DemandOnlyPerSenderCap {
+		e.degradation.DemandOnlyCapped.Add(1)
+		e.opts.log("engine: demand-only per-sender cap reached (%d/%s) -- dropping registration task_hash=%s buyer=%s",
+			DemandOnlyPerSenderCap, DemandOnlyPerSenderWindow, taskHash[:16], shortKey(msg.Sender))
+		return nil
+	}
+
+	expiresAt := time.Now().Add(BuyMissOfferTTL)
+	// offered_price_rate is 0: a demand-only signal carries NO funded standing
+	// offer. buyer_key is carried in the payload because the message is
+	// operator-authored (msg.Sender on the emitted record is the operator), and
+	// applyDemandOnly needs it to rebuild the per-sender cap window on Replay.
+	demandOnlyPayload, err := e.marshal(map[string]any{
+		"task_hash":          taskHash,
+		"task":               task,
+		"buyer_key":          msg.Sender,
+		"offered_price_rate": 0,
+		"demand_only":        true,
+		"buy_msg_id":         msg.ID,
+		"expires_at":         expiresAt.UTC().Format(time.RFC3339),
+		"guide":              "Unfunded demand signal: an agent with insufficient scrip searched for this and found no cached inference. No standing offer was funded (the requester cannot settle one). If you compute the result and PUT it, a FUNDED buyer searching the same task will fill a real offer. This entry only records that the demand exists.",
+	})
+	if err != nil {
+		return fmt.Errorf("encoding demand-only payload: %w", err)
+	}
+
+	// [TagBuyMiss, TagMatch, TagDemandOnly]: TagMatch is the single canonical op
+	// (exchangeOp resolves to it); TagBuyMiss makes `dontguess demand` pick it up;
+	// TagDemandOnly makes applyMatch route it to applyDemandOnly (no matching fold).
+	tags := []string{TagBuyMiss, TagMatch, TagDemandOnly}
+	if synthetic {
+		tags = append(tags, TagSynthetic)
+	}
+	antecedents := []string{msg.ID}
+
+	rec, err := e.sendOperatorMessage(demandOnlyPayload, tags, antecedents)
+	if err != nil {
+		return err
+	}
+	if rec != nil {
+		e.state.Apply(rec)
+	}
+
+	e.degradation.DemandOnlyRegistered.Add(1)
+	e.opts.log("engine: demand-only registered order=%s task_hash=%s buyer=%s synthetic=%v -- NO scrip, NO offer, NOT folded into matching/demand/pricing",
+		shortKey(msg.ID), taskHash[:16], shortKey(msg.Sender), synthetic)
 	return nil
 }
 
