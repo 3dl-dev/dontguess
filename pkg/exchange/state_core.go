@@ -51,7 +51,7 @@ func NewState() *State {
 		claimMsgToAssign:       make(map[string]string),
 		completeMsgToAssign:    make(map[string]string),
 		buyMissOffers:          make(map[string]*BuyMissOffer),
-		demandOnlyTaskHashes:   make(map[string]struct{}),
+		demandOnlyTaskHashes:   make(map[string]int64),
 		demandOnlySenderTimes:  make(map[string][]int64),
 		demandOnlyCounted:      make(map[string]struct{}),
 		matchToBuyMsgID:        make(map[string]string),
@@ -247,7 +247,7 @@ func (s *State) beginReplayLocked(msgs []Message, replaySet map[string]struct{})
 	s.buyMissOffers = make(map[string]*BuyMissOffer)
 	// Demand-only D1 bookkeeping (67e0) is derived from the log: reset so Replay
 	// rebuilds the dedup set + per-sender window from the demand-only messages.
-	s.demandOnlyTaskHashes = make(map[string]struct{})
+	s.demandOnlyTaskHashes = make(map[string]int64)
 	s.demandOnlySenderTimes = make(map[string][]int64)
 	s.demandOnlyCounted = make(map[string]struct{})
 	s.matchToBuyMsgID = make(map[string]string)
