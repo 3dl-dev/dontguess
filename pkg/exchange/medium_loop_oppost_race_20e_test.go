@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/matching"
+	"github.com/3dl-dev/dontguess/pkg/store"
 )
 
 // seedAcceptedEntryNoAssign puts a plaintext fixture entry and folds a
@@ -140,73 +142,123 @@ func TestPostOpenCompressionAssign_ConcurrentPostersYieldSingleAssign(t *testing
 	}
 }
 
-// TestPostOpenCompressionAssign_ConcurrentDefersToActiveDispatchAssign proves the
-// cross-writer half of the fix: a burst of medium-loop cold posters, racing against
-// a compression assign an opMu-holding dispatch-loop writer already posted, adds
-// ZERO — it never stacks a second AssignRecord on top of the dispatch assign.
+// TestPostOpenCompressionAssign_WarmPollVsColdYieldsSingleAssign is the dontguess-20e
+// Gap A enforcement proof: it RACES the real STEADY-STATE POLL-LOOP warm poster
+// (writer 4, path ii) against the medium-loop COLD poster (writer 3) for ONE entry,
+// with two genuine goroutines released off a start barrier, no hand-ordering, and no
+// pre-applied assign — and asserts EXACTLY ONE compress AssignRecord survives.
 //
-// The pre-existing assign here is a REAL hot (seller-exclusive) compression assign
-// posted by Engine.AutoAcceptPut — a genuine operator-broadcast dispatch-loop writer
-// (autoAcceptPutLocked's hot offer, which runs under opMu). This is precisely the
-// "same-tick warm/hot compression assign from the dispatch-loop" the 948a review
-// flagged as double-posting against the medium loop's cold assign. The N cold posters
-// then ACTUALLY race (start barrier); the surviving compress assign must still be the
-// one the dispatch writer posted (exclusive to the seller), with no open/cold assign
-// added. Run under `-race`.
-func TestPostOpenCompressionAssign_ConcurrentDefersToActiveDispatchAssign(t *testing.T) {
+// This is the cross-writer race the earlier "defers to a pre-applied dispatch assign"
+// test could not catch. That test applied its dispatch assign to State BEFORE the
+// barrier, so it was a STATIC pre-existing assign every cold poster simply read as
+// ActiveAssigns()>0 and skipped — deleting the serialization still passed it. Here
+// the warm assign is created by dispatching a REAL buy through the ACTUAL poll path
+// (Engine.PollLocalStoreForTest -> pollLocalStore -> foldAndDispatchLocalSnapshot ->
+// dispatchLocalGap -> dispatch -> handleBuy -> sendWarmCompressionAssign), which holds
+// NEITHER opMu NOR localMu. So it genuinely races the cold poster's check-then-act.
+//
+// The poll-loop warm post and the cold post touch State on two goroutines with no
+// shared opMu (the poll path never takes it). Only the leaf compressAssignMu makes
+// their guard+post atomic: whichever lands first, the other's recheck observes it
+// (cold sees ActiveAssigns()>0; warm sees the open cold assign via
+// hasActiveBuyerOrOpenCompressAssign) and defers. Remove that serialization and the
+// dominant cold-first ordering double-posts — cold lands an OPEN assign, then the
+// unserialized warm's buyer-scoped guard does not see it and posts a SECOND assign:
+// two AssignRecords for one compression unit = two task_reward payments (the
+// double-pay this item targets). Run under `-race`.
+//
+// Iterated so a scheduler that happens to finish one goroutine before the other
+// starts on a given round cannot mask a regression: every round must yield exactly 1.
+func TestPostOpenCompressionAssign_WarmPollVsColdYieldsSingleAssign(t *testing.T) {
 	t.Parallel()
-	h := newTestHarness(t)
-	eng := h.newEngine()
 
+	const iterations = 25
 	const tokenCost int64 = 20000
-	putMsg := h.sendMessage(h.seller,
-		putPayload("20e defer fixture: rust ownership cheatsheet",
-			"sha256:"+fmt.Sprintf("%064x", 7777), "code", tokenCost, 5000),
-		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:rust"},
-		nil,
-	)
-	// AutoAcceptPut promotes the entry AND fires a real hot (seller-exclusive)
-	// compression assign under opMu — the dispatch-loop writer we race against.
-	if err := eng.AutoAcceptPut(putMsg.ID, tokenCost/2, time.Now().Add(72*time.Hour)); err != nil {
-		t.Fatalf("AutoAcceptPut: %v", err)
-	}
-	entryID := putMsg.ID
 
-	if got := countActiveCompressAssigns(eng, entryID); got != 1 {
-		t.Fatalf("precondition: after AutoAcceptPut the entry has %d active compress assign(s), want exactly 1 (the hot assign the medium loop must defer to)", got)
-	}
-	sellerKey := h.seller.PublicKeyHex()
+	for it := 0; it < iterations; it++ {
+		h := newTestHarness(t)
+		eng := h.newEngine()
 
-	const workers = 16
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
+		desc := fmt.Sprintf("20e warm-poll vs cold race fixture %d: bounded worker-pool patterns", it)
+		// Fold a real put-accept (no hot assign) so the entry is live inventory with
+		// ZERO active assigns — the exact steady state both posters fire from.
+		entryID := seedAcceptedEntryNoAssign(t, h, eng, desc, tokenCost)
+
+		// Force the poll-dispatched buy to semantically match THIS entry so
+		// emitMatchResponse runs and attempts the warm assign (writer 4).
+		idx := matching.NewIndex(nil, matching.RankOptions{})
+		idx.Rebuild([]matching.RankInput{{EntryID: entryID, Description: desc, TokenCost: tokenCost}})
+		eng.SetMatchIndexForTest(idx)
+
+		// Advance the engine's poll cursors past the put + put-accept (folding them,
+		// confirming NO hot assign is posted) so the RACING poll below dispatches ONLY
+		// the buy — an isolated writer-4 warm post.
+		if err := eng.PollLocalStoreForTest(); err != nil {
+			t.Fatalf("iter %d: priming PollLocalStoreForTest: %v", it, err)
+		}
+		if n := countActiveCompressAssigns(eng, entryID); n != 0 {
+			t.Fatalf("iter %d precondition: entry has %d active compress assign(s) before the race, want 0 (a hot assign must NOT have leaked from the seed)", it, n)
+		}
+
+		// The buy is APPENDED to the store — never hand-dispatched — so the racing
+		// poll folds and dispatches it exactly as production's poll loop does.
+		h.sendMessage(h.buyer, buyPayload(desc, 10*tokenCost), []string{exchange.TagBuy}, nil)
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		// Writer 4 (WARM) via the REAL poll loop — holds neither opMu nor localMu.
 		go func() {
 			defer wg.Done()
 			<-start
-			// A cold post racing the standing hot assign: the atomic guard must see
-			// ActiveAssigns()>0 and skip (nil, no post). Errors would themselves be
-			// a defect; the count assertion below is the real proof.
-			_ = eng.PostOpenCompressionAssign(entryID)
+			if err := eng.PollLocalStoreForTest(); err != nil {
+				t.Errorf("iter %d: racing PollLocalStoreForTest: %v", it, err)
+			}
 		}()
-	}
-	close(start)
-	wg.Wait()
+		// Writer 3 (COLD) via the medium-loop entry point — holds opMu.
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := eng.PostOpenCompressionAssign(entryID); err != nil {
+				t.Errorf("iter %d: PostOpenCompressionAssign: %v", it, err)
+			}
+		}()
+		close(start) // release both simultaneously — a genuine race
+		wg.Wait()
 
-	assigns := eng.State().ActiveAssigns(entryID)
-	var compress []*exchange.AssignRecord
-	for _, a := range assigns {
-		if a.TaskType == "compress" {
-			compress = append(compress, a)
+		// The buy must have matched (proving the warm path actually engaged — otherwise
+		// the "exactly 1" assertion would be trivially satisfied by the cold post alone).
+		msgs, err := h.st.ListMessages(h.cfID, 0)
+		if err != nil {
+			t.Fatalf("iter %d: ListMessages: %v", it, err)
+		}
+		if !hasMatchMessage(msgs) {
+			t.Fatalf("iter %d: no match message emitted — the poll loop did not match the buy, so the warm poster (writer 4) never engaged and the race was not exercised", it)
+		}
+
+		if got := countActiveCompressAssigns(eng, entryID); got != 1 {
+			t.Fatalf("iter %d: entry has %d active compress assigns after racing a POLL-LOOP WARM post (writer 4 path ii) against a COLD post (writer 3), want exactly 1 — the cross-writer compressAssignMu serialization must let exactly one land; 2 = warm+cold double-pay",
+				it, got)
 		}
 	}
-	if len(compress) != 1 {
-		t.Fatalf("after %d concurrent cold posters raced a standing dispatch (hot) assign, entry has %d active compress assigns, want exactly 1 — the medium-loop poster must never stack a second assign on an active one (double-post -> double-pay)",
-			workers, len(compress))
+}
+
+// hasMatchMessage reports whether any record in msgs is an exchange:match (and not a
+// buy-miss), proving handleBuy matched the racing buy and ran emitMatchResponse.
+func hasMatchMessage(msgs []store.MessageRecord) bool {
+	for i := range msgs {
+		isMatch, isMiss := false, false
+		for _, tag := range msgs[i].Tags {
+			if tag == exchange.TagMatch {
+				isMatch = true
+			}
+			if tag == exchange.TagBuyMiss {
+				isMiss = true
+			}
+		}
+		if isMatch && !isMiss {
+			return true
+		}
 	}
-	if compress[0].ExclusiveSender != sellerKey {
-		t.Errorf("surviving compress assign ExclusiveSender = %q, want the seller's hot-assign key %q — a cold (open) assign was posted on top of the dispatch assign instead of deferring",
-			compress[0].ExclusiveSender, sellerKey)
-	}
+	return false
 }

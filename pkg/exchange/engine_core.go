@@ -327,9 +327,45 @@ type Engine struct {
 	//      sendWarmCompressionAssign helpers are NOT independent writers here: they
 	//      already run under opMu via writers 1 and 2 (autoAcceptPutLocked and the
 	//      operator-path dispatch), so they must never lock opMu themselves.
-	// Lock ordering: acquire opMu FIRST, then any State-internal locks (acquired via
-	// the existing State helpers).
+	//   4. sendWarmCompressionAssign — fired by handleBuy on a match. handleBuy is
+	//      dispatched by TWO paths: (i) the auto-accept rebuild
+	//      (rebuildAndDispatchGapLocal, UNDER opMu — already serialized) AND (ii) the
+	//      STEADY-STATE POLL LOOP (runLocal -> pollLocalStore ->
+	//      foldAndDispatchLocalSnapshot -> dispatchLocalGap -> dispatch -> handleBuy),
+	//      which holds NEITHER opMu NOR localMu (dispatch runs after localMu is
+	//      released). In production serve the poll loop and the medium-loop goroutine
+	//      run CONCURRENTLY, so a poll-loop warm assign (path ii) can be applied
+	//      between writer 3's opMu-held ActiveAssigns()==0 read and its post — warm +
+	//      cold AssignRecords then coexist for one entry, two task_reward payments, the
+	//      double-pay dontguess-20e targets. opMu on writer 3 gives ZERO exclusion
+	//      against writer 4 path (ii), which never takes opMu. See compressAssignMu:
+	//      it is the leaf lock that serializes the guard+post of the WARM and COLD
+	//      posters (writers 3 and 4) against each other on BOTH dispatch paths.
+	// Lock ordering: acquire opMu FIRST, then compressAssignMu (if taken), then any
+	// State-internal / localMu locks (acquired via the existing helpers).
 	opMu sync.Mutex
+	// compressAssignMu serializes the dedup-recheck + post of the compression-assign
+	// posters whose check-then-act is NOT already mutually serialized by opMu
+	// (dontguess-20e Gap A). The COLD poster (sendColdCompressionAssign, writer 3)
+	// runs under opMu; the WARM poster (sendWarmCompressionAssign, writer 4) is
+	// reached BOTH under opMu (auto-accept rebuild dispatch) AND with NO lock at all
+	// (steady-state poll loop, engine_core.go poll path). opMu therefore cannot
+	// serialize cold against a poll-loop warm post, so a dedicated LEAF mutex does:
+	// every warm/cold post acquires it immediately around the
+	// ActiveAssigns/HasCompressedVersion recheck AND the send (which state.Applies the
+	// new assign), so the next poster's recheck always observes an already-applied
+	// sibling and defers instead of double-posting.
+	//
+	// Lock ordering is fixed and non-inverting: opMu (optional, outer) ⊃
+	// compressAssignMu ⊃ (State.mu / localMu, taken by the send). It is NEVER held
+	// while acquiring opMu, and the sends run OUTSIDE localMu (dispatch runs after
+	// localMu is released), so it never nests under localMu. The HOT poster
+	// (sendCompressionAssign, writers 1/2 at put-accept) does NOT take this lock: it
+	// is already opMu-serialized with cold, and a hot assign and a poll-loop warm
+	// assign for the SAME entry cannot race (accept strictly precedes any match), and
+	// hot+warm coexistence is in any case the designed two-offer path
+	// (warm_compression_test.go).
+	compressAssignMu sync.Mutex
 	// ctx is the shutdown context passed to Start. Stored atomically so that
 	// handler goroutines can read it without a data race against the Start write.
 	// Handlers use this so that in-flight scrip operations are cancelled on
