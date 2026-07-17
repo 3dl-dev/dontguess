@@ -569,6 +569,42 @@ func TaskDescriptionHash(task string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// HasDemandOnly reports whether a DEMAND-ONLY registration already exists for
+// taskHash (67e0 ruling). registerDemandOnly consults this to DEDUP repeated
+// identical unfunded misses — same or different Sybil identities — into ONE
+// demand entry. Thread-safe.
+func (s *State) HasDemandOnly(taskHash string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.demandOnlyTaskHashes[taskHash]
+	return ok
+}
+
+// DemandOnlyTotal returns the number of distinct demand-only task hashes
+// registered, for the global backstop cap. Thread-safe.
+func (s *State) DemandOnlyTotal() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.demandOnlyTaskHashes)
+}
+
+// DemandOnlyCountForSender returns how many demand-only registrations the given
+// unfunded buyer drove within `window` before `now`. Enforces the per-identity
+// volume bound (DemandOnlyPerSenderCap) so a single unfunded sender flooding
+// MANY distinct task hashes is capped. Thread-safe.
+func (s *State) DemandOnlyCountForSender(buyerKey string, now time.Time, window time.Duration) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cutoff := now.Add(-window).UnixNano()
+	n := 0
+	for _, ts := range s.demandOnlySenderTimes[buyerKey] {
+		if ts >= cutoff {
+			n++
+		}
+	}
+	return n
+}
+
 // SetBuyMissOffer records a standing buy-miss offer for the given task hash.
 // If a non-expired offer already exists for this hash, it is NOT overwritten
 // (one offer per task hash — no duplicates).

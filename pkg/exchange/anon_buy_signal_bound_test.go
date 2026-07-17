@@ -33,12 +33,30 @@ import (
 	"github.com/3dl-dev/dontguess/pkg/scrip"
 )
 
-// matchCountForTag returns the number of exchange:match messages currently in
-// the harness log.
+// matchCount returns the number of REAL exchange:match responses currently in
+// the harness log. A DEMAND-ONLY registration (67e0 ruling) also carries TagMatch
+// (it is a passthrough-tagged buy-miss whose single canonical op is TagMatch), but
+// it is NOT a match surfaced to a buyer — it never folds into matching/ranking/
+// pricing — so it is excluded here. This keeps the signal-bound assertion precise:
+// a D1-dropped buy must produce ZERO real matches even though it now emits a
+// demand-only entry.
 func matchCount(t *testing.T, h *testHarness) int {
 	t.Helper()
 	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
-	return len(msgs)
+	n := 0
+	for _, m := range msgs {
+		demandOnly := false
+		for _, tg := range m.Tags {
+			if tg == exchange.TagDemandOnly {
+				demandOnly = true
+				break
+			}
+		}
+		if !demandOnly {
+			n++
+		}
+	}
+	return n
 }
 
 // newSignalBoundEngine builds a team-tier engine (ScripStore configured) with

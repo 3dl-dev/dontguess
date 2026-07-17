@@ -36,6 +36,24 @@ const (
 	// Sent by the engine as a reply to a buy with no matching inventory.
 	TagBuyMiss = "exchange:buy-miss"
 
+	// TagDemandOnly marks a buy-miss message emitted for a D1-DROPPED unfunded
+	// buy (67e0 operator ruling). An unfunded (zero/under-MinBuyBalance) buyer's
+	// miss is no longer fully dropped: it is registered as a DEMAND-ONLY signal so
+	// `dontguess demand` still sees the unmet demand, but it moves NO scrip, opens
+	// NO funded BuyMissOffer, and — critically — NEVER folds into matching /
+	// ranking / pricing (that is the load-bearing D1 anti-Sybil invariant,
+	// engine_buy.go handleBuy). It is a PASSTHROUGH "x" marker, NOT a canonical op:
+	// a demand-only message carries [TagBuyMiss, TagMatch, TagDemandOnly] and
+	// exchangeOp still resolves it to the single canonical op TagMatch. applyMatch
+	// sees TagDemandOnly and routes it to applyDemandOnly (dedup + per-sender cap
+	// bookkeeping ONLY) instead of the normal match fold, so it never touches
+	// matchToBuyer / matchedOrders / matchToEntry / matchToResults / price /
+	// demand. The demand CLI's buyMissFilter (cmd/dontguess) picks it up via the
+	// TagBuyMiss "x" tag; demand.BuildBacklog surfaces it with offered_price_rate 0
+	// (no funded offer). Emission is DEDUPED by task_hash and CAPPED per unfunded
+	// sender per rolling window so a Sybil flood collapses to one bounded entry.
+	TagDemandOnly = "exchange:demand-only"
+
 	// TagAssignAuctionClose is emitted by the engine when a Vickrey auction
 	// window closes. The payload carries the winner key and Vickrey clearing
 	// price, allowing state to correctly finalize on replay.
@@ -476,6 +494,27 @@ const BuyMissOfferTTL = 24 * time.Hour
 // BuyMissOfferRate is the fraction of token_cost the exchange pays on
 // a buy-miss auto-accept (70% — same as standard auto-accept discount).
 const BuyMissOfferRate = 70 // percent
+
+// Demand-only registration bounds (67e0 ruling, D1 anti-Sybil). A D1-dropped
+// unfunded buy is registered as a demand-only signal, but the volume one
+// unfunded identity can inject is bounded so a Sybil flood cannot swamp the
+// backlog for free.
+const (
+	// DemandOnlyPerSenderWindow is the rolling window over which
+	// DemandOnlyPerSenderCap is enforced.
+	DemandOnlyPerSenderWindow = time.Hour
+
+	// DemandOnlyPerSenderCap is the maximum number of DISTINCT demand-only
+	// registrations a single unfunded sender may drive within
+	// DemandOnlyPerSenderWindow. Repeated identical misses collapse to one entry
+	// by the task_hash dedup BEFORE this cap is consulted, so this bounds a
+	// sender flooding MANY different task hashes.
+	DemandOnlyPerSenderCap = 20
+
+	// DemandOnlyGlobalCap bounds the total number of distinct demand-only task
+	// hashes retained, a backstop against a many-identity flood of unique tasks.
+	DemandOnlyGlobalCap = 10000
+)
 
 // DefaultClaimTimeoutMinutes is the default TTL for an assign claim.
 // The claimant must submit assign-complete within this window or the claim
@@ -1158,6 +1197,28 @@ type State struct {
 	// One offer per task hash — no duplicates. Offers expire after BuyMissOfferTTL.
 	// Key: SHA-256 hex of canonical task description.
 	buyMissOffers map[string]*BuyMissOffer
+
+	// demandOnlyTaskHashes is the dedup set of task hashes that already have a
+	// DEMAND-ONLY registration (67e0 ruling; a D1-dropped unfunded miss). Key:
+	// SHA-256 hex of the task description. Repeated identical unfunded misses —
+	// same OR different Sybil identities — collapse to ONE demand entry because
+	// registerDemandOnly consults this set before emitting. Rebuilt from the log
+	// on Replay by applyDemandOnly (reset in the Replay reset block).
+	demandOnlyTaskHashes map[string]struct{}
+
+	// demandOnlySenderTimes tracks, per unfunded buyer key, the timestamps (nanos)
+	// of that buyer's demand-only registrations, for the per-sender rolling-window
+	// cap (DemandOnlyPerSenderCap / DemandOnlyPerSenderWindow). Key: buyer hex
+	// pubkey (carried in the demand-only payload's buyer_key, since the message
+	// itself is operator-authored). Rebuilt from the log on Replay.
+	demandOnlySenderTimes map[string][]int64
+
+	// demandOnlyCounted is the per-message idempotency guard for applyDemandOnly:
+	// a demand-only message is folded once directly (e.state.Apply after emit) and
+	// again by the poll-loop snapshot fold, so without this guard the per-sender
+	// time list would double-count and the cap would trip early. Key: demand-only
+	// message ID. Reset on Replay (rebuilt in log order like consumeCounted).
+	demandOnlyCounted map[string]struct{}
 
 	// matchToBuyMsgID maps a match message ID to the buy message ID it fulfills.
 	// Populated by applyMatch from the match antecedent.
