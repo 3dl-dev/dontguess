@@ -341,12 +341,14 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("IngestLocalRecord(put): %v", err)
 	}
-	if err := eng.AutoAcceptPut(putID, tokenCost*70/100, time.Now().UTC().Add(72*time.Hour)); err != nil {
-		t.Fatalf("AutoAcceptPut: %v", err)
-	}
+	// Promote WITHOUT the hot compression assign AutoAcceptPut would fire
+	// (dontguess-20e): a standing hot assign would make the cold post below atomically
+	// DEFER, so the open/cold assign this e2e claim/complete flow exercises would never
+	// exist. See foldPutAcceptNoHot.
+	foldPutAcceptNoHot(t, eng, operator.PubKeyHex(), putID, tokenCost*70/100)
 	inv := eng.State().Inventory()
 	if len(inv) != 1 {
-		t.Fatalf("inventory after AutoAcceptPut = %d entries, want 1", len(inv))
+		t.Fatalf("inventory after put-accept = %d entries, want 1", len(inv))
 	}
 	entryID := inv[0].EntryID
 	if inv[0].WrappedCEKOperator != "" {

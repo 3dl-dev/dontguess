@@ -311,11 +311,61 @@ type Engine struct {
 	opts       EngineOptions
 	state      *State
 	matchIndex *matching.Index
-	// opMu serializes state-mutating operations across concurrent goroutines:
-	// RunAutoAccept (auto-accept ticker goroutine) and AutoAcceptPut/RejectPut
-	// (operator socket handler goroutine). Lock ordering: acquire opMu FIRST,
-	// then any State-internal locks (acquired via the existing State helpers).
+	// opMu serializes state-mutating operations across concurrent goroutines. The
+	// operator-broadcast writers it serializes are:
+	//   1. RunAutoAccept          — the auto-accept ticker goroutine.
+	//   2. AutoAcceptPut/RejectPut — the operator socket handler goroutine.
+	//   3. PostOpenCompressionAssign — the medium-loop goroutine (cmd/dontguess
+	//      serve.go runEngineLoop -> pkg/pricing MediumLoop.Tick, dontguess-ffb).
+	//      Added dontguess-20e: it posts open (cold) compression assigns as a
+	//      check-then-act (ActiveAssigns/HasCompressedVersion guard, then a compound
+	//      sendOperatorMessage broadcast). Without opMu it could pass a stale guard
+	//      concurrently with a warm/hot assign from writer 1 or 2 and double-post an
+	//      assign for one compression unit (scrip double-pay). It acquires opMu around
+	//      the guard+post so the whole check-then-act is atomic, exactly like the
+	//      auto-accept ticker. The lower-level sendCompressionAssign /
+	//      sendWarmCompressionAssign helpers are NOT independent writers here: they
+	//      already run under opMu via writers 1 and 2 (autoAcceptPutLocked and the
+	//      operator-path dispatch), so they must never lock opMu themselves.
+	//   4. sendWarmCompressionAssign — fired by handleBuy on a match. handleBuy is
+	//      dispatched by TWO paths: (i) the auto-accept rebuild
+	//      (rebuildAndDispatchGapLocal, UNDER opMu — already serialized) AND (ii) the
+	//      STEADY-STATE POLL LOOP (runLocal -> pollLocalStore ->
+	//      foldAndDispatchLocalSnapshot -> dispatchLocalGap -> dispatch -> handleBuy),
+	//      which holds NEITHER opMu NOR localMu (dispatch runs after localMu is
+	//      released). In production serve the poll loop and the medium-loop goroutine
+	//      run CONCURRENTLY, so a poll-loop warm assign (path ii) can be applied
+	//      between writer 3's opMu-held ActiveAssigns()==0 read and its post — warm +
+	//      cold AssignRecords then coexist for one entry, two task_reward payments, the
+	//      double-pay dontguess-20e targets. opMu on writer 3 gives ZERO exclusion
+	//      against writer 4 path (ii), which never takes opMu. See compressAssignMu:
+	//      it is the leaf lock that serializes the guard+post of the WARM and COLD
+	//      posters (writers 3 and 4) against each other on BOTH dispatch paths.
+	// Lock ordering: acquire opMu FIRST, then compressAssignMu (if taken), then any
+	// State-internal / localMu locks (acquired via the existing helpers).
 	opMu sync.Mutex
+	// compressAssignMu serializes the dedup-recheck + post of the compression-assign
+	// posters whose check-then-act is NOT already mutually serialized by opMu
+	// (dontguess-20e Gap A). The COLD poster (sendColdCompressionAssign, writer 3)
+	// runs under opMu; the WARM poster (sendWarmCompressionAssign, writer 4) is
+	// reached BOTH under opMu (auto-accept rebuild dispatch) AND with NO lock at all
+	// (steady-state poll loop, engine_core.go poll path). opMu therefore cannot
+	// serialize cold against a poll-loop warm post, so a dedicated LEAF mutex does:
+	// every warm/cold post acquires it immediately around the
+	// ActiveAssigns/HasCompressedVersion recheck AND the send (which state.Applies the
+	// new assign), so the next poster's recheck always observes an already-applied
+	// sibling and defers instead of double-posting.
+	//
+	// Lock ordering is fixed and non-inverting: opMu (optional, outer) ⊃
+	// compressAssignMu ⊃ (State.mu / localMu, taken by the send). It is NEVER held
+	// while acquiring opMu, and the sends run OUTSIDE localMu (dispatch runs after
+	// localMu is released), so it never nests under localMu. The HOT poster
+	// (sendCompressionAssign, writers 1/2 at put-accept) does NOT take this lock: it
+	// is already opMu-serialized with cold, and a hot assign and a poll-loop warm
+	// assign for the SAME entry cannot race (accept strictly precedes any match), and
+	// hot+warm coexistence is in any case the designed two-offer path
+	// (warm_compression_test.go).
+	compressAssignMu sync.Mutex
 	// ctx is the shutdown context passed to Start. Stored atomically so that
 	// handler goroutines can read it without a data race against the Start write.
 	// Handlers use this so that in-flight scrip operations are cancelled on
@@ -1078,6 +1128,39 @@ func (e *Engine) pollLocalStore() error {
 // pollLocalStore's cursors are monotonic and dispatch-exactly-once under localMu.
 func (e *Engine) PollLocalStoreForTest() error {
 	return e.pollLocalStore()
+}
+
+// compressAssignGuardHook is a test-only synchronization seam for mutation-testing
+// the compressAssignMu serialization (dontguess-20e Gap B). When non-nil it is
+// invoked INSIDE the compressAssignMu critical section of
+// sendWarmCompressionAssign / sendColdCompressionAssign, AFTER the dedup guard read
+// has returned "no active assign / no compressed version" (so the caller is
+// committed to posting) and BEFORE the compound send+Apply. kind is "warm" or
+// "cold" so a test can tell the two writers apart.
+//
+// It exists solely so a test can DETERMINISTICALLY create the one schedule
+// compressAssignMu actually protects: BOTH the warm and cold writer having read the
+// guard empty, neither having posted yet. With compressAssignMu present, only one
+// writer can be in this section at a time, so a test barrier here degrades to
+// serialized behavior (the second writer never reaches the hook — it blocks on the
+// mutex — the first times out of the barrier and posts, and the second then observes
+// the applied assign and defers). Remove compressAssignMu and BOTH writers reach the
+// hook, the barrier releases them together, and both post — the double-post the lock
+// prevents. The predicate-only test cannot force that schedule because the warm-poll
+// pipeline is far longer than the short cold post, so cold almost always posts first
+// and warm defers via the predicate, masking the lock's absence.
+//
+// nil in production (the only non-test assignment site). A nil func-value compare is
+// a single load+branch — zero measurable cost on the hot path.
+var compressAssignGuardHook func(kind string)
+
+// SetCompressAssignGuardHookForTest installs (or, with nil, clears) the
+// compress-assign guard seam. Test-support only; see compressAssignGuardHook. Not
+// safe to use from a test that runs in parallel with another test that drives a
+// compression assign — the hook is process-global, so callers must run
+// non-parallel (see TestPostOpenCompressionAssign_LockSerializesSimultaneousWarmCold).
+func SetCompressAssignGuardHookForTest(fn func(kind string)) {
+	compressAssignGuardHook = fn
 }
 
 // StartupReplayForTest runs the SYNCHRONOUS startup portion of Start — the exact
