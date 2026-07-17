@@ -421,11 +421,18 @@ func TestBuyMiss_OfferExpiry(t *testing.T) {
 	}
 }
 
-// TestBuyMiss_WrongSenderIgnored verifies that only the buyer who received the
-// buy-miss offer may fulfill it by submitting a put. A different agent
-// submitting a put with a matching description must NOT trigger auto-accept.
-// When the original buyer then puts the same description, auto-accept fires.
-func TestBuyMiss_WrongSenderIgnored(t *testing.T) {
+// TestBuyMiss_ThirdPartyFulfillerAccepted verifies the open-bounty behavior
+// (dontguess-909): a THIRD-PARTY agent — not the buyer who received the
+// buy-miss offer — MAY fulfill it by submitting a matching put, and the
+// engine auto-accepts exactly as it would for the original buyer.
+//
+// Before dontguess-909, matchBuyMissOffer rejected any sender other than
+// offer.BuyerKey, which made a "standing offer" fulfillable only by computing
+// your own miss and selling it back to yourself. This test asserts the
+// corrected behavior: ANY admitted agent's put against the task hash claims
+// the offer. (Renamed/rewritten from the old TestBuyMiss_WrongSenderIgnored,
+// which asserted the now-removed restriction.)
+func TestBuyMiss_ThirdPartyFulfillerAccepted(t *testing.T) {
 	t.Parallel()
 
 	h := newTestHarness(t)
@@ -448,86 +455,172 @@ func TestBuyMiss_WrongSenderIgnored(t *testing.T) {
 	}
 	eng.State().SetBuyMissOffer(offer)
 
-	// Step 2: An impostor (h.seller) submits a put with the same task description.
-	// Use Apply (not Replay) to add the put to state so the injected offer is preserved.
-	impostorPut := h.sendMessage(h.seller,
+	// A third-party fulfiller (h.seller, NOT h.buyer) submits a put with the
+	// same task description. Use Apply (not Replay) to add the put to state
+	// so the injected offer is preserved.
+	fulfillerPut := h.sendMessage(h.seller,
 		putPayload(task, "sha256:"+fmt.Sprintf("%064x", 1234), "code", 40000, 80000),
 		[]string{exchange.TagPut},
 		nil,
 	)
-	impostorRec, _ := h.st.GetMessage(impostorPut.ID)
-	if impostorRec == nil {
-		t.Fatal("impostor put not found in store")
+	fulfillerRec, _ := h.st.GetMessage(fulfillerPut.ID)
+	if fulfillerRec == nil {
+		t.Fatal("fulfiller put not found in store")
 	}
-	impostorMsg := exchange.FromStoreRecord(impostorRec)
-	eng.State().Apply(impostorMsg)
+	fulfillerMsg := exchange.FromStoreRecord(fulfillerRec)
+	eng.State().Apply(fulfillerMsg)
 
-	// Dispatch the impostor put — should be silently ignored (wrong sender).
-	if err := eng.DispatchForTest(impostorMsg); err != nil {
-		t.Fatalf("DispatchForTest(impostor put): %v", err)
+	// Dispatch the third-party put — must trigger auto-accept (open bounty).
+	if err := eng.DispatchForTest(fulfillerMsg); err != nil {
+		t.Fatalf("DispatchForTest(fulfiller put): %v", err)
 	}
 
-	// No settle should have been emitted.
+	// A put-accept settle MUST have been emitted for the third-party fulfiller.
 	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
-	for _, sm := range settleMsgs {
-		if hasTag(sm.Tags, "exchange:phase:put-accept") {
-			t.Errorf("unexpected put-accept for impostor put: msg %s", sm.ID)
-		}
-	}
-
-	// Standing offer must still be present (not consumed).
-	if eng.State().GetBuyMissOffer(taskHash) == nil {
-		t.Error("standing offer was consumed by impostor — should still be live")
-	}
-
-	// Step 3: The actual buyer now puts the same description — auto-accept must fire.
-	// Use Apply to add only this new message without re-running Replay (which would
-	// wipe the standing offer since it was injected directly, not via campfire messages).
-	preSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
-
-	// Use content_size=80001 to produce different content bytes than the impostor
-	// (size=80000), avoiding dedup rejection by contentHashIndex (dontguess-ed1 §2).
-	// The test logic tests sender identity, not content identity.
-	buyerPut := h.sendMessage(h.buyer,
-		putPayload(task, "sha256:"+fmt.Sprintf("%064x", 5678), "code", 40000, 80001),
-		[]string{exchange.TagPut},
-		nil,
-	)
-	buyerRec, _ := h.st.GetMessage(buyerPut.ID)
-	if buyerRec == nil {
-		t.Fatal("buyer put not found in store")
-	}
-	buyerMsg := exchange.FromStoreRecord(buyerRec)
-	eng.State().Apply(buyerMsg)
-
-	if err := eng.DispatchForTest(buyerMsg); err != nil {
-		t.Fatalf("DispatchForTest(buyer put): %v", err)
-	}
-
-	// A put-accept settle must have been emitted.
-	postSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
-	var foundAccept bool
-	for _, sm := range postSettle {
-		// Only consider messages that appeared after the impostor phase.
-		alreadySeen := false
-		for _, pre := range preSettle {
-			if pre.ID == sm.ID {
-				alreadySeen = true
-				break
-			}
-		}
-		if !alreadySeen && hasTag(sm.Tags, "exchange:phase:put-accept") {
-			foundAccept = true
+	var putAcceptMsg *store.MessageRecord
+	for i := range settleMsgs {
+		if hasTag(settleMsgs[i].Tags, "exchange:phase:put-accept") {
+			putAcceptMsg = &settleMsgs[i]
 			break
 		}
 	}
-	if !foundAccept {
-		t.Error("buyer put did not trigger auto-accept — expected put-accept settle message")
+	if putAcceptMsg == nil {
+		t.Fatal("third-party fulfiller put did not trigger auto-accept — expected put-accept settle message")
+	}
+	if len(putAcceptMsg.Antecedents) == 0 || putAcceptMsg.Antecedents[0] != fulfillerPut.ID {
+		t.Errorf("put-accept antecedent = %v, want [%s] (the fulfiller's put)", putAcceptMsg.Antecedents, fulfillerPut.ID)
 	}
 
-	// Standing offer must now be consumed.
+	// Standing offer must now be consumed — claimed by the third-party fulfiller.
 	if eng.State().GetBuyMissOffer(taskHash) != nil {
-		t.Error("standing offer still present after buyer fulfillment — should be consumed")
+		t.Error("standing offer still present after third-party fulfillment — should be consumed")
+	}
+}
+
+// TestBuyMiss_ClaimedOfferRejectsSecondFulfillment is the mandatory
+// enforcement/anti-double-pay proof for dontguess-909's open-bounty change:
+// once a funded standing offer has been claimed by one fulfiller, a SECOND
+// agent's put matching the same task hash must NOT be auto-accepted and must
+// NOT be paid — ClaimBuyMissOffer's atomic claim-and-delete (state_accessors.go)
+// leaves nothing for a second claimant to take.
+//
+// This exercises the REAL engine + REAL scrip ledger (CampfireScripStore /
+// scrip.LocalScripStore), not a mock: the first fulfiller's balance must
+// increase by the real offer payout, and the second fulfiller's balance must
+// stay at zero after their put is dispatched.
+func TestBuyMiss_ClaimedOfferRejectsSecondFulfillment(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHarness(t)
+
+	const tokenCost int64 = 90000
+	expectedPutPay := tokenCost * int64(exchange.BuyMissOfferRate) / 100
+	// Fund the operator so it can pay out both the (successful) first
+	// fulfillment and, if the bug regressed, a second one too — the test
+	// asserts on balances, not on ErrBudgetExceeded, so give the operator
+	// plenty of headroom to isolate the double-pay assertion.
+	addScripMintMsg(t, h, h.operator.PublicKeyHex(), expectedPutPay*4)
+
+	cs := newCampfireScripStore(t, h)
+	eng := exchange.NewEngine(exchange.EngineOptions{
+		CampfireID:        h.cfID,
+		LocalStore:        h.st,
+		OperatorPublicKey: h.operator.pubKeyHex,
+		ScripStore:        cs,
+		Logger:            func(format string, args ...any) { t.Logf("[engine] "+format, args...) },
+	})
+
+	task := "Implement a lock-free ring buffer in Rust with SPSC semantics"
+	taskHash := exchange.TaskDescriptionHash(task)
+
+	// Replay existing (empty) state, then inject a live funded standing offer
+	// as if handleBuyMiss had already created it for h.buyer.
+	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	eng.State().Replay(exchange.FromStoreRecords(msgs))
+	offer := &exchange.BuyMissOffer{
+		TaskHash:  taskHash,
+		BuyMsgID:  "fake-buy-msg-id",
+		BuyerKey:  h.buyer.PublicKeyHex(),
+		Task:      task,
+		ExpiresAt: time.Now().Add(exchange.BuyMissOfferTTL),
+	}
+	eng.State().SetBuyMissOffer(offer)
+
+	firstFulfiller := newTestAgent(t)
+	secondFulfiller := newTestAgent(t)
+
+	// --- First fulfillment: must succeed and pay the real offer amount. ---
+	firstPut := h.sendMessage(firstFulfiller,
+		putPayload(task, "sha256:"+fmt.Sprintf("%064x", tokenCost), "code", tokenCost, tokenCost*2),
+		[]string{exchange.TagPut},
+		nil,
+	)
+	firstRec, _ := h.st.GetMessage(firstPut.ID)
+	if firstRec == nil {
+		t.Fatal("first put not found in store")
+	}
+	firstMsg := exchange.FromStoreRecord(firstRec)
+	eng.State().Apply(firstMsg)
+	if err := eng.DispatchForTest(firstMsg); err != nil {
+		t.Fatalf("DispatchForTest(first fulfiller put): %v", err)
+	}
+
+	if got := cs.Balance(firstFulfiller.PublicKeyHex()); got != expectedPutPay {
+		t.Fatalf("first fulfiller balance after claim = %d, want %d (real scrip payout for winning the open bounty)", got, expectedPutPay)
+	}
+	if eng.State().GetBuyMissOffer(taskHash) != nil {
+		t.Fatal("standing offer still present after first fulfillment — should be consumed by the atomic claim")
+	}
+
+	// --- Second fulfillment attempt on the SAME (now-claimed) offer. ---
+	// Different content (tokenCost differs from firstPut's implied content) so
+	// this isn't rejected by contentHashIndex dedup — we want to isolate the
+	// buy-miss double-claim guard, not the unrelated content-dedup guard.
+	const secondTokenCost int64 = 77000
+	secondPut := h.sendMessage(secondFulfiller,
+		putPayload(task, "sha256:"+fmt.Sprintf("%064x", secondTokenCost), "code", secondTokenCost, secondTokenCost*2),
+		[]string{exchange.TagPut},
+		nil,
+	)
+	secondRec, _ := h.st.GetMessage(secondPut.ID)
+	if secondRec == nil {
+		t.Fatal("second put not found in store")
+	}
+	secondMsg := exchange.FromStoreRecord(secondRec)
+	eng.State().Apply(secondMsg)
+	if err := eng.DispatchForTest(secondMsg); err != nil {
+		t.Fatalf("DispatchForTest(second fulfiller put): %v", err)
+	}
+
+	// The second fulfiller must NOT have been paid via the buy-miss route —
+	// no live offer remained for them to claim.
+	secondExpectedPay := secondTokenCost * int64(exchange.BuyMissOfferRate) / 100
+	if got := cs.Balance(secondFulfiller.PublicKeyHex()); got == secondExpectedPay {
+		t.Fatalf("second fulfiller balance = %d — was paid the buy-miss offer a SECOND time (double-pay)", got)
+	}
+	if got := cs.Balance(secondFulfiller.PublicKeyHex()); got != 0 {
+		t.Errorf("second fulfiller balance = %d, want 0 (no buy-miss payout for a claim on an already-consumed offer)", got)
+	}
+
+	// The first fulfiller's balance must be unchanged by the second put — this
+	// is the direct anti-double-pay assertion: paying out twice for one offer
+	// would either double the first fulfiller's balance (if keyed wrong) or pay
+	// the second fulfiller the same amount (checked above). Re-assert the first
+	// balance is still exactly the single payout.
+	if got := cs.Balance(firstFulfiller.PublicKeyHex()); got != expectedPutPay {
+		t.Errorf("first fulfiller balance after second put attempt = %d, want unchanged %d", got, expectedPutPay)
+	}
+
+	// No second exchange:buy-miss-tagged put-accept must exist for the second put.
+	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	for _, sm := range settleMsgs {
+		if hasTag(sm.Tags, exchange.TagBuyMiss) && hasTag(sm.Tags, "exchange:phase:put-accept") {
+			// Antecedent must be the FIRST put, never the second — confirms only
+			// one buy-miss put-accept was ever emitted for this offer.
+			if len(sm.Antecedents) == 0 || sm.Antecedents[0] != firstPut.ID {
+				t.Errorf("unexpected buy-miss put-accept with antecedent %v (want only the first put %s)", sm.Antecedents, firstPut.ID)
+			}
+		}
 	}
 }
 

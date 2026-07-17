@@ -29,8 +29,10 @@ func (e *Engine) handlePut(msg *Message) error {
 
 	taskHash := TaskDescriptionHash(pending.Description)
 
-	// Only the buyer who received the miss offer may fulfill it.
-	offer := e.matchBuyMissOffer(msg.Sender, taskHash)
+	// ANY admitted agent may fulfill a funded standing offer — this is an OPEN
+	// BOUNTY (dontguess-909), not "compute your own miss and sell it back to
+	// yourself." See matchBuyMissOffer.
+	offer := e.matchBuyMissOffer(taskHash)
 	if offer == nil {
 		return nil // no matching offer — leave pending for normal operator review
 	}
@@ -47,29 +49,33 @@ func (e *Engine) validatePutContentHash(pending *InventoryEntry) error {
 	return nil
 }
 
-// matchBuyMissOffer peeks and claims the buy-miss offer for the given sender and
-// task hash. Returns nil if no matching offer exists or the sender doesn't match.
-// Uses peek-then-atomic-claim to prevent TOCTOU double-accept.
-func (e *Engine) matchBuyMissOffer(senderKey, taskHash string) *BuyMissOffer {
-	peeked := e.state.GetBuyMissOffer(taskHash)
-	if peeked == nil {
-		return nil
-	}
-	if senderKey != peeked.BuyerKey {
-		return nil // only the original buyer can fulfill their own miss offer
-	}
-
-	// Atomically claim to prevent TOCTOU double-accept.
-	offer := e.state.ClaimBuyMissOffer(taskHash)
-	if offer == nil {
-		return nil // race lost — another concurrent put already claimed it
-	}
-	// TOCTOU guard: re-validate sender against the claimed offer.
-	if offer.BuyerKey != senderKey {
-		e.state.SetBuyMissOffer(offer) // restore the rightful buyer's offer
-		return nil
-	}
-	return offer
+// matchBuyMissOffer claims the standing buy-miss offer for the given task hash,
+// if a live (non-expired, unclaimed) one exists.
+//
+// Open-bounty semantics (dontguess-909): fulfillment is NOT restricted to the
+// original buyer (offer.BuyerKey) — any admitted agent's put matching the task
+// hash may claim it. Before this change, matchBuyMissOffer rejected any sender
+// other than offer.BuyerKey, which made a "standing offer" only fulfillable by
+// computing your own miss and selling it back to yourself — not an open bounty
+// as the buy-miss guide text (engine_buy.go handleBuyMiss) already promised
+// ("if you (or any agent) compute the result..."). Every offer reaching this
+// point was created by handleBuyMiss, which is only invoked after the buyer
+// passed the D1 funded-signal gate (buyerMeetsMinBalance) — an unfunded buy is
+// dropped before it ever creates a standing offer (see D1 in engine_buy.go).
+// So every offer here is a FUNDED offer; there is no unfunded-offer path to
+// gate against (that is sibling item 4f01's territory, demand-only, no funded
+// offer).
+//
+// ClaimBuyMissOffer is the atomic claim-and-delete (state_accessors.go) that
+// makes this race-safe and prevents double-pay: if two puts race for the same
+// task hash, only the first ClaimBuyMissOffer call gets the offer — the loser
+// gets nil here and its put falls through to normal operator review (no
+// auto-accept, no second payout). A put arriving after the offer has already
+// been claimed (by anyone, including a prior successful fulfiller) also gets
+// nil for the same reason: ClaimBuyMissOffer deletes the offer from state on
+// the winning claim, so there is nothing left to claim a second time.
+func (e *Engine) matchBuyMissOffer(taskHash string) *BuyMissOffer {
+	return e.state.ClaimBuyMissOffer(taskHash)
 }
 
 // fulfillBuyMissOffer completes the buy-miss fulfillment: emits put-accept,
@@ -88,8 +94,8 @@ func (e *Engine) fulfillBuyMissOffer(msg *Message, pending *InventoryEntry, offe
 
 	e.indexNewEntry(msg, pending)
 
-	e.opts.log("engine: buy-miss fulfilled: put=%s seller=%s price=%d offer_task_hash=%s",
-		msg.ID[:8], shortKey(pending.SellerKey), offeredPrice, taskHash[:16])
+	e.opts.log("engine: buy-miss fulfilled: put=%s fulfiller=%s buyer=%s price=%d offer_task_hash=%s",
+		msg.ID[:8], shortKey(pending.SellerKey), shortKey(offer.BuyerKey), offeredPrice, taskHash[:16])
 	return nil
 }
 
