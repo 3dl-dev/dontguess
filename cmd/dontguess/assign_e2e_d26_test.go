@@ -373,7 +373,35 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 	}
 	engDone := make(chan struct{})
 	go func() { defer close(engDone); _ = eng.Start(ctx) }()
-	t.Cleanup(func() { cancel(); <-engDone; stop() })
+	// Bounded cleanup (starvation-hardening companion to runBounded above): a
+	// bare `<-engDone` here is EXACTLY the shape the observed 600s hang's
+	// goroutine dump named ("chan receive, 9 minutes") — eng.Start's poll loop
+	// only re-checks ctx.Err() between poll ticks, so under host-CPU starvation
+	// this receive can sit unscheduled far longer than the happy path (~0.06s)
+	// with nothing here to fail it fast. stop() (attachRelayTransport's
+	// wg.Wait()) has the same shape: runReaderReconnect's reader is blocked
+	// inside relay.Conn.Recv's raw ws.ReadMessage(), which — per
+	// shutdownRelayTransport's doc a few hundred lines below in this same
+	// package — does NOT observe ctx cancellation on its own; only closing the
+	// underlying socket unblocks it, and nothing in this test's cleanup does
+	// that before stop() is called. Bounding both waits below makes a
+	// starvation stall fail in ~45s with a clear step name instead of riding
+	// the goroutine to the 10-minute go-test harness timeout.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-engDone:
+		case <-time.After(45 * time.Second):
+			t.Fatalf("timed out after 45s waiting for step to complete (starvation guard, not the 10m harness timeout): eng.Start(ctx) goroutine did not observe ctx cancellation")
+		}
+		stopDone := make(chan struct{})
+		go func() { defer close(stopDone); stop() }()
+		select {
+		case <-stopDone:
+		case <-time.After(45 * time.Second):
+			t.Fatalf("timed out after 45s waiting for step to complete (starvation guard, not the 10m harness timeout): attachRelayTransport stop() (reader/outbox goroutines) did not return after ctx cancellation")
+		}
+	})
 
 	// Wait for the Outbox to publish the assign onto the (real) relay — this is
 	// what makes it discoverable by the agent's CLI over a SEPARATE connection.
@@ -404,7 +432,9 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 		"operator-npub": operatorNpub,
 		"timeout":       "20s",
 	})
-	if err := runAssigns(assignsC, nil); err != nil {
+	if err := runBounded(t, 45*time.Second, "`dontguess assigns` discovery fetch (runAssigns)", func() error {
+		return runAssigns(assignsC, nil)
+	}); err != nil {
 		t.Fatalf("runAssigns: %v\noutput:\n%s", err, assignsOut.String())
 	}
 	listing := assignsOut.String()
@@ -414,8 +444,12 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 
 	// Independent corroborating read (same exported function the CLI itself
 	// calls) to pull the exact assign id for the claim/complete steps below.
-	open, err := relayclient.FetchOpenAssigns(mustCtx(t, ctx, 20*time.Second), mustConn(t, hub.wsURL(), agent), operator.PubKeyHex(), agent.PubKeyHex())
-	if err != nil {
+	var open []relayclient.OpenAssign
+	if err := runBounded(t, 45*time.Second, "FetchOpenAssigns (assertion helper relay round trip)", func() error {
+		var ferr error
+		open, ferr = relayclient.FetchOpenAssigns(mustCtx(t, ctx, 20*time.Second), mustConn(t, hub.wsURL(), agent), operator.PubKeyHex(), agent.PubKeyHex())
+		return ferr
+	}); err != nil {
 		t.Fatalf("FetchOpenAssigns (assertion helper): %v", err)
 	}
 	var assignID string
@@ -444,7 +478,9 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 		"relay":      hub.wsURL(),
 		"timeout":    "20s",
 	})
-	if err := runAssignClaim(claimC, []string{assignID}); err != nil {
+	if err := runBounded(t, 45*time.Second, "`dontguess assign claim` publish + await relay OK (runAssignClaim)", func() error {
+		return runAssignClaim(claimC, []string{assignID})
+	}); err != nil {
 		t.Fatalf("runAssignClaim: %v\noutput:\n%s", err, claimOut.String())
 	}
 	claimText := claimOut.String()
@@ -492,7 +528,9 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 		"content":    "cnVzdCBib3Jyb3cgY2hlY2tlciBjb21wcmVzc2VkIGNoZWF0c2hlZXQ=", // "rust borrow checker compressed cheatsheet"
 		"timeout":    "20s",
 	})
-	if err := runAssignComplete(completeC, []string{claimID}); err != nil {
+	if err := runBounded(t, 45*time.Second, "`dontguess assign complete` publish + await relay OK (runAssignComplete)", func() error {
+		return runAssignComplete(completeC, []string{claimID})
+	}); err != nil {
 		t.Fatalf("runAssignComplete: %v\noutput:\n%s", err, completeOut.String())
 	}
 
@@ -567,6 +605,37 @@ func extractClaimID(t *testing.T, out string) string {
 		t.Fatalf("parsed empty claim id from output:\n%s", out)
 	}
 	return id
+}
+
+// runBounded runs fn on its own goroutine and blocks the calling test
+// goroutine for AT MOST d, failing fast with t.Fatalf naming step if fn has
+// not returned by then. This is the fail-fast guard for cross-goroutine/relay
+// round trips in this file: relay.Conn.Recv (pkg/relay/conn.go) reads off the
+// raw websocket via ws.ReadMessage() with NO read deadline tied to the ctx
+// callers pass it — ctx is only re-checked AFTER a ReadMessage call returns,
+// never used to interrupt one already in flight. So a caller-supplied
+// "--timeout 20s" cobra flag (runAssigns/runAssignClaim/runAssignComplete
+// below) or a context.WithTimeout wrapper (mustCtx) bounds the HAPPY path but
+// does NOT bound a ReadMessage that is simply slow to get scheduled — exactly
+// what host-CPU starvation produces (observed: 600s hang under a concurrent
+// -race wave, 0.057s on a quiescent host — starvation, not deadlock). d must
+// stay far above the ~0.06s happy-path runtime and well under the go-test
+// harness's 10-minute wall so a starved run fails in d, not 600s (see this
+// item's task text). A leaked goroutine blocked in ReadMessage past a
+// runBounded timeout is reaped when hub.srv.Close() (t.Cleanup, newAssignHub)
+// tears down the socket and unblocks the read with a connection-closed error;
+// it does not linger past this test's own completion.
+func runBounded(t *testing.T, d time.Duration, step string, fn func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(d):
+		t.Fatalf("timed out after %s waiting for step to complete (starvation guard, not the 10m harness timeout): %s", d, step)
+		return nil // unreachable: t.Fatalf calls runtime.Goexit()
+	}
 }
 
 // mustCtx/mustConn are tiny test-local conveniences for the one-off assertion
