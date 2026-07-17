@@ -471,16 +471,18 @@ func (e *Engine) registerDemandOnly(msg *Message, task string, synthetic bool) e
 	taskHash := TaskDescriptionHash(task)
 
 	// DEDUP by task_hash — this is what collapses a Sybil flood on one task to a
-	// single demand entry.
-	if e.state.HasDemandOnly(taskHash) {
+	// single demand entry. Consulted with wall-clock now so an EXPIRED prior
+	// registration does not permanently dedup a task away (dontguess-fd3).
+	if e.state.HasDemandOnly(taskHash, time.Now()) {
 		e.degradation.DemandOnlyDeduped.Add(1)
 		e.opts.log("engine: demand-only dedup: task_hash=%s already registered (buyer=%s) -- not re-emitted",
 			taskHash[:16], shortKey(msg.Sender))
 		return nil
 	}
 
-	// Global backstop cap on distinct demand-only tasks.
-	if e.state.DemandOnlyTotal() >= DemandOnlyGlobalCap {
+	// Global backstop cap on distinct LIVE demand-only tasks (expired entries do
+	// not count — dontguess-fd3 finding 1).
+	if e.state.DemandOnlyTotal(time.Now()) >= DemandOnlyGlobalCap {
 		e.degradation.DemandOnlyCapped.Add(1)
 		e.opts.log("engine: demand-only global cap reached (%d) -- dropping registration task_hash=%s buyer=%s",
 			DemandOnlyGlobalCap, taskHash[:16], shortKey(msg.Sender))
@@ -496,7 +498,7 @@ func (e *Engine) registerDemandOnly(msg *Message, task string, synthetic bool) e
 		return nil
 	}
 
-	expiresAt := time.Now().Add(BuyMissOfferTTL)
+	expiresAt := time.Now().Add(DemandOnlyTTL)
 	// offered_price_rate is 0: a demand-only signal carries NO funded standing
 	// offer. buyer_key is carried in the payload because the message is
 	// operator-authored (msg.Sender on the emitted record is the operator), and

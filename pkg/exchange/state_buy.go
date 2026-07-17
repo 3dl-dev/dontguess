@@ -132,17 +132,70 @@ func (s *State) applyDemandOnly(msg *Message) {
 		return
 	}
 	var p struct {
-		TaskHash string `json:"task_hash"`
-		BuyerKey string `json:"buyer_key"`
+		TaskHash  string `json:"task_hash"`
+		BuyerKey  string `json:"buyer_key"`
+		ExpiresAt string `json:"expires_at"`
 	}
 	if err := json.Unmarshal(msg.Payload, &p); err != nil || p.TaskHash == "" {
 		return
 	}
 	s.demandOnlyCounted[msg.ID] = struct{}{}
-	s.demandOnlyTaskHashes[p.TaskHash] = struct{}{}
-	if p.BuyerKey != "" {
-		s.demandOnlySenderTimes[p.BuyerKey] = append(s.demandOnlySenderTimes[p.BuyerKey], msg.Timestamp)
+
+	// Derive this registration's expiry DETERMINISTICALLY from the event — never
+	// the wall clock (the demand-only fold is event-sourced-pure, like the assign
+	// fold in state_assign.go). Prefer the operator-authored expires_at carried in
+	// the payload (fixed once emitted, so replay-stable); fall back to the message
+	// receipt time + DemandOnlyTTL when it is absent or unparseable.
+	expiresAt := msg.Timestamp + int64(DemandOnlyTTL)
+	if p.ExpiresAt != "" {
+		if t, err := time.Parse(time.RFC3339, p.ExpiresAt); err == nil {
+			expiresAt = t.UnixNano()
+		}
 	}
+
+	// Evict expired demand-only hashes relative to THIS event's own timestamp
+	// (deterministic on replay — demand-only messages fold in ~timestamp order).
+	// Without this a flood of registrations whose TTL has elapsed would linger in
+	// the map forever and keep counting toward DemandOnlyGlobalCap, permanently
+	// disabling demand-only registration for all future legit unfunded buyers
+	// (dontguess-fd3 finding 1 — the irreversible free-DoS this closes).
+	for hash, exp := range s.demandOnlyTaskHashes {
+		if exp <= msg.Timestamp {
+			delete(s.demandOnlyTaskHashes, hash)
+		}
+	}
+	s.demandOnlyTaskHashes[p.TaskHash] = expiresAt
+
+	if p.BuyerKey != "" {
+		// Prune timestamps outside the rolling per-sender window ON WRITE so a
+		// long-lived / replayed sender key cannot grow an unbounded slice that
+		// DemandOnlyCountForSender must rescan every call (dontguess-fd3 finding 2).
+		// Prune is relative to this event's timestamp; the read-side window filter
+		// (DemandOnlyCountForSender) uses wall-clock now >= msg.Timestamp, so this
+		// never drops a timestamp the read would still count.
+		pruned := pruneDemandWindow(append(s.demandOnlySenderTimes[p.BuyerKey], msg.Timestamp), msg.Timestamp)
+		if len(pruned) == 0 {
+			delete(s.demandOnlySenderTimes, p.BuyerKey)
+		} else {
+			s.demandOnlySenderTimes[p.BuyerKey] = pruned
+		}
+	}
+}
+
+// pruneDemandWindow drops timestamps older than DemandOnlyPerSenderWindow before
+// ref (nanos) from ts, bounding the per-sender slice to O(window) entries so a
+// long-lived or replayed sender key cannot grow it without bound (dontguess-fd3
+// finding 2). It filters in place (reusing ts's backing array) and returns the
+// retained, in-window suffix.
+func pruneDemandWindow(ts []int64, ref int64) []int64 {
+	cutoff := ref - int64(DemandOnlyPerSenderWindow)
+	out := ts[:0]
+	for _, t := range ts {
+		if t >= cutoff {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // tagsContain reports whether tags includes want.

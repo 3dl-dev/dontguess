@@ -511,9 +511,18 @@ const (
 	// sender flooding MANY different task hashes.
 	DemandOnlyPerSenderCap = 20
 
-	// DemandOnlyGlobalCap bounds the total number of distinct demand-only task
+	// DemandOnlyGlobalCap bounds the total number of distinct LIVE demand-only task
 	// hashes retained, a backstop against a many-identity flood of unique tasks.
+	// Only non-expired entries count toward this cap (dontguess-fd3 finding 1).
 	DemandOnlyGlobalCap = 10000
+
+	// DemandOnlyTTL is how long a demand-only registration stays LIVE before it is
+	// evicted and stops counting toward DemandOnlyGlobalCap / HasDemandOnly. It is
+	// the SAME value the emitted buy-miss message's expires_at is computed with
+	// (registerDemandOnly), so the in-memory eviction window matches the on-wire
+	// signal's advertised lifetime. Aliased to BuyMissOfferTTL (24h) so the two
+	// stay in lockstep by construction (dontguess-fd3).
+	DemandOnlyTTL = BuyMissOfferTTL
 )
 
 // DefaultClaimTimeoutMinutes is the default TTL for an assign claim.
@@ -1198,13 +1207,20 @@ type State struct {
 	// Key: SHA-256 hex of canonical task description.
 	buyMissOffers map[string]*BuyMissOffer
 
-	// demandOnlyTaskHashes is the dedup set of task hashes that already have a
-	// DEMAND-ONLY registration (67e0 ruling; a D1-dropped unfunded miss). Key:
-	// SHA-256 hex of the task description. Repeated identical unfunded misses —
-	// same OR different Sybil identities — collapse to ONE demand entry because
-	// registerDemandOnly consults this set before emitting. Rebuilt from the log
-	// on Replay by applyDemandOnly (reset in the Replay reset block).
-	demandOnlyTaskHashes map[string]struct{}
+	// demandOnlyTaskHashes maps each registered DEMAND-ONLY task hash (67e0 ruling;
+	// a D1-dropped unfunded miss) to the EXPIRY (unix nanos) of that registration.
+	// Key: SHA-256 hex of the NORMALIZED task description. Value: the demand-only
+	// entry's expires_at, derived deterministically from the folded event (its
+	// operator-authored expires_at payload field, or msg.Timestamp + DemandOnlyTTL)
+	// — the fold never reads the wall clock, matching the event-sourced-pure assign
+	// fold. Repeated identical unfunded misses — same OR different Sybil identities
+	// — collapse to ONE live entry because registerDemandOnly consults HasDemandOnly
+	// before emitting. LIVENESS is load-bearing (dontguess-fd3 finding 1): expired
+	// entries are evicted on each fold and excluded from DemandOnlyTotal /
+	// HasDemandOnly, so a flood of elapsed hashes cannot permanently pin
+	// DemandOnlyGlobalCap. Rebuilt from the log on Replay by applyDemandOnly (reset
+	// in the Replay reset block).
+	demandOnlyTaskHashes map[string]int64
 
 	// demandOnlySenderTimes tracks, per unfunded buyer key, the timestamps (nanos)
 	// of that buyer's demand-only registrations, for the per-sender rolling-window

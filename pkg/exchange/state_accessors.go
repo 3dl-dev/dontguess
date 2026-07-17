@@ -3,6 +3,7 @@ package exchange
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"time"
 )
 
@@ -562,30 +563,66 @@ func (s *State) PurchaseCount(entryID string) int {
 	return s.EntryDemandCount(entryID)
 }
 
-// TaskDescriptionHash returns the SHA-256 hex of a task description string.
-// Used as the key for buy-miss standing offers.
+// normalizeTaskForHash canonicalizes a task/description string before hashing so
+// trivial whitespace, case, and surrounding-whitespace variation cannot mint a
+// DISTINCT task_hash (dontguess-fd3 finding 3, anti-Sybil). One logical task must
+// map to ONE hash so that (a) the demand-only dedup collapses whitespace/case
+// variants of the same unfunded miss into one global-cap slot rather than
+// multiplying slots, and (b) the funded buy-miss offer key stays aligned across
+// creation and lookup.
+//
+// It trims, collapses every internal run of whitespace to a single space
+// (strings.Fields drops leading/trailing and repeated whitespace), and case-folds.
+// It is deliberately NOT punctuation-stripping: over-collapsing could alias two
+// genuinely distinct tasks onto one hash. The three normalizations here are the
+// minimum that defeats trivial evasion without conflating real tasks.
+func normalizeTaskForHash(task string) string {
+	return strings.ToLower(strings.Join(strings.Fields(task), " "))
+}
+
+// TaskDescriptionHash returns the SHA-256 hex of the NORMALIZED task description.
+// It is the single choke point shared by BOTH the demand-only dedup path
+// (registerDemandOnly) and the funded buy-miss offer path (handleBuyMiss creates
+// the offer keyed on the buy's task; matchBuyMissOffer / engine_put.go looks it up
+// keyed on the seller's put Description). Because both go through this function,
+// normalizing HERE keeps funded-offer creation and matching in lockstep with
+// demand-only dedup — a funded put whose Description differs from the original buy
+// task only by whitespace/case still matches its standing offer (dontguess-fd3).
 func TaskDescriptionHash(task string) string {
-	h := sha256.Sum256([]byte(task))
+	h := sha256.Sum256([]byte(normalizeTaskForHash(task)))
 	return hex.EncodeToString(h[:])
 }
 
-// HasDemandOnly reports whether a DEMAND-ONLY registration already exists for
-// taskHash (67e0 ruling). registerDemandOnly consults this to DEDUP repeated
-// identical unfunded misses — same or different Sybil identities — into ONE
-// demand entry. Thread-safe.
-func (s *State) HasDemandOnly(taskHash string) bool {
+// HasDemandOnly reports whether a LIVE (non-expired as of now) DEMAND-ONLY
+// registration already exists for taskHash (67e0 ruling). registerDemandOnly
+// consults this to DEDUP repeated identical unfunded misses — same or different
+// Sybil identities — into ONE demand entry. An EXPIRED registration reports false
+// so the same task can re-register (refresh the demand signal) rather than being
+// permanently deduped away (dontguess-fd3 finding 1). Thread-safe.
+func (s *State) HasDemandOnly(taskHash string, now time.Time) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, ok := s.demandOnlyTaskHashes[taskHash]
-	return ok
+	exp, ok := s.demandOnlyTaskHashes[taskHash]
+	return ok && exp > now.UnixNano()
 }
 
-// DemandOnlyTotal returns the number of distinct demand-only task hashes
-// registered, for the global backstop cap. Thread-safe.
-func (s *State) DemandOnlyTotal() int {
+// DemandOnlyTotal returns the number of LIVE (non-expired as of now) demand-only
+// task hashes registered, for the global backstop cap. Expired entries are NOT
+// counted: an unfunded-Sybil flood of task hashes whose TTL has elapsed must not
+// permanently exhaust DemandOnlyGlobalCap and lock out future legit unfunded
+// buyers (dontguess-fd3 finding 1 — the irreversible free-DoS this closes).
+// Thread-safe.
+func (s *State) DemandOnlyTotal(now time.Time) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.demandOnlyTaskHashes)
+	cutoff := now.UnixNano()
+	n := 0
+	for _, exp := range s.demandOnlyTaskHashes {
+		if exp > cutoff {
+			n++
+		}
+	}
+	return n
 }
 
 // DemandOnlyCountForSender returns how many demand-only registrations the given
