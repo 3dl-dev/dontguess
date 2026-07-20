@@ -1,11 +1,43 @@
 package matching_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/matching"
 )
+
+// TestSearch_UsesCachedEmbeddings_DoesNotReEmbedInventory is the dontguess-3cc
+// regression that made the exchange unusable: Search MUST reuse the per-entry
+// embeddings computed once at Rebuild/Add time, NOT re-embed every candidate's
+// Description on every query. Re-embedding the whole inventory per buy made
+// buy→match latency scale with inventory_size × embed_cost (~0.7s/entry on the
+// pure-Go MiniLM → ~40s for 54 entries — no product). After the fix a Search
+// embeds ONLY the buyer query: exactly one Embed call regardless of inventory size.
+func TestSearch_UsesCachedEmbeddings_DoesNotReEmbedInventory(t *testing.T) {
+	t.Parallel()
+
+	emb := &stubEmbedder{}
+	idx := matching.NewIndex(emb, matching.RankOptions{})
+
+	entries := make([]matching.RankInput, 20)
+	for i := range entries {
+		entries[i] = matching.RankInput{
+			EntryID: fmt.Sprintf("e%d", i), SellerKey: "s", Description: fmt.Sprintf("entry %d description", i),
+			ContentType: "code", TokenCost: 1000, Price: 100, SellerReputation: 70,
+			PutTimestamp: time.Now().Add(-time.Hour).UnixNano(),
+		}
+	}
+	idx.Rebuild(entries) // embeds all 20 once, caching each entry's vector
+
+	emb.embedCalls = 0
+	_ = idx.Search("some buyer task", 5)
+
+	if emb.embedCalls != 1 {
+		t.Fatalf("Search embedded %d times, want 1 (only the buyer query) — inventory embeddings must come from the Rebuild-time cache, not be recomputed per search (dontguess-3cc: this is the ~40s buy→match bug)", emb.embedCalls)
+	}
+}
 
 // buildIndex creates a test index with the given entries (no IDF priming).
 func buildIndex(entries []matching.RankInput) *matching.Index {

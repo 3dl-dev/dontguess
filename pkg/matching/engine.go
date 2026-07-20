@@ -181,10 +181,15 @@ func (idx *Index) Search(task string, maxResults int) []RankedResult {
 	// improving TF-IDF term overlap without injecting corpus-specific content.
 	normalized := NormalizeQuery(task)
 
-	// Build candidate list from indexed entries, injecting behavioral signals.
+	// Build candidate list from indexed entries, injecting behavioral signals AND
+	// the entry's precomputed embedding (dontguess-3cc): Rank/applyFloorGate use
+	// it directly instead of re-embedding every Description on every query, which
+	// is what made buy→match latency scale with inventory size (~40s for 54
+	// entries on the pure-Go MiniLM).
 	candidates := make([]RankInput, len(idx.entries))
 	for i, e := range idx.entries {
 		candidates[i] = e.input
+		candidates[i].Embedding = e.embedding
 		if sig, ok := idx.signals[e.input.EntryID]; ok {
 			candidates[i].Signals = sig
 		}
