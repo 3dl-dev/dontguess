@@ -156,6 +156,16 @@ type RankInput struct {
 	// Zero value (both fields 0) means no signals are available — the entry
 	// is ranked purely on relevance, efficiency, quality, and novelty.
 	Signals BehavioralSignals
+
+	// Embedding is this entry's PRECOMPUTED embedding vector, produced by the
+	// SAME embedder at index (Rebuild/Add) time. When non-nil the ranking hot
+	// path uses it directly instead of re-embedding Description — the fix for
+	// dontguess-3cc, where Search re-embedded the ENTIRE inventory on every buy
+	// (O(inventory) embeds/query, ~40s for 54 entries on the pure-Go MiniLM).
+	// nil means "not precomputed" — callers that build a RankInput ad hoc (or a
+	// stale index gap) fall back to embedding Description, so behaviour is
+	// unchanged except for the eliminated recompute.
+	Embedding []float64
 }
 
 // RankOptions configures the ranking algorithm.
@@ -330,7 +340,15 @@ func applyFloorGate(candidates []RankInput, taskEmb []float64, embedder Embedder
 	passed := make([]scoredCandidate, 0, len(candidates))
 	floor := opts.minSimilarity()
 	for _, c := range candidates {
-		entryEmb := embedder.Embed(c.Description)
+		// Use the precomputed embedding when the index supplied it (the common
+		// path — Index.Search populates it from the Rebuild/Add-time cache). Only
+		// re-embed when it is absent (an ad-hoc caller or an unindexed entry).
+		// This is the dontguess-3cc fix: without it every buy re-embedded the
+		// whole inventory, making buy→match latency ~inventory_size × embed_cost.
+		entryEmb := c.Embedding
+		if entryEmb == nil {
+			entryEmb = embedder.Embed(c.Description)
+		}
 		sim := embedder.Similarity(taskEmb, entryEmb)
 		if sim < floor {
 			continue
