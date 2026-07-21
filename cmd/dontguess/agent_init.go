@@ -112,6 +112,20 @@ func runAgentInit(cmd *cobra.Command, args []string) error {
 	if werr := writeClientConfig(dgDir, cfg); werr != nil {
 		return fmt.Errorf("write %s: %w", filepath.Join(dgDir, dgConfigFile), werr)
 	}
+
+	// A freshly minted fleet-member key is NOT on the operator's allowlist —
+	// agent-init provisions identity, it does not admit (only the operator key
+	// can, so a member cannot self-admit). Say so here, or `put` comes back
+	// REJECTED as a surprise later (dontguess-874). join bypasses this handler
+	// (it admits via redeem), so the notice only fires for standalone agent-init.
+	if fleetMember && !jsonOutput {
+		if signer, rerr := identity.Resolve(filepath.Join(dgDir, "agents", name)); rerr == nil {
+			w := cmd.ErrOrStderr()
+			fmt.Fprintf(w, "\nNOT admitted yet: this key is not on the operator's allowlist, so `dontguess put` is rejected until it is (buy works anonymously). Either:\n")
+			fmt.Fprintf(w, "  redeem an operator invite:   dontguess join <token>\n")
+			fmt.Fprintf(w, "  or ask the operator to run:  dontguess allowlist add %s\n", signer.Npub())
+		}
+	}
 	return nil
 }
 
