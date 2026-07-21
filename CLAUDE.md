@@ -249,7 +249,13 @@ dontguess agent-init my-agent --fleet-member \
   --relay ws://192.168.2.40:7777,ws://192.168.2.41:7777 \
   --operator-npub <operator-npub>
 #   → provisions ./.dg/  (identity in .dg/agents/my-agent/, reach-config in .dg/config.json)
-# Then, from anywhere in the tree, with no env var and no flag:
+# agent-init only PROVISIONS identity — it does NOT admit the key. A fresh
+# fleet-member npub is NOT on the operator's allowlist, so `put` is REJECTED
+# ("REJECTED: not-allowlisted") until it is admitted. Get admitted one of two ways:
+#   • redeem an operator invite (auto-admits):  dontguess join <token>
+#   • or have the operator run:                 dontguess allowlist add <your-npub>
+# `buy` works anonymously (no admission needed); only `put` requires the allowlist.
+# Once admitted, from anywhere in the tree, with no env var and no flag:
 dontguess buy  --task "..."                 # signs as my-agent, reaches the exchange
 dontguess put  --description "..." --token_cost N --content_type ... --content <b64>
 # --fleet-member is required for a persistent agent (fail-closed: no default mint).

@@ -16,12 +16,69 @@ package main
 //         docs/design/convergence-sybil-defense.md.
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/3dl-dev/dontguess/pkg/identity"
 )
+
+// newAgentInitTestCmd builds a bare agent-init command (flags only) whose stderr
+// is captured in buf, for exercising runAgentInit's user-facing output.
+func newAgentInitTestCmd(buf *bytes.Buffer) *cobra.Command {
+	c := &cobra.Command{}
+	c.Flags().String("parent", "", "")
+	c.Flags().Bool("fleet-member", false, "")
+	c.Flags().String("relay", "", "")
+	c.Flags().String("operator-npub", "", "")
+	c.SetErr(buf)
+	return c
+}
+
+// TestAgentInit_FleetMemberPrintsAdmissionNotice: a standalone
+// agent-init --fleet-member tells the user the minted key is NOT admitted and
+// how to fix it (dontguess-874) — a subagent, which borrows an already-admitted
+// parent, does not.
+func TestAgentInit_FleetMemberPrintsAdmissionNotice(t *testing.T) {
+	t.Chdir(t.TempDir()) // hermetic: provision into a fresh ./.dg, not the repo's
+
+	var fleetErr bytes.Buffer
+	fleetCmd := newAgentInitTestCmd(&fleetErr)
+	_ = fleetCmd.Flags().Set("fleet-member", "true")
+	if err := runAgentInit(fleetCmd, []string{"m1"}); err != nil {
+		t.Fatalf("agent-init m1 --fleet-member: %v", err)
+	}
+
+	m1, err := identity.Resolve(filepath.Join(".dg", "agents", "m1"))
+	if err != nil {
+		t.Fatalf("resolve m1: %v", err)
+	}
+	notice := fleetErr.String()
+	if !strings.Contains(notice, "NOT admitted") {
+		t.Errorf("fleet-member notice missing the not-admitted warning; got:\n%s", notice)
+	}
+	if !strings.Contains(notice, "allowlist add "+m1.Npub()) {
+		t.Errorf("fleet-member notice missing the `allowlist add <npub>` remedy for %s; got:\n%s", m1.Npub(), notice)
+	}
+	if !strings.Contains(notice, "dontguess join") {
+		t.Errorf("fleet-member notice missing the invite-redeem alternative; got:\n%s", notice)
+	}
+
+	// A subagent borrows m1's (eventually-admitted) key, so it gets NO notice.
+	var subErr bytes.Buffer
+	subCmd := newAgentInitTestCmd(&subErr)
+	_ = subCmd.Flags().Set("parent", "m1")
+	if err := runAgentInit(subCmd, []string{"sub1"}); err != nil {
+		t.Fatalf("agent-init sub1 --parent m1: %v", err)
+	}
+	if strings.Contains(subErr.String(), "NOT admitted") {
+		t.Errorf("subagent must not get the admission notice (it borrows an admitted parent); got:\n%s", subErr.String())
+	}
+}
 
 // TestAgentInit_SubagentSignsUnderParent verifies the core Sybil defense:
 //  1. a fleet member (no parent) gets its own persistent npub;
