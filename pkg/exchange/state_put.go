@@ -904,12 +904,22 @@ func (s *State) applyPut(msg *Message, blobs map[string][]byte) {
 		return
 	}
 	// Plausibility check: token_cost must be consistent with content size.
-	// Token cost represents inference cost, not output size. However a genuine
-	// result cannot require more than MaxTokensPerByte tokens per byte of output —
-	// values beyond that threshold indicate seller inflation rather than real
-	// computation. Gross outliers (e.g. 1.5 M tokens on a 200-byte payload at
-	// 7500 tokens/byte) are dropped silently to prevent them from dominating the
-	// reported token-savings metric.
+	//
+	// DEFINITION (dontguess-af3, operator ruling dontguess-96e decision 1/3):
+	// token_cost IS DEFINED AS OUTPUT TOKENS — what the seller's model actually
+	// generated to produce the put content, NOT total inference cost (i.e. NOT
+	// input/exploration tokens folded in). There is no separate wire field for
+	// an input-token component and none is being added (ruling decision 3) — a
+	// buyer's read cost is derived from ContentSize (already stored, see
+	// engine_pricing.go computePrice), never from token_cost. This plausibility
+	// check is the enforcement mechanism for that definition: a genuine
+	// result's OUTPUT token count cannot exceed MaxTokensPerByte tokens per
+	// byte of output — values beyond that threshold indicate seller inflation
+	// (or a seller reporting total/input-inclusive cost under the old,
+	// undefined semantic) rather than real output-token computation. Gross
+	// outliers (e.g. 1.5 M tokens on a 200-byte payload at 7500 tokens/byte)
+	// are dropped silently to prevent them from dominating the reported
+	// token-savings metric.
 	maxPlausibleTokenCost := int64(len(contentBytes)) * MaxTokensPerByte
 	if maxPlausibleTokenCost < 1 {
 		maxPlausibleTokenCost = 1

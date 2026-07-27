@@ -53,14 +53,66 @@ const (
 	tierMultiplierHot  = 1.5 // "hot"  — frequently hit, highly current
 	tierMultiplierWarm = 1.2 // "warm" — moderately active
 	tierMultiplierCold = 1.0 // "cold" or unset — no premium
+
+	// --- Two-unit pricing model (dontguess-af3, operator ruling dontguess-96e) ---
+	//
+	// The exchange ACQUIRES in OUTPUT tokens and DELIVERS in INPUT tokens — two
+	// units, deliberately, not one unit collapsed with a multiplier. TokenCost
+	// (and the PutPrice derived from it at accept time) IS DEFINED AS OUTPUT
+	// TOKENS — what the seller actually burned producing the artifact. See
+	// CLAUDE.md §Scrip and state_put.go's plausibility check for the same
+	// definition. There is no separate wire field for input tokens (ruling
+	// decision 3): a buyer's real read cost is proxied by entry.ContentSize
+	// (already stored, already feeding sizeFactor above) — never by TokenCost.
+	//
+	// outputToInputMultiplier documents WHY the acquisition side is expensive
+	// relative to the delivery side (output tokens cost ~5x input tokens across
+	// every model tier this exchange has seen — Fable 10/50, Opus 5/25, Sonnet
+	// 3/15, Haiku 1/5 — output is consistently ~5x input). It is not multiplied
+	// into computePrice's arithmetic directly (there is no code path that
+	// converts one unit into the other 1:1 or otherwise here); it exists as the
+	// single named source other pricing-adjacent code (e.g. engine_buy.go's
+	// netBenefitStatement) can reference instead of re-deriving the ratio.
+	outputToInputMultiplier = 5
+
+	// resaleAmortizationN is the flat assumed resale count (ruling decision 4:
+	// no cold-start reuse estimator — the fast/medium loops adjust later from
+	// observed demand). The exchange cannot recover a seller's full OUTPUT-token
+	// acquisition cost from a single buyer's INPUT-token read — that was the
+	// defect this item fixes (a live match once quoted 84% of token_cost to one
+	// reader). Instead every entry's asking price is amortized as if it will be
+	// resold resaleAmortizationN times; break-even is re-derived (not trusted)
+	// in the pricing_two_unit_af3_test.go net-positive-at-N4 test.
+	resaleAmortizationN = 4.0
 )
 
-// computePrice returns the exchange's asking price for an entry.
+// computePrice returns the exchange's DELIVERY (buyer-facing) asking price for
+// an entry — the scrip a buyer pays for one copy, not what the exchange paid
+// to acquire the entry.
 //
-// Base price: PutPrice * 1.2 (20% operator margin) when a put-accept exists,
-// otherwise TokenCost * 0.7 (seller's 70% share as a proxy pending acceptance).
+// Two-unit model (dontguess-af3, operator ruling dontguess-96e): ACQUISITION
+// (exchange <- seller) is denominated in OUTPUT tokens — entry.TokenCost IS
+// DEFINED AS OUTPUT TOKENS (see CLAUDE.md §Scrip, state_put.go plausibility
+// check). DELIVERY (exchange -> buyer) is denominated in INPUT tokens, which
+// are ~5x cheaper (outputToInputMultiplier) — a buyer's real read cost is
+// proxied by entry.ContentSize, never by TokenCost.
 //
-// Six inventory signals adjust the base price:
+// Acquisition-scale base: PutPrice * 1.2 (20% operator margin) when a
+// put-accept exists, otherwise TokenCost * 0.7 (seller's 70% share as a proxy
+// pending acceptance) — this is what the exchange paid or will pay the
+// seller, unchanged from before this fix.
+//
+// That acquisition-scale figure is then AMORTIZED across resaleAmortizationN
+// (flat 4, ruling decision 4) assumed resales before it becomes the buyer's
+// per-copy asking price: the exchange runs a deficit on any single sale and
+// recovers it only across resales of the same entry (the publisher model
+// already documented in CLAUDE.md, never implemented in pricing until now).
+// This is the fix for the one-off-commission defect: a live match once quoted
+// price=6723 against token_cost_original=8000 (84%) — a reader was charged
+// near-full production cost. Post-fix, the equivalent buyer price is a
+// fraction of that (see TestComputePrice_BuyerPriceMaterialyBelowTokenCost).
+//
+// Six inventory signals adjust the acquisition-scale base BEFORE amortization:
 //   - Demand count: +10% per distinct completed buyer, capped at +100%.
 //   - Age decay: decays from 1.0 to 0.5 linearly over 60 days (PutTimestamp=0 = no decay).
 //   - Reputation: rep=0 -> 0.8x, rep=50 -> 1.0x, rep=100 -> 1.2x.
@@ -74,8 +126,12 @@ const (
 // Invariants:
 //   - Returns at least computePriceMinPrice (never 0 or negative).
 //   - Guards against int64 overflow for large TokenCost and PutPrice values.
+//   - No code path converts the OUTPUT-token acquisition figure into the
+//     INPUT-token delivery figure at 1:1 — it is always divided by
+//     resaleAmortizationN.
 func (e *Engine) computePrice(entry *InventoryEntry) int64 {
-	// Step 1: base price
+	// Step 1: acquisition-scale base (OUTPUT-token denominated — what the
+	// exchange paid or will pay the seller; see dontguess-96e decision 1/3).
 	var base float64
 	if entry.PutPrice > 0 {
 		if entry.PutPrice > math.MaxInt64/operatorMarginOverflowGuard {
@@ -103,8 +159,16 @@ func (e *Engine) computePrice(entry *InventoryEntry) int64 {
 	densityFactor := e.computeDensityFactor(entry)
 	tierFactor := computeTierFactor(entry.CompressionTier)
 
-	// Compound all multipliers.
+	// Compound all multipliers (still acquisition-scale, OUTPUT-token terms).
 	price := base * demandFactor * ageFactor * repFactor * sizeFactor * fastFactor * densityFactor * tierFactor
+
+	// Step 2: DELIVERY amortization (dontguess-af3/96e). Convert the
+	// acquisition-scale figure into a per-copy DELIVERY price by dividing
+	// across resaleAmortizationN assumed resales. This is the two-unit spread:
+	// the exchange recovers what it paid the seller in OUTPUT tokens across N
+	// copies sold, rather than charging one buyer the full amount as a one-off
+	// commission (the defect this fixes).
+	price /= resaleAmortizationN
 
 	// Clamp and round (nearest-integer, not truncate, for stable results).
 	rounded := math.Round(price)

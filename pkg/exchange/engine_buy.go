@@ -278,14 +278,13 @@ func (e *Engine) mergeSemanticAndFallback(task string, candidates []*InventoryEn
 	return semanticMatches
 }
 
-// derivationMultiplier is the inline stand-in for "output tokens burned by the
-// seller ~= N x input-token-equivalents (ITE) to re-derive from scratch". This
-// is the gated decision owned by dontguess-af3 (blocked on operator ruling
-// dontguess-96e, token_cost semantics + migration of 166 existing entries).
-// Per dontguess-d48's soft-dependency instruction: ship with this literal
-// multiplier now, do not block on af3; swap for the shared constant once af3
-// lands and closes.
-const derivationMultiplier = 5
+// derivationMultiplier is "output tokens burned by the seller ~= N x
+// input-token-equivalents (ITE) to re-derive from scratch". dontguess-af3
+// (operator ruling dontguess-96e) settled this as outputToInputMultiplier
+// (engine_pricing.go) — alias it here rather than re-deriving the ratio, per
+// dontguess-d48's original note to "swap for the shared constant once af3
+// lands and closes." Value unchanged (5); only the source of truth moved.
+const derivationMultiplier = outputToInputMultiplier
 
 // netBenefitStatement renders the net-benefit arithmetic for a single match so
 // a buyer can see the real economics without doing scalar math on price vs.
