@@ -104,6 +104,11 @@ func runAgentInit(cmd *cobra.Command, args []string) error {
 	// Record this identity as the project default + carry exchange-reach config so
 	// put/buy in this tree need nothing else. Merge over any existing config.
 	cfg, _ := loadClientConfigAt(dgDir)
+	// The tree's PRIOR default identity is the admitting parent for auto-admission
+	// (dontguess-09a). Captured BEFORE the overwrite below, because provisioning
+	// makes the NEW agent the tree default — read it afterwards and every child
+	// looks like its own parent, which silently disables auto-admission.
+	priorAgentName := cfg.AgentName
 	if fleetMember {
 		cfg.AgentName = name
 	}
@@ -136,7 +141,7 @@ func runAgentInit(cmd *cobra.Command, args []string) error {
 		} else if c, _ := loadClientConfigAt(dgDir); !c.autoAdmitEnabled() {
 			fmt.Fprintf(w, "\nauto-admission disabled for this tree (auto_admit=false in %s).\n", dgConfigFile)
 		} else {
-			ok, aerr := autoAdmitChild(cmd.Context(), dgDir, name, w)
+			ok, aerr := autoAdmitChild(cmd.Context(), dgDir, priorAgentName, name, w)
 			if aerr != nil {
 				fmt.Fprintf(w, "\nauto-admission did not complete: %v\n(falling back to manual admission)\n", aerr)
 			}

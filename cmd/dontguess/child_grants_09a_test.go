@@ -207,7 +207,7 @@ func TestAutoAdmit_BootstrapCaseHasNoParent(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	// Empty tree: no agent_name recorded.
-	signer, name, err := parentSignerFor(dg, "first-agent")
+	signer, name, err := parentSignerFor(dg, "", "first-agent")
 	if err != nil {
 		t.Fatalf("parentSignerFor on empty tree: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestAutoAdmit_SelfIsNotItsOwnParent(t *testing.T) {
 	if err := writeClientConfig(dg, clientConfig{AgentName: "same-agent"}); err != nil {
 		t.Fatalf("write client config: %v", err)
 	}
-	signer, _, err := parentSignerFor(dg, "same-agent")
+	signer, _, err := parentSignerFor(dg, "same-agent", "same-agent")
 	if err != nil {
 		t.Fatalf("parentSignerFor: %v", err)
 	}
@@ -269,11 +269,44 @@ func TestAutoAdmit_NoRelayDeclinesCleanly(t *testing.T) {
 	if err := runAgentInitCore(dg, "child", "", true); err != nil {
 		t.Fatalf("provision child: %v", err)
 	}
-	ok, err := autoAdmitChild(context.Background(), dg, "child", io.Discard)
+	ok, err := autoAdmitChild(context.Background(), dg, "parent", "child", io.Discard)
 	if err != nil {
 		t.Fatalf("autoAdmitChild with no relay errored: %v -- it should decline, not fail", err)
 	}
 	if ok {
 		t.Error("autoAdmitChild claimed success with no relay configured")
+	}
+}
+
+// TestAutoAdmit_ParentSurvivesTreeDefaultOverwrite is a regression test for a bug
+// the unit tests could not catch and a live run did: agent-init sets the NEW agent
+// as the tree default BEFORE auto-admission runs, so reading the parent out of
+// .dg/config.json at that point yields the child itself and auto-admission silently
+// declines. The parent must be captured before the overwrite and passed in.
+func TestAutoAdmit_ParentSurvivesTreeDefaultOverwrite(t *testing.T) {
+	dg := filepath.Join(t.TempDir(), ".dg")
+	if err := os.MkdirAll(filepath.Join(dg, "agents"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := runAgentInitCore(dg, "parent", "", true); err != nil {
+		t.Fatalf("provision parent: %v", err)
+	}
+	if err := runAgentInitCore(dg, "child", "", true); err != nil {
+		t.Fatalf("provision child: %v", err)
+	}
+	// Simulate the real sequence: the tree default has ALREADY been overwritten to
+	// the child by the time auto-admission asks who the parent is.
+	if err := writeClientConfig(dg, clientConfig{AgentName: "child"}); err != nil {
+		t.Fatalf("write client config: %v", err)
+	}
+	signer, name, err := parentSignerFor(dg, "parent", "child")
+	if err != nil {
+		t.Fatalf("parentSignerFor: %v", err)
+	}
+	if signer == nil {
+		t.Fatal("no parent resolved even though 'parent' was passed explicitly -- auto-admission would silently decline, which is the live bug this guards")
+	}
+	if name != "parent" {
+		t.Errorf("parent name = %q, want \"parent\"", name)
 	}
 }

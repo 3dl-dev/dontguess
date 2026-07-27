@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/identity"
@@ -46,12 +47,8 @@ const autoAdmitTTL = 5 * time.Minute
 // provisioned for this project/user/machine. A tree whose first identity is the one
 // being created has no parent, which is the ordinary bootstrap case: that first key
 // is admitted once by the operator, and everything below inherits from it.
-func parentSignerFor(dgDir, childName string) (identity.Signer, string, error) {
-	cfg, err := loadClientConfigAt(dgDir)
-	if err != nil {
-		return nil, "", err
-	}
-	parentName := cfg.AgentName
+func parentSignerFor(dgDir, parentName, childName string) (identity.Signer, string, error) {
+	parentName = strings.TrimSpace(parentName)
 	if parentName == "" || parentName == childName {
 		return nil, "", nil // no parent yet — this key IS the tree's first identity
 	}
@@ -70,8 +67,8 @@ func parentSignerFor(dgDir, childName string) (identity.Signer, string, error) {
 // returned for genuine failures the operator should see, but the CALLER treats them
 // as non-fatal: a failed auto-admit must never fail `agent-init` itself, or a
 // provisioning command starts depending on relay reachability.
-func autoAdmitChild(ctx context.Context, dgDir, childName string, out io.Writer) (bool, error) {
-	parentSigner, parentName, err := parentSignerFor(dgDir, childName)
+func autoAdmitChild(ctx context.Context, dgDir, parentName, childName string, out io.Writer) (bool, error) {
+	parentSigner, parentName, err := parentSignerFor(dgDir, parentName, childName)
 	if err != nil {
 		return false, err
 	}
