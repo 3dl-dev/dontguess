@@ -82,9 +82,13 @@ rejected: `ensureCreditForShortfall` mints exactly the shortfall as a tracked lo
 (`pkg/scrip/loan.go`, wired at `pkg/exchange/engine_credit.go`). Tier-gated to fleet via
 `FederationGuardEnabled` — NOT via `BrokeredMatchMode`, which is a matching-routing flag and was the
 original bug. Bounded by a conservative per-buyer cap on outstanding credit, and repaid automatically
-by withholding a fraction of the borrower's later put credits and sale residuals. Default/collection
-semantics and the vig rate are deliberately NOT implemented — they are gated on operator decision
-dontguess-4c1. A cap can only be loosened later, so shipping conservative was safe without that ruling.
+by withholding a fraction of the borrower's later put credits and sale residuals. Default/collection semantics and vig
+are deliberately NOT implemented (operator ruling dontguess-4c1, 2026-07-27): nothing accrues vig and
+nothing transitions a loan to `LoanDefaulted`, so the minted loan records `VigRateBPS: 0` and no due
+date rather than terms the exchange cannot enforce — a ledger stating uncollected interest and
+unfired defaults lies to whoever audits it. At fleet tier a "default" is the operator's own agent not
+repaying the operator. Both return at FEDERATION (dontguess-5a3), and must be wired TOGETHER with
+non-zero constants in the same change — never one without the other. A cap can only be loosened later, so shipping conservative was safe without that ruling.
 
 **Compression is paid at OUTPUT rates.** `WarmCompressionBountyPct` is 300 (not 30): generating a
 compressed artifact costs output tokens, and at the old scalar rate a compressor was ~4-8x underwater,

@@ -310,3 +310,21 @@ func TestAutoAdmit_ParentSurvivesTreeDefaultOverwrite(t *testing.T) {
 		t.Errorf("parent name = %q, want \"parent\"", name)
 	}
 }
+
+// TestCreditTerms_RecordOnlyWhatIsEnforced pins the dontguess-4c1 ruling: at fleet
+// tier the exchange accrues no vig and never defaults a loan, so a minted loan must
+// not RECORD a rate or a due date it will never act on. A ledger that states terms
+// nobody enforces is a ledger that lies to whoever audits it later.
+//
+// If vig/default are ever wired (federation, dontguess-5a3), this test should be
+// updated in the SAME change that wires them — never before.
+func TestCreditTerms_RecordOnlyWhatIsEnforced(t *testing.T) {
+	if exchange.CreditLoanVigRateBPSForTest() != 0 {
+		t.Errorf("credit loans record vig rate %d, want 0 -- nothing accrues vig in production, so recording a rate makes the ledger lie",
+			exchange.CreditLoanVigRateBPSForTest())
+	}
+	if exchange.CreditLoanTermDaysForTest() != 0 {
+		t.Errorf("credit loans record a %d-day term, want 0 -- nothing transitions a loan to Defaulted, so recording a due date makes the ledger lie",
+			exchange.CreditLoanTermDaysForTest())
+	}
+}

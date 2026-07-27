@@ -61,17 +61,28 @@ func (e *Engine) creditTierEligible() bool {
 // observed repayment/default behavior — treat them as a tunable starting
 // point, not a frozen conclusion.
 const (
-	// creditLoanVigRateBPS is the vig (interest) rate in basis points per hour
-	// charged on an auto-minted shortfall loan. 10 bps/hour ≈ 2.4%/day — modest
-	// carrying cost, not a punitive rate: the borrower is a legitimate,
-	// allowlisted fleet member registering real demand, not a delinquent risk.
-	creditLoanVigRateBPS = 10
-
-	// creditLoanTermDays is the repayment term before a loan transitions to
-	// Defaulted. 30 days matches the convention spec's own stated default
-	// (docs/convention/exchange-scrip/loan-mint.json: "Defaults to 30 days
-	// from mint time").
-	creditLoanTermDays = 30
+	// creditLoanVigRateBPS and creditLoanTermDays are DELIBERATELY ZERO/ABSENT at
+	// fleet tier (operator ruling dontguess-4c1, 2026-07-27).
+	//
+	// Nothing in production accrues vig (no emitter of scrip-loan-vig-accrue) and
+	// nothing transitions a loan to LoanDefaulted. Recording a 10 bps/hour rate and
+	// a 30-day due date that are never applied makes the LEDGER LIE: every loan
+	// would carry terms the exchange has no machinery to enforce, and an auditor
+	// reading the scrip log would compute interest that was never charged and
+	// defaults that never happened.
+	//
+	// Rather than build accrual and collection nobody needs, the recorded terms now
+	// say what is actually true. At fleet tier a "default" is the operator's own
+	// agent not repaying the operator, and collection against yourself is not a
+	// thing — the same reasoning that removed the per-parent caps in dontguess-09a.
+	//
+	// These return at FEDERATION, where a borrower is not the operator's own agent
+	// and an unpaid loan is a real loss. That is dontguess-5a3's territory; wire
+	// accrual and default THERE, together, and set these to non-zero in the same
+	// change — never one without the other, or the ledger starts lying again.
+	creditLoanVigRateBPS = 0
+	// creditLoanTermDays 0 means "no due date recorded" (see dueAt below).
+	creditLoanTermDays = 0
 
 	// creditMaxOutstandingPerBuyer is a HARD ceiling on a single buyer's total
 	// unpaid loan principal (Principal - Repaid, summed across every Active
@@ -296,7 +307,12 @@ func (e *Engine) ensureCreditForShortfall(buyerKey string, holdAmount int64, buy
 	}
 
 	loanID := "loan-" + newReservationID()
-	dueAt := time.Now().Add(creditLoanTermDays * 24 * time.Hour).UTC().Format(time.RFC3339)
+	// No due date is recorded when there is no term to enforce (see above). An
+	// empty DueAt is honest; a populated one the exchange never acts on is not.
+	dueAt := ""
+	if creditLoanTermDays > 0 {
+		dueAt = time.Now().Add(creditLoanTermDays * 24 * time.Hour).UTC().Format(time.RFC3339)
+	}
 
 	payload, err := e.marshal(scrip.LoanMintPayload{
 		Borrower:   buyerKey,
