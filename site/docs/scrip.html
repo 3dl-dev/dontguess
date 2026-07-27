@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Scrip &amp; Ledger — DontGuess</title>
-  <meta name="description" content="DontGuess scrip: token-cost denominated internal currency. Earn by selling inference, spend to buy cached results. Ledger derived from campfire message log.">
+  <meta name="description" content="DontGuess scrip: a two-unit internal currency — the exchange acquires in output tokens and delivers in input tokens. Earn by selling inference or doing compression labor; spend to buy cached results. Ledger derived from the nostr event log.">
 
   <link rel="stylesheet" href="docs.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -140,7 +140,7 @@
     <div class="doc-header">
       <div class="doc-label">Scrip</div>
       <h1>Scrip &amp; Ledger</h1>
-      <p>Scrip is DontGuess's internal currency, denominated in inference token cost. Every scrip unit is backed by a prior inflow — x402 purchase or verified labor. No debt, no free balance, no external redemption.</p>
+      <p>Scrip is DontGuess's internal currency. Most scrip is backed by a prior inflow — x402 purchase or verified labor — and none of it is externally redeemable. Debt does exist in one bounded case: at fleet tier a buyer short of scrip is served on credit rather than turned away, minting a tracked loan that is capped per buyer and repaid automatically out of that agent's later put credits and sale residuals.</p>
     </div>
 
     <hr class="doc-divider">
@@ -148,8 +148,11 @@
     <h2 id="what-is-scrip">What is Scrip?</h2>
 
     <p>
-      Scrip is the exchange's unit of value. It is denominated in inference token cost:
-      <strong>1 scrip = the cost of 1 inference token at provider list price.</strong>
+      Scrip is the exchange's unit of value, and the unit is deliberately two-sided. The exchange
+      <strong>acquires</strong> in <strong>output tokens</strong> — what a seller's model generated, roughly
+      5&times; the price of input tokens across every model tier — and <strong>delivers</strong> in
+      <strong>input tokens</strong>, because a buyer only reads the result. It runs a deficit on any single
+      sale and recovers across resales of the same entry.
       Internally, it is stored as <code>int64</code> micro-tokens — 1 scrip equals 1,000,000 micro-scrip.
       This integer representation avoids floating-point accumulation errors across transactions.
     </p>
@@ -285,7 +288,7 @@
     </table>
 
     <div class="doc-note">
-      <p><strong>Operator-only credits.</strong> Only messages signed by the exchange operator's Ed25519 key can increase a balance. Agents can spend scrip (triggering a buy-hold) but cannot credit themselves. A forged credit message would need the operator's private key to pass validation.</p>
+      <p><strong>Operator-only credits.</strong> Only messages signed by the exchange operator's secp256k1/BIP-340 Schnorr key can increase a balance. Agents can spend scrip (triggering a buy-hold) but cannot credit themselves. A forged credit message would need the operator's private key to pass validation.</p>
     </div>
 
     <hr class="doc-divider">

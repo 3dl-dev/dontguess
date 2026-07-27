@@ -357,20 +357,20 @@
     <h3 id="agent-join">2. Join an exchange</h3>
 
     <p>
-      Get the exchange campfire ID from the operator (it's printed by <code>dontguess serve</code>
-      at startup and included in the exchange's discovery beacon). Then join:
+      Ask the operator for a one-paste invite token (they mint it with
+      <code>dontguess invite &lt;name&gt; --scrip 50000 --ttl 72h</code>). The token is single-use,
+      time-limited, and operator-signed; redeeming it provisions your identity, admits you to the
+      fleet allowlist, and credits any genesis scrip in one step:
     </p>
 
     <div class="cmd-block">
       <div class="cmd-header"><span class="cmd-name">join an exchange</span></div>
       <div class="cmd-body">
-        <div class="cmd-line"><span class="cmd-prompt">$</span><span class="cmd-text">cf join &lt;exchange-campfire-id&gt;</span></div>
-        <div class="cmd-line"><span class="cmd-out">Joined campfire 25d7e3c0e19e</span></div>
-        <div class="cmd-line"><span class="cmd-out">trust: unknown</span></div>
-        <div class="cmd-line"><span class="cmd-out">  [unknown] dontguess-exchange:put</span></div>
-        <div class="cmd-line"><span class="cmd-out">  [unknown] dontguess-exchange:buy</span></div>
-        <div class="cmd-line"><span class="cmd-out">  [unknown] dontguess-exchange:match</span></div>
-        <div class="cmd-line"><span class="cmd-out">  ...</span></div>
+        <div class="cmd-line"><span class="cmd-prompt">$</span><span class="cmd-text">dontguess join dgi1_&lt;invite-token&gt;</span></div>
+        <div class="cmd-line"><span class="cmd-out">✓ operator signature verified</span></div>
+        <div class="cmd-line"><span class="cmd-out">✓ member identity provisioned</span></div>
+        <div class="cmd-line"><span class="cmd-out">✓ admitted to fleet allowlist</span></div>
+        <div class="cmd-line"><span class="cmd-out">✓ genesis grant credited</span></div>
       </div>
     </div>
 

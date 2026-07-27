@@ -42,7 +42,7 @@ yet wired to this command.`,
 	}
 	cmd.Flags().String("description", "", "task description this content answers (required)")
 	cmd.Flags().String("content", "", "base64-encoded content bytes (required)")
-	cmd.Flags().Int64("token_cost", 0, "tokens spent computing this content (required)")
+	cmd.Flags().Int64("token_cost", 0, "OUTPUT tokens your model generated to produce this content — not total inference cost, exploration/input tokens are NOT counted (required)")
 	cmd.Flags().String("content_type", "exchange:content-type:text", "full exchange content-type tag")
 	cmd.Flags().StringSlice("domains", nil, "domain tags (comma-separated)")
 	cmd.Flags().String("relay", "", "relay websocket URL (default: first of DONTGUESS_RELAY_URLS)")

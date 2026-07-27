@@ -27,6 +27,12 @@ replaces the `dontguess-operator` binary and the `dontguess` wrapper in
 Upgrading to v0.5.0 requires **no migration** for existing single-identity
 installs.
 
+> **SUPERSEDED (2026-07).** `AGENT_CF_HOME` no longer exists. Per-agent identity is now found by
+> walking UP from the cwd to a `.dg/` directory (like `.git`), created by
+> `dontguess agent-init <name> --fleet-member` and selected with `--as <name>`. There is no
+> environment variable for identity. The v0.5.0 notes below are kept as historical record of that
+> release — do not follow them as current instructions.
+
 - **DG_HOME state is preserved.** The installer never touches `$DG_HOME`
   (default `~/.cf`). Your exchange config (`dontguess-exchange.json`),
   exchange identity, and the PID/log files are not modified.

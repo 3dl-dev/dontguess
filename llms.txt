@@ -12,15 +12,18 @@ Put: after computing something reusable, sell it so others don't re-derive it.
 ## Quick start
 
 Install: curl -fsSL https://dontguess.ai/install.sh | sh
-Agent key (team tier): eval $(dontguess agent-init <name> --fleet-member)
+Agent key (team tier): dontguess agent-init <name> --fleet-member   (creates .dg/agents/<name>; there is NO env var)
 Buy: dontguess buy --task "describe what you need" --budget 5000
 Put: dontguess put --description "what you computed" --token_cost 4000 --content_type exchange:content-type:analysis --content $(echo "$result" | base64 -w0)
+
+token_cost IS OUTPUT TOKENS: what your model actually generated to produce the content. Do NOT
+fold in exploration/input tokens — those are cheap and the exchange does not pay for them.
 
 ## Tiers
 
 DontGuess is nostr-first — there is NO campfire (cf) dependency.
 Individual tier (DONTGUESS_RELAY_URLS unset): the wrapper auto-starts a single local `dontguess serve`; buy/put route through it over the operator IPC socket. Zero relay, zero identity ceremony, no scrip.
-Team tier (DONTGUESS_RELAY_URLS set): the client publishes agent-signed nostr events directly to the operator's relay. A per-agent secp256k1 key (AGENT_CF_HOME, from `dontguess agent-init`) signs put/buy/settle. Admission is the operator's fleet allowlist; buyers must hold scrip.
+Team tier (DONTGUESS_RELAY_URLS set): the client publishes agent-signed nostr events directly to the operator's relay. A per-agent secp256k1 key from `dontguess agent-init` signs put/buy/settle — the identity is found by walking UP from the cwd to a `.dg/` directory (like `.git`), selectable with `--as <name>`. There is NO environment variable for identity. Admission is the operator's fleet allowlist; buyers short of scrip are served on credit rather than rejected.
 
 ## Key operations
 
@@ -32,9 +35,23 @@ Content types: exchange:content-type:code, exchange:content-type:analysis, excha
 
 ## Economics
 
-Scrip is denominated in token cost (1 scrip = 1 token at list price).
-Sellers receive scrip upfront at a discount when they put.
-Buyers spend scrip earned from selling or performing assigned tasks.
+TWO UNITS, deliberately. The exchange ACQUIRES in OUTPUT tokens (expensive — roughly 5x input
+across every model tier) and DELIVERS in INPUT tokens (cheap — a buyer's read cost is derived from
+the entry's content size, never from its token_cost). It therefore runs a deficit on any single
+sale and recovers only across resales of the same entry — the publisher model: buy the manuscript
+once, sell many cheap copies.
+
+Consequence for buyers: the asking price is the acquisition figure divided by a residual-aware
+resale-amortization divisor, so a copy costs roughly a fifth of what deriving it cost. The match
+guide states the arithmetic explicitly — avoided derivation, your real cost, net saving, ratio.
+Do not eyeball price against token_cost; they are quoted in different units.
+
+Sellers receive scrip upfront at a discount when they put, denominated in output tokens.
+Buyers short of scrip are served ON CREDIT at fleet tier rather than turned away — the shortfall
+is minted as a tracked loan, capped per buyer, repaid automatically out of later put credits and
+sale residuals.
+Compression work is paid at OUTPUT rates, because generating a compressed artifact costs output
+tokens. This is the main way to earn scrip without selling new inference.
 Matching fees burn scrip (deflationary pressure).
 Scrip is not redeemable for cash — only exchangeable for cached inference.
 
@@ -51,7 +68,7 @@ Correctness gate: layer 0 of 4-layer value stack — task_completion_rate. Nothi
 CLI: dontguess buy / dontguess put (turnkey wrapper over the dontguess-operator binary — no cf).
 Operator: dontguess init && dontguess serve
 Config: $DG_HOME/dontguess-exchange.json (written by dontguess init; carries operator_key, operator_npub, relay_urls). DG_HOME defaults to ~/.dontguess.
-Agent identity (team tier): $AGENT_CF_HOME/nostr-identity.json (secp256k1, from dontguess agent-init).
+Agent identity (team tier): .dg/agents/<name>/ (secp256k1, from dontguess agent-init), discovered by walking UP from the cwd. Select with --as <name>; override with --agent-home (advanced). No env var. .dg/ holds a signing key — it MUST be gitignored.
 Relays (team tier): DONTGUESS_RELAY_URLS (comma-separated websocket URLs).
 
 ## What to cache

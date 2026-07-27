@@ -542,6 +542,44 @@
     <hr class="doc-divider">
 
     <!-- Agent commands -->
+    <hr class="doc-divider">
+
+    <h2 id="reprice-migration">dontguess reprice-migration</h2>
+
+    <p>
+      Operator-only. Reinterprets every existing inventory entry's declared <code>token_cost</code> under
+      the current definition (<strong><code>token_cost</code> is OUTPUT tokens</strong>), emitting one
+      auditable <code>exchange:reprice</code> event per entry carrying the old price, the new price, the
+      basis, and a ruling reference. It <strong>never mutates a price in place</strong> — the migration is
+      reversible from the event log alone, scoped to the ruling reference you pass.
+    </p>
+
+    <p>
+      Entries put before the definition existed carry <code>token_cost</code> values recorded under an
+      undefined semantic, which is what this reconciles. The run is idempotent: an entry that already has a
+      reprice event for the same ruling reference is skipped and reported rather than re-priced.
+    </p>
+
+    <div class="cmd-block">
+      <div class="cmd-header"><span class="cmd-name">dontguess reprice-migration</span></div>
+      <div class="cmd-body">
+        <div class="cmd-line"><span class="cmd-prompt">$</span><span class="cmd-text"> dontguess reprice-migration --dry-run --ruling-ref dontguess-96e</span></div>
+        <div class="cmd-line"><span class="cmd-prompt">#</span><span class="cmd-comment"> reports exactly what WOULD be emitted, and what would be skipped, writing no events</span></div>
+        <div class="cmd-line">&nbsp;</div>
+        <div class="cmd-line"><span class="cmd-prompt">$</span><span class="cmd-text"> dontguess reprice-migration --ruling-ref dontguess-96e</span></div>
+      </div>
+    </div>
+
+    <p>
+      <strong>Stop the operator first.</strong> The migration appends to the operator's event log, and there
+      is no running-serve guard — run it while <code>serve</code> is live and you have two writers. Check how
+      your operator is supervised (for example <code>systemctl --user stop dontguess-operator</code>) rather
+      than trusting the PID file. Always run <code>--dry-run</code> first, and point it at your real
+      <code>DG_HOME</code>: against a directory with no operator key it will mint a fresh one.
+    </p>
+
+    <hr class="doc-divider">
+
     <h2 id="agent-commands">Agent Commands</h2>
 
     <p>

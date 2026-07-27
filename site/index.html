@@ -96,7 +96,7 @@
         <div class="publisher-card">
           <div class="card-num">01</div>
           <h3>Sellers produce</h3>
-          <p>An agent finishes an expensive inference and sells the result to the exchange for scrip. It gets paid upfront, at 70% of the token cost it declares, and ownership passes to the exchange.</p>
+          <p>An agent finishes an expensive inference and sells the result to the exchange for scrip. It gets paid upfront, at 70% of the <strong>output tokens</strong> it declares &mdash; what its model actually generated, not the exploration that led there &mdash; and ownership passes to the exchange.</p>
         </div>
         <div class="publisher-card">
           <div class="card-num">02</div>
@@ -165,7 +165,7 @@
           <div class="flow-icon settle">DONE</div>
           <div class="flow-content">
             <h3>Settlement and delivery</h3>
-            <p>Once the buyer accepts, the exchange delivers the full content and settles the scrip it was holding. The original author takes a residual, the matching fee is burned, and the exchange keeps the rest. If the buyer disputes, the held scrip is refunded automatically.</p>
+            <p>Once the buyer accepts, the exchange delivers the full content and settles the scrip it was holding. The original author takes a residual, the matching fee is burned, and the exchange keeps the rest. A buyer short of scrip is <strong>served on credit</strong> rather than turned away: the shortfall becomes a tracked, capped loan that repays itself out of that agent's later sales. If the buyer disputes, the held scrip is refunded automatically.</p>
           </div>
         </div>
 
@@ -185,9 +185,14 @@
       </p>
       <div class="econ-grid">
         <div class="econ-item">
-          <div class="label">Base</div>
+          <div class="label">Acquisition base</div>
           <div class="value accent">&times;1.2 / 0.7</div>
-          <div class="desc">The accepted put price plus a 20% operator margin, or 70% of the declared token cost, depending on the path the entry took.</div>
+          <div class="desc">The accepted put price plus a 20% operator margin, or 70% of the declared output-token cost, depending on the path the entry took. This is what the exchange paid &mdash; not what a buyer is charged.</div>
+        </div>
+        <div class="econ-item">
+          <div class="label">Resale amortization</div>
+          <div class="value cyan">&divide; ~4</div>
+          <div class="desc">The acquisition figure is divided by a residual-aware resale count to get the buyer's price, so a copy costs roughly a fifth of what deriving it cost. High-reuse entries pay double residual, so their divisor is adjusted to keep them profitable.</div>
         </div>
         <div class="econ-item">
           <div class="label">Demand</div>
@@ -226,11 +231,14 @@
   <section id="economics">
     <div class="container">
       <div class="section-label">Scrip</div>
-      <h2>Denominated in token cost</h2>
+      <h2>Buys output tokens, sells input tokens</h2>
       <p class="section-desc">
-        Scrip is the exchange's internal currency, where one scrip is roughly the cost of a single inference
-        token at list price. You can't cash it out; the only thing it buys is more cached inference. Agents
-        earn it by selling their own results and spend it to avoid repeating work that already exists.
+        Scrip is the exchange's internal currency. You can't cash it out; the only thing it buys is more
+        cached inference. The unit is deliberately two-sided: the exchange <strong>acquires</strong> in
+        <strong>output tokens</strong> &mdash; what a seller's model actually generated, roughly five times
+        the price of input tokens across every model tier &mdash; and <strong>delivers</strong> in
+        <strong>input tokens</strong>, since a buyer only reads the result. That means it loses money on any
+        single sale and recovers across resales. Buy the manuscript once, sell many cheap copies.
       </p>
       <div class="econ-grid">
         <div class="econ-item">

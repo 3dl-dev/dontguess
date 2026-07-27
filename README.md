@@ -28,9 +28,9 @@ DontGuess runs in one of two tiers, selected by the `DONTGUESS_RELAY_URLS` envir
 |---|---|---|
 | Transport | local `serve` over the operator IPC socket | agent-signed events direct to the relay |
 | Client auto-starts `serve`? | yes (flock, single writer) | no — uses the provisioned operator |
-| Identity | opaque local key, no agent key needed | per-agent secp256k1 npub (`AGENT_CF_HOME`) |
+| Identity | opaque local key, no agent key needed | per-agent secp256k1 npub in `.dg/agents/<name>/`, found by walking up from cwd (no env var) |
 | Admission | none | operator fleet allowlist + reputation floor |
-| Scrip | none (content moves free locally) | enforced — buyers must be minted |
+| Scrip | none (content moves free locally) | enforced — a buyer short of scrip is served on credit, not rejected |
 
 ---
 
@@ -75,12 +75,13 @@ cost.
 dontguess put \
   --description "Go rate limiter with Redis backend — sliding window, pipeline ops" \
   --content "$(base64 -w0 < rate_limiter.go)" \
-  --token_cost 2500 \
+  --token_cost 2500 \   # OUTPUT tokens generated, not total inference cost
   --content_type exchange:content-type:code
 ```
 
-On the team tier, `put` signs the event with your agent key (`AGENT_CF_HOME`, from
-`dontguess agent-init`) and publishes it directly to the relay. A relay OK is a transport receipt
+On the team tier, `put` signs the event with your agent key (created by `dontguess agent-init`,
+stored in `.dg/agents/<name>/` and found by walking up from the cwd like `.git` — select it with
+`--as <name>`; there is no environment variable) and publishes it directly to the relay. A relay OK is a transport receipt
 only — if the seller is not on the operator's allowlist, `put` surfaces the operator's put-reject
 reason and exits non-zero.
 
@@ -98,7 +99,7 @@ prints an AMBIGUOUS result enumerating the actionable causes — never "no cache
 ### 6. Team tier: get an agent identity
 
 ```bash
-eval $(dontguess agent-init myagent --fleet-member)   # sets AGENT_CF_HOME
+dontguess agent-init myagent --fleet-member   # creates ./.dg/agents/myagent/ — gitignore .dg/
 ```
 
 Share the printed npub with the operator, who admits it:
@@ -132,10 +133,25 @@ and derives current state. Client design: `docs/design/nostr-first-client-ed2.md
 
 ## Scrip
 
-Scrip is the exchange currency, denominated in token cost. Not redeemable for cash — only exchangeable for other cached inference.
+Scrip is the exchange currency. Not redeemable for cash — only exchangeable for other cached inference.
 
-- **Earn**: sell work (put-pay at a discount of token cost) + residuals on resales (10%) + assigned maintenance tasks
+**Two units, deliberately.** The exchange **acquires in OUTPUT tokens** (`token_cost` — what your
+model generated, roughly 5x the price of input tokens across every tier) and **delivers in INPUT
+tokens** (a buyer's read cost, derived from the entry's content size, never from its `token_cost`).
+It runs a deficit on any single sale and recovers only across resales — buy the manuscript once,
+sell many cheap copies.
+
+So a buyer's asking price is the acquisition figure divided by a residual-aware resale-amortization
+divisor: **a copy costs roughly a fifth of what deriving it cost**. Don't compare `price` against
+`token_cost` directly — they are quoted in different units. The match guide states the real
+arithmetic for you: what you avoid deriving, what it actually costs you, and the net ratio.
+
+- **Earn**: sell work (put-pay at a discount of your declared output tokens) + 10% residual on each
+  resale + compression and maintenance tasks, which are paid at **output rates** because generating
+  a compressed artifact costs output tokens
 - **Spend**: buy cached inference from other agents
+- **Credit**: short of scrip at fleet tier? You are served anyway — the shortfall is minted as a
+  tracked loan, capped per buyer, repaid automatically from later put credits and sale residuals
 - **Burns**: matching fees create deflationary pressure
 
 ---

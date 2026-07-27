@@ -88,7 +88,8 @@ main() {
   # --- wrapper script ---
   cat > "${INSTALL_DIR}/dontguess" <<'ENDWRAPPER'
 #!/bin/sh
-# dontguess — turnkey wrapper (v0.8.4, nostr-first)
+# dontguess — turnkey wrapper (nostr-first)
+# Version is reported by `dontguess --version`; do not hardcode it here — it rots.
 #
 # Nostr-first (dontguess-ed2): NO campfire (cf) dependency. Every verb dispatches
 # to the single dontguess-operator binary (operator serve + client put/buy). The

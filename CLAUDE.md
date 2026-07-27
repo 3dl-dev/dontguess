@@ -73,6 +73,21 @@ Scrip is denominated in token cost. It is not redeemable for cash. It is only ex
 
 **Two-unit pricing model.** The exchange ACQUIRES in OUTPUT tokens (`token_cost`, expensive — ~5x input tokens across every model tier: Fable 10/50, Opus 5/25, Sonnet 3/15, Haiku 1/5) and DELIVERS in INPUT tokens (cheap — a buyer's read cost is derived from `ContentSize`, already stored, never from `token_cost`). The exchange therefore runs a deficit on any single sale and recovers it only across resales of the same entry — the publisher model this CLAUDE.md already documented ("Original author earns residuals in scrip as copies sell"), now implemented in `pkg/exchange/engine_pricing.go`'s `computePrice` via a flat `resaleAmortizationN=4` assumed resale count (no cold-start reuse estimator; the fast/medium loops adjust from observed demand). Buyer-facing price is the acquisition-scale figure (seller's accept price) divided by `resaleAmortizationN` — never the acquisition figure passed through 1:1. The divisor is residual-aware — `resaleAmortizationN * (1-residualFraction) / (1-standardResidualFraction)` — because high-reuse entries pay double residual (20% vs 10%) and a flat `N` applied to them under-recovers (a live `token_cost=8000` high-reuse entry lost 272 scrip across 4 resales under a flat divisor).
 
+**Deliver-on-credit (dontguess-29b, v0.9.1).** A buyer short of scrip at buy-accept is SERVED, not
+rejected: `ensureCreditForShortfall` mints exactly the shortfall as a tracked loan
+(`pkg/scrip/loan.go`, wired at `pkg/exchange/engine_credit.go`). Tier-gated to fleet via
+`FederationGuardEnabled` — NOT via `BrokeredMatchMode`, which is a matching-routing flag and was the
+original bug. Bounded by a conservative per-buyer cap on outstanding credit, and repaid automatically
+by withholding a fraction of the borrower's later put credits and sale residuals. Default/collection
+semantics and the vig rate are deliberately NOT implemented — they are gated on operator decision
+dontguess-4c1. A cap can only be loosened later, so shipping conservative was safe without that ruling.
+
+**Compression is paid at OUTPUT rates.** `WarmCompressionBountyPct` is 300 (not 30): generating a
+compressed artifact costs output tokens, and at the old scalar rate a compressor was ~4-8x underwater,
+which is why 0 of 44 assigns were ever completed. This lands near 130% of the entry's `token_cost`,
+which is CORRECT under two units — do not "fix" it back down. NOTE Hot (50) and Cold (20) were NOT
+raised and are still on the old basis; that inconsistency is tracked in dontguess-d5d.
+
 **What upgrading changes, and what it does not.** `computePrice` is evaluated at match and index time, so the moment a new binary runs, EVERY existing entry is quoted at the new, lower delivery price — roughly 4-5x cheaper. That is immediate and is not gated behind anything. What is NOT changed is the entries' *declared* `token_cost` values, which were recorded before this definition existed; reinterpreting those (and emitting the auditable, reversible repricing events for them) is a separate migration tracked in dontguess-b2b.
 
 ### The Three Loops (Heritage from toolrank)

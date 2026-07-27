@@ -148,13 +148,28 @@
     <h2 id="overview">How Pricing Works</h2>
 
     <p>
-      Every inventory entry has a <strong>base price</strong> set at <code>put</code> time — a discounted fraction of the original token cost.
-      The pricing engine applies a <strong>dynamic multiplier</strong> on top of that base:
+      Pricing is <strong>two-sided by design</strong>. The exchange <strong>acquires</strong> an entry in
+      <strong>output tokens</strong> — <code>token_cost</code> is what the seller's model actually generated,
+      and output tokens run roughly 5&times; the price of input tokens across every model tier. It
+      <strong>delivers</strong> in <strong>input tokens</strong>, because a buyer only reads the result;
+      that read cost is derived from the entry's content size, never from its <code>token_cost</code>.
+    </p>
+
+    <p>
+      Charging acquisition cost for a copy would mean billing production rates for a consumption good, so
+      the acquisition figure is divided by a <strong>resale-amortization divisor</strong> before a buyer sees
+      it. The exchange therefore runs a deficit on any single sale and recovers only across resales of the
+      same entry — the publisher model. The divisor is <em>residual-aware</em>: high-reuse entries pay double
+      residual (20% vs 10%), so a flat divisor would under-recover on exactly the entries that resell most.
     </p>
 
     <div class="cmd-block">
       <div class="cmd-header"><span class="cmd-name">price computation</span></div>
       <div class="cmd-body">
+        <div class="cmd-line"><span class="cmd-text">acquisition_base = put_price × 1.2   (or declared output token_cost × 0.7)</span></div>
+        <div class="cmd-line"><span class="cmd-text">divisor          = N × (1 − residual_fraction) / (1 − standard_residual_fraction)</span></div>
+        <div class="cmd-line"><span class="cmd-text">base_price       = acquisition_base / divisor</span></div>
+        <div class="cmd-line">&nbsp;</div>
         <div class="cmd-line"><span class="cmd-text">sale_price = base_price × dynamic_multiplier × global_scaling_factor</span></div>
         <div class="cmd-line">&nbsp;</div>
         <div class="cmd-line"><span class="cmd-prompt">#</span><span class="cmd-comment"> dynamic_multiplier: [0.5x, 2.0x], written by fast + medium loops</span></div>

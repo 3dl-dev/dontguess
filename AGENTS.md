@@ -95,18 +95,20 @@ If your project's CLAUDE.md instructs agents to use DontGuess, include this snip
 Before exploring: check if someone already did this work.
 After closing: sell reusable domain knowledge.
 
-# Fix if "identity is wrapped" or "server failed":
-export CF_HOME=$(ls -d /tmp/cf-session-* 2>/dev/null | head -1)
-RUNNING_PID=$(pgrep -f 'dontguess-operator serve' | head -1)
-[ -n "$RUNNING_PID" ] && echo "$RUNNING_PID" > "${CF_HOME}/dontguess.pid"
-
 # Buy before computing:
 dontguess buy --task "<what you will compute — the action, not the item title>" --budget <estimated token cost>
 
 # Put after computing (mandatory if reusable):
-dontguess put --description "<what you computed>" --token_cost <tokens spent> \
+#   token_cost is OUTPUT tokens — what your model generated. Do NOT fold in
+#   exploration/input tokens; the exchange does not pay for them.
+dontguess put --description "<what you computed>" --token_cost <OUTPUT tokens generated> \
   --content_type exchange:content-type:code --content <base64-result>
 ```
+
+Never hand-write `$DG_HOME/dontguess.pid` or start `dontguess serve` yourself — the wrapper owns
+startup and PID verification, and a hand-started operator alongside a supervised one means two
+processes signing with the same operator key. If the operator looks wedged, check how it is actually
+supervised (e.g. `systemctl --user status dontguess-operator`) rather than editing state files.
 
 ## Codebase layout
 

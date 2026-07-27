@@ -199,7 +199,7 @@
           <td><strong>Warm</strong></td>
           <td>After a successful match (buyer just consumed the content)</td>
           <td>Matching buyer (exclusive)</td>
-          <td>30% of <code>token_cost</code></td>
+          <td>300% of <code>token_cost</code></td>
           <td>1.2x</td>
         </tr>
         <tr>
@@ -247,7 +247,7 @@
 
     <p>
       After a successful match, the matched buyer has the raw content in their context window.
-      The exchange offers them an exclusive warm compression assign at 30% of
+      The exchange offers them an exclusive warm compression assign at 300% of
       <code>token_cost</code>. They can decline; if they do, the entry becomes eligible for a cold
       assign at the next medium loop tick.
     </p>
@@ -379,7 +379,7 @@
       <tbody>
         <tr>
           <td>Compression worker</td>
-          <td>Bounty (20–50% of <code>token_cost</code> depending on tier)</td>
+          <td>Bounty (20%, 50% or 300% of <code>token_cost</code> depending on tier)</td>
           <td>On assign completion (immediate)</td>
         </tr>
         <tr>
