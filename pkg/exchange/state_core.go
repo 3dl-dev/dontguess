@@ -68,6 +68,8 @@ func NewState() *State {
 		hopDepthCounted:        make(map[string]struct{}),
 		consumeCounted:         make(map[string]struct{}),
 		disputeCounted:         make(map[string]struct{}),
+		repriceEvents:          make(map[string][]RepriceRecord),
+		repriceCounted:         make(map[string]struct{}),
 	}
 }
 
@@ -277,6 +279,13 @@ func (s *State) beginReplayLocked(msgs []Message, replaySet map[string]struct{})
 	s.hopDepthCounted = make(map[string]struct{})
 	s.consumeCounted = make(map[string]struct{})
 	s.disputeCounted = make(map[string]struct{})
+	// repriceEvents/repriceCounted (dontguess-b2b) are derived purely from the
+	// campfire log's TagReprice messages, so they reset here like the other
+	// fold accumulators — a full Replay rebuilds the repricing audit trail from
+	// scratch, which is exactly the "rollback from the event log alone"
+	// property the migration's mandatory audit trail depends on.
+	s.repriceEvents = make(map[string][]RepriceRecord)
+	s.repriceCounted = make(map[string]struct{})
 	// federationProfiles is NOT reset on Replay. The trust_score values written
 	// by the slow loop (via SetFederationTrustScore) are externally managed and
 	// must survive engine restarts. The HopDepth and FirstSeenAt fields will be
@@ -374,6 +383,8 @@ func (s *State) applyLocked(msg *Message, blobs map[string][]byte) {
 		s.applyAssignExpire(msg)
 	case TagAssignAuctionClose:
 		s.applyAssignAuctionClose(msg)
+	case TagReprice:
+		s.applyReprice(msg)
 	default:
 		// Canonical ops with no switch case above (scrip ops, consume) dispatch
 		// here. CRITICAL (dontguess-5be, docs/design/relay-transport.md §2.4a D2):
