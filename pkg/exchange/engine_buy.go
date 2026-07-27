@@ -278,6 +278,37 @@ func (e *Engine) mergeSemanticAndFallback(task string, candidates []*InventoryEn
 	return semanticMatches
 }
 
+// derivationMultiplier is the inline stand-in for "output tokens burned by the
+// seller ~= N x input-token-equivalents (ITE) to re-derive from scratch". This
+// is the gated decision owned by dontguess-af3 (blocked on operator ruling
+// dontguess-96e, token_cost semantics + migration of 166 existing entries).
+// Per dontguess-d48's soft-dependency instruction: ship with this literal
+// multiplier now, do not block on af3; swap for the shared constant once af3
+// lands and closes.
+const derivationMultiplier = 5
+
+// netBenefitStatement renders the net-benefit arithmetic for a single match so
+// a buyer can see the real economics without doing scalar math on price vs.
+// token_cost_original (which quotes different units and reads as a weak
+// discount on its own — dontguess-d48). price and tokenCostOriginal are both
+// already present on the match payload (see MatchResult.Price /
+// MatchResult.TokenCostOriginal above); this is presentation only, it does
+// not change pricing, denomination, or the scrip ledger.
+func netBenefitStatement(price, tokenCostOriginal int64) string {
+	avoidedITE := tokenCostOriginal * derivationMultiplier
+	readCost := price + tokenCostOriginal
+	netSaving := avoidedITE - readCost
+	ratio := 0.0
+	if readCost > 0 {
+		ratio = float64(avoidedITE) / float64(readCost)
+	}
+	return fmt.Sprintf(
+		"Net benefit (top match): you avoid ~%d ITE of derivation (%d output tokens burned x %dx); "+
+			"this costs %d scrip + ~%d input tokens to read; net saving ~%d ITE (%.1fx).",
+		avoidedITE, tokenCostOriginal, derivationMultiplier, price, tokenCostOriginal, netSaving, ratio,
+	)
+}
+
 // emitMatchResponse builds the match payload and sends the exchange:match message.
 // It also triggers a warm compression offer for the top-matched entry.
 func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []rankedCandidate, candidates []*InventoryEntry, synthetic bool) error {
@@ -343,10 +374,15 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 
 	meta := map[string]any{"total_candidates": len(candidates)}
 
+	guide := "Results are ranked by: (1) correctness gate — only entries that completed similar tasks pass, (2) transaction efficiency — tokens saved per scrip spent, (3) value composite — confidence × freshness × reputation × diversity, (4) market novelty — discovery boost for underrepresented sellers. Higher confidence = stronger semantic match. Reputation 70+ is established; below 30 is untested. To purchase: send settle(preview-request) to sample content before committing scrip. Price shown includes dynamic market adjustments."
+	if len(matchResults) > 0 {
+		guide += " " + netBenefitStatement(matchResults[0].Price, matchResults[0].TokenCostOriginal)
+	}
+
 	matchPayload, err := e.marshal(map[string]any{
 		"results":     matchResults,
 		"search_meta": meta,
-		"guide":       "Results are ranked by: (1) correctness gate — only entries that completed similar tasks pass, (2) transaction efficiency — tokens saved per scrip spent, (3) value composite — confidence × freshness × reputation × diversity, (4) market novelty — discovery boost for underrepresented sellers. Higher confidence = stronger semantic match. Reputation 70+ is established; below 30 is untested. To purchase: send settle(preview-request) to sample content before committing scrip. Price shown includes dynamic market adjustments.",
+		"guide":       guide,
 	})
 	if err != nil {
 		return fmt.Errorf("encoding match payload: %w", err)
