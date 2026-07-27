@@ -161,20 +161,31 @@ func (e *Engine) emitPutAccept(msg *Message, offeredPrice int64, pending *Invent
 //
 // AUTOMATIC REPAYMENT (dontguess-29b wave-6 fix — see creditRepaymentWithholdPct's
 // doc comment in engine_credit.go): if the seller carries outstanding
-// deliver-on-credit debt, a fraction of offeredPrice is withheld here and
-// applied to that debt via applyRepayment instead of paid out. No-op for a
-// seller with no active loans — the overwhelming common case — so this
-// changes nothing for existing sellers.
+// deliver-on-credit debt, a fraction of offeredPrice is clawed back here and
+// applied to that debt via applyRepayment. No-op for a seller with no active
+// loans — the overwhelming common case — so this changes nothing for
+// existing sellers.
+//
+// CONSERVATION (dontguess-29b, fixes a double-count): the seller is paid the
+// FULL offeredPrice here — NOT a pre-reduced amount — and applyRepayment
+// below separately DEBITS the seller's own balance for withheld (paired with
+// the totalSupply burn in applyLoanRepay). A prior version credited only
+// `offeredPrice - withheld` while applyLoanRepay ALSO burned `withheld` from
+// totalSupply with no matching balance debit anywhere — that under-reported
+// TotalSupply relative to sum(balances) by exactly the withheld amount on
+// every repayment (measured: 141500 vs 173000 after one withheld put-pay,
+// from a starting state where the two matched exactly). Paying gross and
+// then debiting the seller for the withheld piece makes the burn balance
+// against a real, debited account instead of an omission.
 func (e *Engine) paySellerForBuyMiss(msg *Message, pending *InventoryEntry, offeredPrice, tokenCost int64) {
 	if e.opts.ScripStore == nil {
 		return
 	}
 	ctx := e.engineCtx()
-	withheld := e.repaymentAmount(pending.SellerKey, offeredPrice)
-	netPrice := offeredPrice - withheld
-	if _, _, err := e.opts.ScripStore.AddBudget(ctx, pending.SellerKey, scrip.BalanceKey, netPrice, ""); err != nil {
+	if _, _, err := e.opts.ScripStore.AddBudget(ctx, pending.SellerKey, scrip.BalanceKey, offeredPrice, ""); err != nil {
 		e.opts.log("engine: buy-miss put-accept: AddBudget for seller %s: %v", shortKey(pending.SellerKey), err)
 	}
+	withheld := e.repaymentAmount(pending.SellerKey, offeredPrice)
 	if withheld > 0 {
 		e.applyRepayment(pending.SellerKey, withheld, msg.ID)
 	}
@@ -194,7 +205,7 @@ func (e *Engine) paySellerForBuyMiss(msg *Message, pending *InventoryEntry, offe
 	// Emit scrip-put-pay so CampfireScripStore can replay the payment.
 	payPayload, marshalErr := e.marshal(scrip.PutPayPayload{
 		Seller:      pending.SellerKey,
-		Amount:      netPrice,
+		Amount:      offeredPrice,
 		TokenCost:   tokenCost,
 		DiscountPct: 100 - BuyMissOfferRate,
 		ResultHash:  resultHash,

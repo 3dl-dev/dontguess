@@ -269,11 +269,28 @@ func (e *Engine) ensureCreditForShortfall(buyerKey string, holdAmount int64, buy
 	// loan queries), refuse rather than risk unbounded credit. This is
 	// non-fatal to the caller (see this function's doc comment) — it falls
 	// through to the ordinary insufficient-scrip reject path.
+	//
+	// OPERATOR-VISIBLE SIGNAL (dontguess-29b wave-7 fix, item 3): a borrower
+	// who is refused here would otherwise be cut off with NOTHING
+	// operator-visible beyond a log line the caller may not be watching —
+	// this does not transition the loan to Defaulted, accrue vig, or write
+	// DebtorScore (that collection policy is gated on dontguess-4c1); it is
+	// observability only. Both refusal branches below get their OWN loud log
+	// line (mirroring DegradationMetrics' documented "never collapsed into
+	// one bucket" rule) and their OWN counter, queryable via
+	// Engine.DegradationSnapshot (already the wire-observability path:
+	// cmd/dontguess status.go / `dontguess status`).
 	outstanding, capOK := e.borrowerOutstandingPrincipal(buyerKey)
 	if !capOK {
+		e.degradation.CreditCapUnverifiable.Add(1)
+		e.opts.log("engine: CREDIT REFUSED (unverifiable): buyer=%s ScripStore does not support loan queries — cannot verify outstanding principal, refusing credit fail-closed",
+			shortKey(buyerKey))
 		return fmt.Errorf("credit: cannot verify outstanding principal for buyer %s (ScripStore does not support loan queries) — refusing credit", shortKey(buyerKey))
 	}
 	if outstanding+shortfall > creditMaxOutstandingPerBuyer {
+		e.degradation.CreditCapRefused.Add(1)
+		e.opts.log("engine: CREDIT REFUSED (cap): buyer=%s outstanding=%d shortfall=%d cap=%d — buyer is permanently cut off from further deliver-on-credit until existing debt is repaid",
+			shortKey(buyerKey), outstanding, shortfall, creditMaxOutstandingPerBuyer)
 		return fmt.Errorf("credit: buyer %s outstanding principal %d + shortfall %d would exceed per-buyer cap %d — refusing credit",
 			shortKey(buyerKey), outstanding, shortfall, creditMaxOutstandingPerBuyer)
 	}

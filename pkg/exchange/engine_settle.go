@@ -255,14 +255,25 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 
 	// AUTOMATIC REPAYMENT (dontguess-29b wave-6 fix — see
 	// creditRepaymentWithholdPct's doc comment in engine_credit.go). If the
-	// seller carries outstanding deliver-on-credit debt, withhold a fraction
-	// of ITS OWN residual (never touching exchangeRevenue, which is computed
-	// above from residualGross and is unaffected) and apply it to the loan via
-	// applyRepayment below. No-op (withheld=0) for a seller with no active
-	// loans — the overwhelming common case — so this changes nothing for
-	// existing sellers.
+	// seller carries outstanding deliver-on-credit debt, a fraction of ITS OWN
+	// residual (never touching exchangeRevenue, which is computed above from
+	// residualGross and is unaffected) is clawed back and applied to the loan
+	// via applyRepayment below.
+	//
+	// CONSERVATION (dontguess-29b, fixes a double-count): the seller is
+	// credited the FULL residualGross here — NOT a pre-reduced amount — and
+	// applyRepayment below separately DEBITS the seller's own balance for
+	// withheld (paired with the totalSupply burn in applyLoanRepay). The
+	// previous shape credited only `residualGross - withheld` while
+	// applyLoanRepay ALSO burned `withheld` from totalSupply — that burn was
+	// never paired with any matching balance debit (the seller was simply
+	// never credited the withheld piece, and nothing else was debited for
+	// it), so totalSupply silently drifted below sum(balances) by the
+	// withheld amount on every repayment. Crediting the full amount and then
+	// debiting the seller for the withheld piece makes the burn balance
+	// against a real, debited account instead of an omission.
+	residual := residualGross
 	withheld := e.repaymentAmount(sellerKey, residualGross)
-	residual := residualGross - withheld
 
 	operatorKey := e.state.OperatorKey
 
@@ -336,12 +347,15 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 		return err
 	}
 
-	// Apply the withheld fraction (if any) to the seller's outstanding loan(s)
-	// via a real scrip:loan-repay emission. Best-effort/logged-only by design
-	// (applyRepayment) — the withheld scrip was already excluded from the
-	// residual credited above, so a failure here never double-charges the
-	// seller and never silently forgives the debt (reconciled on next Replay
-	// once the log carries the repay message).
+	// Claw back the withheld fraction (if any) from the seller's own balance
+	// — just credited the FULL residualGross above — and apply it to the
+	// seller's outstanding loan(s) via a real scrip:loan-repay emission
+	// (applyRepayment -> applyLoanRepay debits the loan's BorrowerKey, i.e.
+	// this same seller, and burns the same amount from totalSupply — see
+	// applyLoanRepay's CONSERVATION doc comment). Best-effort/logged-only by
+	// design: a failure here leaves the seller holding the full residual
+	// live (never a double-charge) and the debt is reconciled from the
+	// durable log on the next Replay once the repay message folds.
 	if withheld > 0 {
 		e.applyRepayment(sellerKey, withheld, msg.ID)
 	}
@@ -352,8 +366,8 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 		return err
 	}
 
-	e.opts.log("engine: settle: reservation=%s seller=%s price=%d residual=%d fee_burned=%d exchange=%d",
-		shortKey(reservationID), shortKey(sellerKey), price, residual, fee, exchangeRevenue)
+	e.opts.log("engine: settle: reservation=%s seller=%s price=%d residual=%d withheld=%d fee_burned=%d exchange=%d",
+		shortKey(reservationID), shortKey(sellerKey), price, residual, withheld, fee, exchangeRevenue)
 	return nil
 }
 

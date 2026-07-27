@@ -700,6 +700,7 @@ func (s *LocalScripStore) applyLoanMint(msg *proto.Message) {
 // applyLoanRepay processes a scrip:loan-repay message.
 //
 // State effects:
+//   - LoanRecord.BorrowerKey's balance -= amount (see CONSERVATION note below)
 //   - LoanRecord.Repaid += amount
 //   - totalSupply -= amount (repaid scrip is burned)
 //   - When Repaid >= Principal: LoanRecord.Status = LoanRepaid;
@@ -708,6 +709,36 @@ func (s *LocalScripStore) applyLoanMint(msg *proto.Message) {
 // Validation:
 //   - loan_id must exist and be in LoanActive status
 //   - amount must be > 0
+//
+// CONSERVATION (dontguess-29b, fixes a double-count that broke TotalSupply ==
+// sum(balances)): a "repayment" is scrip coming OUT of the borrower's own
+// balance and being destroyed — the standard debt semantic, and the only one
+// that is correct for every caller of this fold. The engine's deliver-on-
+// credit repayment-withholding callers (pkg/exchange engine_credit.go's
+// applyRepayment, invoked from paySellerForBuyMiss and
+// performScripSettlement) now pay the borrower the FULL gross amount it
+// earned FIRST (offeredPrice / residualGross, undiminished), then emit this
+// scrip:loan-repay message to claw the withheld fraction back out of that
+// same balance. Before this fix, those callers instead credited a
+// PRE-REDUCED amount (gross minus withheld) directly and this fold burned
+// the withheld amount from totalSupply ALONE, with no balance ever debited
+// for it — since the borrower was simply never credited that slice in the
+// first place, nothing "held" it, and totalSupply silently drifted below
+// sum(balances) by exactly the withheld amount on every repayment (measured:
+// 141500 vs 173000 after one withheld put-pay, from a starting state where
+// the two matched exactly). Debiting the loan's own BorrowerKey — not
+// msg.Sender/operator, which for the settlement path never actually holds
+// the withheld amount (it comes out of a buyer's reservation hold, not the
+// operator's balance) — is the one rule that is correct for both callers.
+//
+// Fail-closed like applyPutPay/applyAssignPay: in live mode, if the
+// borrower's balance cannot cover it (should not happen in normal operation
+// — the caller credits gross before this message is emitted), drop the whole
+// repayment atomically rather than partially applying it; it is reconciled
+// from the durable log on the next Replay once the underlying condition
+// clears. During Replay, subtractFromBalance always succeeds (negative
+// balances are allowed — the log is authoritative), matching every other
+// transfer-style applier in this file.
 //
 // Design ref: docs/design/semantic-matching-marketplace.md §9
 func (s *LocalScripStore) applyLoanRepay(msg *proto.Message) {
@@ -725,7 +756,33 @@ func (s *LocalScripStore) applyLoanRepay(msg *proto.Message) {
 		s.loansMu.Unlock()
 		return
 	}
+	borrowerKey := record.BorrowerKey
+	s.loansMu.Unlock()
 
+	// Debit the borrower's own balance BEFORE mutating loan/totalSupply
+	// state, so a failure (live-mode underflow) drops the whole message
+	// atomically rather than burning supply that was never removed from any
+	// balance.
+	if borrowerKey != "" {
+		if err := s.subtractFromBalance(borrowerKey, p.Amount); err != nil {
+			return
+		}
+	}
+
+	s.loansMu.Lock()
+	// Re-check under lock: the loan could have transitioned (e.g. a
+	// concurrent repayment) between the release above and this re-acquire.
+	record, ok = s.loans[p.LoanID]
+	if !ok || record.Status != LoanActive {
+		s.loansMu.Unlock()
+		// The borrower debit above already landed and will NOT be undone here
+		// — this mirrors applyPutPay/applyAssignPay, which also do not roll
+		// back a successful debit if a later step is skipped. In practice
+		// this branch requires the loan to change status between the two
+		// lock sections, which does not happen in this single-threaded fold
+		// path (Replay and live ApplyMessage are both serialized per store).
+		return
+	}
 	record.Repaid += p.Amount
 	fullyRepaid := record.Repaid >= record.Principal
 	if fullyRepaid {
@@ -741,7 +798,8 @@ func (s *LocalScripStore) applyLoanRepay(msg *proto.Message) {
 	principal := record.Principal
 	s.loansMu.Unlock()
 
-	// Burn the repaid scrip from total supply.
+	// Burn the repaid scrip from total supply — paired with the balance debit
+	// above so TotalSupply and sum(balances) move together.
 	s.totalSupply.Add(-p.Amount)
 
 	// When fully repaid, retire the outstanding loan principal.

@@ -535,6 +535,8 @@ func printStatus(snap *StatusSnapshot, asJSON bool) {
 		fmt.Printf("  other:              %d\n", snap.Degradation.TrustDenialOther)
 		fmt.Printf("  fold not-operator:  %d\n", snap.Degradation.FoldDenialNotOperator)
 		fmt.Printf("  fold buyer-identity:%d\n", snap.Degradation.FoldDenialBuyerIdentity)
+		fmt.Printf("  credit cap refused: %d\n", snap.Degradation.CreditCapRefused)
+		fmt.Printf("  credit unverifiable:%d\n", snap.Degradation.CreditCapUnverifiable)
 	} else {
 		fmt.Printf("  n/a (%s)\n", snap.DegradationNote)
 	}

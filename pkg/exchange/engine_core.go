@@ -596,6 +596,25 @@ type DegradationMetrics struct {
 	// by a non-claimant that reached the fold without being counted would let a
 	// non-worker submit a result for another agent's claim silently (dontguess-471).
 	FoldDenialAssignClaimant atomic.Int64
+
+	// CreditCapRefused counts deliver-on-credit refusals (dontguess-29b,
+	// engine_credit.go ensureCreditForShortfall) where a buyer's outstanding
+	// loan principal plus the new shortfall would exceed
+	// creditMaxOutstandingPerBuyer. Before this counter existed, a borrower who
+	// reached the cap was cut off with nothing operator-visible beyond a log
+	// line the caller may not be watching — this file's TrustDenial* precedent
+	// applies here too: a distinct refusal reason gets its own counter, never
+	// collapsed into a generic bucket. This does NOT transition the loan to
+	// Defaulted, accrue vig, or write DebtorScore — that collection policy is
+	// gated on dontguess-4c1; this counter is observability only.
+	CreditCapRefused atomic.Int64
+	// CreditCapUnverifiable counts deliver-on-credit refusals where the
+	// configured ScripStore does not implement scripLoanQuerier, so
+	// borrowerOutstandingPrincipal cannot verify the buyer's outstanding debt —
+	// the fail-CLOSED branch of ensureCreditForShortfall. Distinct from
+	// CreditCapRefused: this is "cannot verify" (a store/deployment
+	// misconfiguration), not "verified and over cap."
+	CreditCapUnverifiable atomic.Int64
 }
 
 // DegradationCounts is a plain (non-atomic) point-in-time copy of
@@ -617,6 +636,8 @@ type DegradationCounts struct {
 	FoldDenialBuyerIdentity   int64 `json:"fold_denial_buyer_identity"`
 	FoldDenialAssignExclusive int64 `json:"fold_denial_assign_exclusive"`
 	FoldDenialAssignClaimant  int64 `json:"fold_denial_assign_claimant"`
+	CreditCapRefused          int64 `json:"credit_cap_refused"`
+	CreditCapUnverifiable     int64 `json:"credit_cap_unverifiable"`
 }
 
 // foldDenialReason identifies which security-relevant State.Apply fold guard
@@ -870,6 +891,8 @@ func (e *Engine) DegradationSnapshot() DegradationCounts {
 		FoldDenialBuyerIdentity:   e.degradation.FoldDenialBuyerIdentity.Load(),
 		FoldDenialAssignExclusive: e.degradation.FoldDenialAssignExclusive.Load(),
 		FoldDenialAssignClaimant:  e.degradation.FoldDenialAssignClaimant.Load(),
+		CreditCapRefused:          e.degradation.CreditCapRefused.Load(),
+		CreditCapUnverifiable:     e.degradation.CreditCapUnverifiable.Load(),
 	}
 }
 
