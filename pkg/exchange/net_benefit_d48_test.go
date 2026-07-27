@@ -11,45 +11,47 @@ import (
 )
 
 // TestNetBenefitStatement is a pure unit test of netBenefitStatement's
-// arithmetic (dontguess-d48): a computed avoided-ITE figure, the buyer's real
+// arithmetic (dontguess-d48): the avoided-derivation figure, the buyer's real
 // cost (scrip + input tokens to read), a net saving figure, and a ratio VALUE
-// — not just ranking prose. Uses the real-world example from the item
-// (price=6723, token_cost_original=8000) to pin the exact numbers.
+// — not just ranking prose. Pins exact numbers on a derivation-heavy fixture.
 //
 // contentSize=28712 bytes (arbitrary, chosen so contentSize/approxBytesPerToken
 // is a round 7178) is the buyer's read-cost input (dontguess-af3 defect 2):
 // tokenCostOriginal must NOT be used for that figure anymore.
 func TestNetBenefitStatement(t *testing.T) {
 	const price = int64(6723)
-	const tokenCostOriginal = int64(8000)
+	// Derivation-heavy fixture, which is the case the exchange exists for:
+	// ~430k spent finding the answer, ~28.7 KB of answer to read back. The
+	// avoided figure IS token_cost (no multiplier) — token_cost is already the
+	// seller's whole derivation spend, exploration included.
+	const tokenCostOriginal = int64(430000)
 	const contentSize = int64(28712)
 
 	got := netBenefitStatement(price, tokenCostOriginal, contentSize)
 
-	wantAvoided := tokenCostOriginal * derivationMultiplier // 40000
-	wantReadTokens := contentSize / approxBytesPerToken     // 7178
-	wantReadCost := price + wantReadTokens                  // 13901
-	wantNetSaving := wantAvoided - wantReadCost             // 26099
+	wantAvoided := tokenCostOriginal                    // 430000, NOT scaled
+	wantReadTokens := contentSize / approxBytesPerToken // 7178
+	wantReadCost := price + wantReadTokens              // 13901
+	wantNetSaving := wantAvoided - wantReadCost         // 416099
 	wantRatio := float64(wantAvoided) / float64(wantReadCost)
 
-	if wantAvoided != 40000 {
-		t.Fatalf("sanity: wantAvoided = %d, want 40000", wantAvoided)
+	if wantAvoided != 430000 {
+		t.Fatalf("sanity: wantAvoided = %d, want 430000 (token_cost unscaled)", wantAvoided)
 	}
 	if wantReadTokens != 7178 {
 		t.Fatalf("sanity: wantReadTokens = %d, want 7178", wantReadTokens)
 	}
-	if wantNetSaving != 26099 {
-		t.Fatalf("sanity: wantNetSaving = %d, want 26099", wantNetSaving)
+	if wantNetSaving != 416099 {
+		t.Fatalf("sanity: wantNetSaving = %d, want 416099", wantNetSaving)
 	}
 
-	for _, want := range []string{"40000", "6723", "8000", "7178", "26099"} {
+	for _, want := range []string{"430000", "6723", "7178", "416099"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("netBenefitStatement() = %q, missing expected figure %q", got, want)
 		}
 	}
-	// Assert the RATIO VALUE, not the literal letter "x" (which is present
-	// unconditionally in the format string's "output tokens burned x %dx"
-	// segment regardless of whether the (%.1fx) ratio survives at all).
+	// Assert the RATIO VALUE, not a bare "x" substring — a presence check on
+	// the letter alone would survive deleting the (%.1fx) ratio entirely.
 	wantRatioStr := fmt.Sprintf("(%.1fx)", wantRatio)
 	if !strings.Contains(got, wantRatioStr) {
 		t.Errorf("netBenefitStatement() = %q, missing ratio %q", got, wantRatioStr)
@@ -59,10 +61,10 @@ func TestNetBenefitStatement(t *testing.T) {
 	}
 	// dontguess-af3 defect 2 regression: the buyer-facing "input tokens to
 	// read" figure must be derived from contentSize, NEVER equal to
-	// tokenCostOriginal (a live 1:1 OUTPUT->INPUT collapse — tokenCostOriginal
-	// is OUTPUT tokens the seller burned producing the artifact, not what the
-	// buyer reads). This fixture deliberately picks contentSize so
-	// wantReadTokens (7178) != tokenCostOriginal (8000): a reintroduced
+	// tokenCostOriginal (a live 1:1 collapse — tokenCostOriginal is what the
+	// SELLER spent deriving the artifact, not what the buyer reads). This
+	// fixture deliberately picks contentSize so
+	// wantReadTokens (7178) != tokenCostOriginal (430000): a reintroduced
 	// `price + tokenCostOriginal` regression would emit "8000" as the read
 	// cost instead of "7178", failing the exact-fragment check below.
 	wantCostFrag := fmt.Sprintf("this costs %d scrip + ~%d input tokens to read", price, wantReadTokens)
@@ -215,11 +217,11 @@ func TestEmitMatchResponse_GuideIncludesTopMatchNetBenefit(t *testing.T) {
 		t.Fatalf("results[0].ContentSize = %d, want %d", topContentSize, top.ContentSize)
 	}
 
-	avoidedITE := topTokenCost * derivationMultiplier
+	avoided := topTokenCost // no multiplier: token_cost IS the avoided derivation spend
 	topReadTokens := topContentSize / approxBytesPerToken
 	readCost := topPrice + topReadTokens
-	netSaving := avoidedITE - readCost
-	ratio := float64(avoidedITE) / float64(readCost)
+	netSaving := avoided - readCost
+	ratio := float64(avoided) / float64(readCost)
 
 	// dontguess-af3 defect 2 regression: the fixture's TokenCost (8000) must
 	// differ from its content-size-derived read tokens, so a reintroduced
@@ -233,12 +235,12 @@ func TestEmitMatchResponse_GuideIncludesTopMatchNetBenefit(t *testing.T) {
 	// Bind each figure to its role via the exact surrounding format, not a
 	// bare substring -- so a swap of avoidedITE<->netSaving, or a read from
 	// the wrong match, cannot pass by accident.
-	wantAvoidedFrag := fmt.Sprintf("avoid ~%d ITE of derivation (%d output tokens burned x %dx)", avoidedITE, topTokenCost, derivationMultiplier)
+	wantAvoidedFrag := fmt.Sprintf("avoid ~%d tokens of derivation", avoided)
 	wantCostFrag := fmt.Sprintf("this costs %d scrip + ~%d input tokens to read", topPrice, topReadTokens)
-	wantSavingFrag := fmt.Sprintf("net saving ~%d ITE (%.1fx)", netSaving, ratio)
+	wantSavingFrag := fmt.Sprintf("net saving ~%d tokens (%.1fx)", netSaving, ratio)
 
 	if !strings.Contains(guide, wantAvoidedFrag) {
-		t.Errorf("guide = %q, missing top-match avoided-ITE fragment %q", guide, wantAvoidedFrag)
+		t.Errorf("guide = %q, missing top-match avoided-derivation fragment %q", guide, wantAvoidedFrag)
 	}
 	if !strings.Contains(guide, wantCostFrag) {
 		t.Errorf("guide = %q, missing top-match cost fragment %q", guide, wantCostFrag)
@@ -262,11 +264,11 @@ func TestEmitMatchResponse_GuideIncludesTopMatchNetBenefit(t *testing.T) {
 	// Regression guard against reading matchResults[len-1] (the "other"
 	// entry) instead of the top match: other's avoided-ITE figure must be
 	// absent, since it differs numerically from top's.
-	otherAvoidedITE := other.TokenCost * derivationMultiplier
-	if otherAvoidedITE != avoidedITE {
-		otherFrag := fmt.Sprintf("%d output tokens burned", otherAvoidedITE)
+	otherAvoided := other.TokenCost
+	if otherAvoided != avoided {
+		otherFrag := fmt.Sprintf("avoid ~%d tokens of derivation", otherAvoided)
 		if strings.Contains(guide, otherFrag) {
-			t.Errorf("guide = %q, contains the SECOND match's figures (%d) -- statement is bound to the wrong entry", guide, otherAvoidedITE)
+			t.Errorf("guide = %q, contains the SECOND match's figures (%d) -- statement is bound to the wrong entry", guide, otherAvoided)
 		}
 	}
 }

@@ -278,13 +278,16 @@ func (e *Engine) mergeSemanticAndFallback(task string, candidates []*InventoryEn
 	return semanticMatches
 }
 
-// derivationMultiplier is "output tokens burned by the seller ~= N x
-// input-token-equivalents (ITE) to re-derive from scratch". dontguess-af3
-// (operator ruling dontguess-96e) settled this as outputToInputMultiplier
-// (engine_pricing.go) — alias it here rather than re-deriving the ratio, per
-// dontguess-d48's original note to "swap for the shared constant once af3
-// lands and closes." Value unchanged (5); only the source of truth moved.
-const derivationMultiplier = outputToInputMultiplier
+// NOTE (operator amendment to dontguess-96e, 2026-07-27): there is deliberately
+// NO multiplier applied to token_cost here any more. token_cost is the seller's
+// WHOLE derivation spend — exploration included, not just the tokens present in
+// the result — so it already IS the figure a buyer avoids. Multiplying it (the
+// old derivationMultiplier = outputToInputMultiplier = 5) double-counted: the
+// exploration tokens were both already inside token_cost AND cheap input
+// tokens, so scaling them by an output:input ratio overstated the avoided
+// figure ~5x. outputToInputMultiplier still exists in engine_pricing.go to
+// document why the ACQUISITION side is expensive; it does not belong on the
+// buyer-facing avoided-derivation number.
 
 // approxBytesPerToken is the exchange's existing ~4-bytes-per-token heuristic
 // (state_settle.go's applySettleSmallContentDispute plausibility check —
@@ -319,24 +322,23 @@ func estimatedReadTokens(contentSize int64) int64 {
 // not change pricing, denomination, or the scrip ledger.
 //
 // contentSize (bytes, MatchResult.ContentSize) is the buyer's real read-cost
-// input — NOT tokenCostOriginal, which is OUTPUT tokens the SELLER burned
-// producing the artifact (dontguess-96e decision 3). The prior version of
-// this function used tokenCostOriginal for both the avoided-derivation figure
-// AND the buyer's read cost, a live 1:1 OUTPUT->INPUT collapse (dontguess-af3
-// defect 2).
+// input — NOT tokenCostOriginal, which is what the SELLER spent deriving the
+// artifact. Those are different quantities and conflating them was a live 1:1
+// collapse (dontguess-af3 defect 2): a buyer pays to READ the result, which is
+// a function of how long the result is, not of how hard it was to find.
 func netBenefitStatement(price, tokenCostOriginal, contentSize int64) string {
-	avoidedITE := tokenCostOriginal * derivationMultiplier
+	avoided := tokenCostOriginal
 	readTokens := estimatedReadTokens(contentSize)
 	readCost := price + readTokens
-	netSaving := avoidedITE - readCost
+	netSaving := avoided - readCost
 	ratio := 0.0
 	if readCost > 0 {
-		ratio = float64(avoidedITE) / float64(readCost)
+		ratio = float64(avoided) / float64(readCost)
 	}
 	return fmt.Sprintf(
-		"Net benefit (top match): you avoid ~%d ITE of derivation (%d output tokens burned x %dx); "+
-			"this costs %d scrip + ~%d input tokens to read; net saving ~%d ITE (%.1fx).",
-		avoidedITE, tokenCostOriginal, derivationMultiplier, price, readTokens, netSaving, ratio,
+		"Net benefit (top match): you avoid ~%d tokens of derivation; "+
+			"this costs %d scrip + ~%d input tokens to read; net saving ~%d tokens (%.1fx).",
+		avoided, price, readTokens, netSaving, ratio,
 	)
 }
 

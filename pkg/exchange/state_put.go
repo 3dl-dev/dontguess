@@ -903,23 +903,30 @@ func (s *State) applyPut(msg *Message, blobs map[string][]byte) {
 	if len(contentBytes) > MaxContentBytes {
 		return
 	}
-	// Plausibility check: token_cost must be consistent with content size.
+	// Plausibility check: a loose anti-inflation ceiling, NOT a definition.
 	//
-	// DEFINITION (dontguess-af3, operator ruling dontguess-96e decision 1/3):
-	// token_cost IS DEFINED AS OUTPUT TOKENS — what the seller's model actually
-	// generated to produce the put content, NOT total inference cost (i.e. NOT
-	// input/exploration tokens folded in). There is no separate wire field for
-	// an input-token component and none is being added (ruling decision 3) — a
-	// buyer's read cost is derived from ContentSize (already stored, see
-	// engine_pricing.go computePrice), never from token_cost. This plausibility
-	// check is the enforcement mechanism for that definition: a genuine
-	// result's OUTPUT token count cannot exceed MaxTokensPerByte tokens per
-	// byte of output — values beyond that threshold indicate seller inflation
-	// (or a seller reporting total/input-inclusive cost under the old,
-	// undefined semantic) rather than real output-token computation. Gross
-	// outliers (e.g. 1.5 M tokens on a 200-byte payload at 7500 tokens/byte)
-	// are dropped silently to prevent them from dominating the reported
-	// token-savings metric.
+	// DEFINITION (operator amendment to dontguess-96e, 2026-07-27): token_cost
+	// is the seller's WHOLE DERIVATION SPEND — the exploration that found the
+	// answer plus the tokens of the answer itself — not merely the tokens
+	// present in the result. That is deliberate: what a buyer avoids is the
+	// whole derivation, so an artifact that took 400k of searching to produce
+	// 30k of text is worth far more than one that took 30k to produce 30k, and
+	// an output-only definition would declare them identical.
+	//
+	// This check does NOT enforce that definition and must not be described as
+	// if it does. At MaxTokensPerByte (1000 tokens per byte of content) the
+	// ceiling is orders of magnitude above any honest declaration — a 28 KB
+	// artifact permits ~28 M — so it cannot distinguish a derivation-inclusive
+	// figure from an output-only one, and reporting total cost is NOT seller
+	// inflation. It exists only to drop gross outliers (e.g. 1.5 M tokens
+	// declared on a 200-byte payload) that would otherwise dominate the
+	// reported token-savings metric.
+	//
+	// What the buyer is CHARGED is a separate question entirely, answered by
+	// computePrice (engine_pricing.go): acquisition is discounted from
+	// token_cost, then amortized across expected resales, so a copy costs a
+	// small fraction of what deriving it cost. A buyer's read cost comes from
+	// ContentSize, never from token_cost.
 	maxPlausibleTokenCost := int64(len(contentBytes)) * MaxTokensPerByte
 	if maxPlausibleTokenCost < 1 {
 		maxPlausibleTokenCost = 1

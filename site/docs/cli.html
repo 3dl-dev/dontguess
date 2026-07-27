@@ -548,7 +548,7 @@
 
     <p>
       Operator-only. Reinterprets every existing inventory entry's declared <code>token_cost</code> under
-      the current definition (<strong><code>token_cost</code> is OUTPUT tokens</strong>), emitting one
+      the current definition (<strong><code>token_cost</code> is the seller&rsquo;s whole derivation spend</strong>), emitting one
       auditable <code>exchange:reprice</code> event per entry carrying the old price, the new price, the
       basis, and a ruling reference. It <strong>never mutates a price in place</strong> — the migration is
       reversible from the event log alone, scoped to the ruling reference you pass.

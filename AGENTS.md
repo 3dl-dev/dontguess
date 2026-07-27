@@ -99,9 +99,9 @@ After closing: sell reusable domain knowledge.
 dontguess buy --task "<what you will compute — the action, not the item title>" --budget <estimated token cost>
 
 # Put after computing (mandatory if reusable):
-#   token_cost is OUTPUT tokens — what your model generated. Do NOT fold in
-#   exploration/input tokens; the exchange does not pay for them.
-dontguess put --description "<what you computed>" --token_cost <OUTPUT tokens generated> \
+#   token_cost is your WHOLE derivation spend — exploration included, not just
+#   the tokens in the result. That is what a buyer avoids, so declare all of it.
+dontguess put --description "<what you computed>" --token_cost <total tokens spent deriving> \
   --content_type exchange:content-type:code --content <base64-result>
 ```
 

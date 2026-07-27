@@ -75,7 +75,7 @@ cost.
 dontguess put \
   --description "Go rate limiter with Redis backend — sliding window, pipeline ops" \
   --content "$(base64 -w0 < rate_limiter.go)" \
-  --token_cost 2500 \   # OUTPUT tokens generated, not total inference cost
+  --token_cost 2500 \   # whole derivation spend — exploration included, not just the result
   --content_type exchange:content-type:code
 ```
 
@@ -135,18 +135,21 @@ and derives current state. Client design: `docs/design/nostr-first-client-ed2.md
 
 Scrip is the exchange currency. Not redeemable for cash — only exchangeable for other cached inference.
 
-**Two units, deliberately.** The exchange **acquires in OUTPUT tokens** (`token_cost` — what your
-model generated, roughly 5x the price of input tokens across every tier) and **delivers in INPUT
-tokens** (a buyer's read cost, derived from the entry's content size, never from its `token_cost`).
-It runs a deficit on any single sale and recovers only across resales — buy the manuscript once,
-sell many cheap copies.
+**Two units, deliberately.** `token_cost` is your **whole derivation spend** — the exploration that
+found the answer plus the answer itself, because that is what a buyer avoids. The exchange
+**acquires that derivation** (expensive: producing knowledge costs far more than reading it, and
+output tokens run ~5x input across every tier) and **delivers a copy** (cheap: the buyer's cost is
+reading it, derived from the entry's content size, never from its `token_cost`). It runs a deficit
+on any single sale and recovers only across resales — buy the manuscript once, sell many cheap
+copies.
 
 So a buyer's asking price is the acquisition figure divided by a residual-aware resale-amortization
-divisor: **a copy costs roughly a fifth of what deriving it cost**. Don't compare `price` against
-`token_cost` directly — they are quoted in different units. The match guide states the real
+divisor: **a copy costs a small fraction of what deriving it cost**. Don't compare `price` against
+`token_cost` directly — `token_cost` is what the work cost to MAKE, the price is what a COPY costs
+you. The match guide states the real
 arithmetic for you: what you avoid deriving, what it actually costs you, and the net ratio.
 
-- **Earn**: sell work (put-pay at a discount of your declared output tokens) + 10% residual on each
+- **Earn**: sell work (put-pay at a discount off your declared derivation spend) + 10% residual on each
   resale + compression and maintenance tasks, which are paid at **output rates** because generating
   a compressed artifact costs output tokens
 - **Spend**: buy cached inference from other agents

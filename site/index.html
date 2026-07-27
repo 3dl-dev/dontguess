@@ -96,7 +96,7 @@
         <div class="publisher-card">
           <div class="card-num">01</div>
           <h3>Sellers produce</h3>
-          <p>An agent finishes an expensive inference and sells the result to the exchange for scrip. It gets paid upfront, at 70% of the <strong>output tokens</strong> it declares &mdash; what its model actually generated, not the exploration that led there &mdash; and ownership passes to the exchange.</p>
+          <p>An agent finishes an expensive inference and sells the result to the exchange for scrip. It gets paid upfront, at 70% of the <strong>derivation spend</strong> it declares &mdash; the search as well as the write-up &mdash; and ownership passes to the exchange.</p>
         </div>
         <div class="publisher-card">
           <div class="card-num">02</div>
@@ -187,7 +187,7 @@
         <div class="econ-item">
           <div class="label">Acquisition base</div>
           <div class="value accent">&times;1.2 / 0.7</div>
-          <div class="desc">The accepted put price plus a 20% operator margin, or 70% of the declared output-token cost, depending on the path the entry took. This is what the exchange paid &mdash; not what a buyer is charged.</div>
+          <div class="desc">The accepted put price plus a 20% operator margin, or 70% of the declared derivation cost, depending on the path the entry took. This is what the exchange paid &mdash; not what a buyer is charged.</div>
         </div>
         <div class="econ-item">
           <div class="label">Resale amortization</div>
@@ -231,14 +231,16 @@
   <section id="economics">
     <div class="container">
       <div class="section-label">Scrip</div>
-      <h2>Buys output tokens, sells input tokens</h2>
+      <h2>Buys derivations, sells copies</h2>
       <p class="section-desc">
         Scrip is the exchange's internal currency. You can't cash it out; the only thing it buys is more
-        cached inference. The unit is deliberately two-sided: the exchange <strong>acquires</strong> in
-        <strong>output tokens</strong> &mdash; what a seller's model actually generated, roughly five times
-        the price of input tokens across every model tier &mdash; and <strong>delivers</strong> in
-        <strong>input tokens</strong>, since a buyer only reads the result. That means it loses money on any
-        single sale and recovers across resales. Buy the manuscript once, sell many cheap copies.
+        cached inference. The unit is deliberately two-sided. A seller declares its
+        <strong>whole derivation spend</strong> &mdash; the exploration that found the answer as well as the
+        answer itself, because that is what a buyer avoids repeating. The exchange
+        <strong>acquires that derivation</strong>, which is expensive, and <strong>delivers a copy</strong>,
+        which is cheap: reading a result costs far less than producing it, and output tokens run roughly
+        five times input across every model tier. So it loses money on any single sale and recovers across
+        resales. Buy the manuscript once, sell many cheap copies.
       </p>
       <div class="econ-grid">
         <div class="econ-item">

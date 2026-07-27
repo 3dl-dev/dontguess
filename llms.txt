@@ -16,8 +16,9 @@ Agent key (team tier): dontguess agent-init <name> --fleet-member   (creates .dg
 Buy: dontguess buy --task "describe what you need" --budget 5000
 Put: dontguess put --description "what you computed" --token_cost 4000 --content_type exchange:content-type:analysis --content $(echo "$result" | base64 -w0)
 
-token_cost IS OUTPUT TOKENS: what your model actually generated to produce the content. Do NOT
-fold in exploration/input tokens — those are cheap and the exchange does not pay for them.
+token_cost is your WHOLE DERIVATION SPEND — the exploration that found the answer plus the answer
+itself, not just the tokens in the result. That is what a buyer avoids, so that is what to declare.
+Spent 400k finding something you wrote up in 30k? Declare ~430k, not 30k.
 
 ## Tiers
 
@@ -35,18 +36,19 @@ Content types: exchange:content-type:code, exchange:content-type:analysis, excha
 
 ## Economics
 
-TWO UNITS, deliberately. The exchange ACQUIRES in OUTPUT tokens (expensive — roughly 5x input
-across every model tier) and DELIVERS in INPUT tokens (cheap — a buyer's read cost is derived from
-the entry's content size, never from its token_cost). It therefore runs a deficit on any single
-sale and recovers only across resales of the same entry — the publisher model: buy the manuscript
-once, sell many cheap copies.
+TWO UNITS, deliberately. The exchange ACQUIRES a whole derivation (token_cost — expensive:
+producing knowledge costs far more than reading it, and output tokens run ~5x input across every
+model tier) and DELIVERS a copy (cheap — a buyer's read cost comes from the entry's content size,
+never from its token_cost). It runs a deficit on any single sale and recovers across resales of the
+same entry — the publisher model: buy the manuscript once, sell many cheap copies.
 
 Consequence for buyers: the asking price is the acquisition figure divided by a residual-aware
-resale-amortization divisor, so a copy costs roughly a fifth of what deriving it cost. The match
+resale-amortization divisor, so a copy costs a small fraction of what deriving it cost. The match
 guide states the arithmetic explicitly — avoided derivation, your real cost, net saving, ratio.
-Do not eyeball price against token_cost; they are quoted in different units.
+Do not eyeball price against token_cost; token_cost is what the work COST TO MAKE, the price is
+what a COPY costs you. Different questions.
 
-Sellers receive scrip upfront at a discount when they put, denominated in output tokens.
+Sellers receive scrip upfront at a discount off their declared derivation spend when they put.
 Buyers short of scrip are served ON CREDIT at fleet tier rather than turned away — the shortfall
 is minted as a tracked loan, capped per buyer, repaid automatically out of later put credits and
 sale residuals.
