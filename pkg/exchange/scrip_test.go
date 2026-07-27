@@ -52,6 +52,39 @@ func addScripMintMsg(t *testing.T, h *testHarness, agentKey string, amount int64
 	}
 }
 
+// addScripLoanMintMsg inserts a dontguess:scrip-loan-mint message directly
+// into the harness store, seeding a pre-existing Active loan for borrowerKey
+// (dontguess-29b wave-6 fix tests: per-buyer cap, automatic repayment) without
+// going through ensureCreditForShortfall. Must be called BEFORE constructing
+// the LocalScripStore (newCampfireScripStore) so its initial Replay sees it,
+// mirroring addScripMintMsg's own documented ordering requirement.
+func addScripLoanMintMsg(t *testing.T, h *testHarness, borrowerKey, loanID string, principal int64) {
+	t.Helper()
+	rawPayload, err := json.Marshal(map[string]any{
+		"borrower":            borrowerKey,
+		"principal":           principal,
+		"vig_rate_bps":        10,
+		"due_at":              time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339),
+		"loan_id":             loanID,
+		"settlement_msg_id":   "test-seed-settlement",
+		"commitment_token_id": "test-seed-commitment",
+	})
+	if err != nil {
+		t.Fatalf("marshal scrip-loan-mint payload: %v", err)
+	}
+	rec := store.MessageRecord{
+		ID:         "loan-mint-" + loanID,
+		CampfireID: h.cfID,
+		Sender:     h.operator.PublicKeyHex(),
+		Payload:    rawPayload,
+		Tags:       []string{scrip.TagScripLoanMint},
+		Timestamp:  time.Now().UnixNano(),
+	}
+	if _, err := h.st.AddMessage(rec); err != nil {
+		t.Fatalf("AddMessage (scrip-loan-mint): %v", err)
+	}
+}
+
 // addScripPutPayMsg emits a scrip-put-pay message for a seller who submitted a put.
 // The antecedent is the put message ID being paid.
 func addScripPutPayMsg(t *testing.T, h *testHarness, putMsgID, seller string, amount, tokenCost int64, discountPct int64, resultHash string) {

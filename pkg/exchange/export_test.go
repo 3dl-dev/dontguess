@@ -28,6 +28,7 @@ func (e *Engine) ComputePriceForTest(entry *InventoryEntry) int64 {
 
 // ComputePriceMinPriceForTest exposes the floor price constant for assertion.
 const ComputePriceMinPriceForTest = computePriceMinPrice
+
 // ShortKeyForTest exposes shortKey for white-box testing.
 func ShortKeyForTest(key string) string { return shortKey(key) }
 
@@ -201,4 +202,45 @@ func (e *Engine) LocalSeenForTest() int {
 // running the full poll loop (which would race the assertions).
 func (e *Engine) ReplayAllForTest() error {
 	return e.replayAll()
+}
+
+// CreditTierEligibleForTest exposes creditTierEligible (dontguess-29b) for
+// direct white-box testing of the tier gate — specifically that it keys on
+// FederationGuardEnabled, not BrokeredMatchMode (wave-6 fix).
+func (e *Engine) CreditTierEligibleForTest() bool {
+	return e.creditTierEligible()
+}
+
+// EnsureCreditForShortfallForTest exposes ensureCreditForShortfall
+// (dontguess-29b) for direct testing of the deliver-on-credit rail, including
+// the per-buyer cap, without needing a full buy→match→buyer-accept cycle.
+func (e *Engine) EnsureCreditForShortfallForTest(buyerKey string, holdAmount int64, buyerAcceptMsgID, matchMsgID string) error {
+	return e.ensureCreditForShortfall(buyerKey, holdAmount, buyerAcceptMsgID, matchMsgID)
+}
+
+// CreditMaxOutstandingPerBuyerForTest exposes the per-buyer credit cap
+// constant (dontguess-29b wave-6 fix) for test assertions.
+const CreditMaxOutstandingPerBuyerForTest = creditMaxOutstandingPerBuyer
+
+// CreditRepaymentWithholdPctForTest exposes the automatic-repayment
+// withholding percentage (dontguess-29b wave-6 fix) for test assertions.
+const CreditRepaymentWithholdPctForTest = creditRepaymentWithholdPct
+
+// BorrowerOutstandingPrincipalForTest exposes borrowerOutstandingPrincipal
+// (dontguess-29b wave-6 fix) for direct assertions on a borrower's total
+// unpaid loan principal.
+func (e *Engine) BorrowerOutstandingPrincipalForTest(borrowerKey string) (int64, bool) {
+	return e.borrowerOutstandingPrincipal(borrowerKey)
+}
+
+// RepaymentAmountForTest exposes repaymentAmount (dontguess-29b wave-6 fix)
+// for direct testing of the automatic-repayment withholding calculation.
+func (e *Engine) RepaymentAmountForTest(borrowerKey string, grossAmount int64) int64 {
+	return e.repaymentAmount(borrowerKey, grossAmount)
+}
+
+// ApplyRepaymentForTest exposes applyRepayment (dontguess-29b wave-6 fix) for
+// direct testing of the scrip:loan-repay wiring.
+func (e *Engine) ApplyRepaymentForTest(borrowerKey string, amount int64, causeMsgID string) {
+	e.applyRepayment(borrowerKey, amount, causeMsgID)
 }

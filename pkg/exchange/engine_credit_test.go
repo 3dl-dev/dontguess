@@ -9,13 +9,14 @@ package exchange_test
 // 13 of 26 buyer-accepts (exactly half) were rejected insufficient_scrip.
 //
 // These tests use the same fleet-tier harness shape as scrip_test.go
-// (ScripStore configured, BrokeredMatchMode left at its zero value = false)
-// — the natural tier gate creditTierEligible relies on (engine_credit.go).
+// (ScripStore configured, FederationGuardEnabled left at its zero value =
+// false) — the natural tier gate creditTierEligible relies on
+// (engine_credit.go). See federation_guard_credit_test.go for the tests
+// proving the gate keys on FederationGuardEnabled, not BrokeredMatchMode.
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
@@ -142,7 +143,12 @@ func TestDeliverOnCredit_ZeroBalanceBuyerCompletesEndToEnd(t *testing.T) {
 	warmReward := waitForWarmCompressionAssign(t, h, inv[0].EntryID, h.buyer.PublicKeyHex(), 2*time.Second)
 	cancel()
 
-	wantWarmBounty := inv[0].TokenCost * exchange.WarmCompressionBountyPct / 100
+	// PINNED LITERAL (dontguess-29b wave-6 fix): NOT computed via
+	// `inv[0].TokenCost * exchange.WarmCompressionBountyPct / 100` — that
+	// formula recomputes to match whatever WarmCompressionBountyPct currently
+	// is, so it would still pass if the 30->300 bounty change were reverted.
+	// 36000 = 12000 (this test's seeded token_cost) * 300 / 100.
+	const wantWarmBounty int64 = 36000
 	if warmReward != wantWarmBounty {
 		t.Errorf("warm compression reward = %d, want %d (%d%% of token_cost %d)",
 			warmReward, wantWarmBounty, exchange.WarmCompressionBountyPct, inv[0].TokenCost)
@@ -199,16 +205,27 @@ func TestDeliverOnCredit_ZeroBalanceBuyerCompletesEndToEnd(t *testing.T) {
 		t.Errorf("buyer balance after credit-covered hold = %d, want 0 (topped up exactly to holdAmount, then held in full)", bal)
 	}
 
-	// deliver (antecedent = buyer-accept message) — the buyer RECEIVES the
-	// content. This is the other half of the outcome dontguess-29b verifies:
-	// "a buyer with insufficient scrip RECEIVES the content."
-	deliverMsgPayload, _ := json.Marshal(map[string]any{
-		"phase":        "deliver",
-		"entry_id":     inv[0].EntryID,
-		"content_ref":  "sha256:" + fmt.Sprintf("%064x", 4242),
-		"content_size": int64(9000),
+	// deliver (antecedent = buyer-accept message) — a bare operator TRIGGER
+	// (no content field), driven through the REAL engine dispatch path
+	// (DispatchForTest), not hand-authored with content already attached.
+	// dontguess-29b wave-6 fix: the previous version of this test fabricated
+	// the deliver message's content_ref/content_size fields itself and only
+	// called State().Replay directly, which folds state effects but never
+	// runs handleSettleDeliverContent — so it never exercised the §3.7
+	// money-integrity reservation gate or emitDeliverContent, and did not
+	// actually prove content moved ON CREDIT through the engine. Driving the
+	// bare trigger through DispatchForTest (mirrors
+	// deliver_reservation_gate_test.go's credit-funded deliver step) runs the
+	// real handler: it resolves the entry/buyer from the antecedent chain,
+	// checks the live reservation the credit-funded hold created above, and
+	// only then emits the content-bearing settle(deliver) via
+	// emitDeliverContent. Breaking the credit wiring (no reservation) would
+	// make this assert fail closed instead of proving content moved.
+	deliverTriggerPayload, _ := json.Marshal(map[string]any{
+		"phase":    "deliver",
+		"entry_id": inv[0].EntryID,
 	})
-	deliverMsg := h.sendMessage(h.operator, deliverMsgPayload,
+	deliverMsg := h.sendMessage(h.operator, deliverTriggerPayload,
 		[]string{
 			exchange.TagSettle,
 			exchange.TagPhasePrefix + exchange.SettlePhaseStrDeliver,
@@ -218,9 +235,27 @@ func TestDeliverOnCredit_ZeroBalanceBuyerCompletesEndToEnd(t *testing.T) {
 
 	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
+	deliverRec, err := h.st.GetMessage(deliverMsg.ID)
+	if err != nil {
+		t.Fatalf("GetMessage(deliver-trigger): %v", err)
+	}
+	if err := eng.DispatchForTest(exchange.FromStoreRecord(deliverRec)); err != nil {
+		t.Fatalf("dispatch settle(deliver) trigger: %v", err)
+	}
 
-	// complete (antecedent = deliver message) — buyer confirms receipt,
-	// completing the buy end-to-end.
+	// The engine must have actually emitted a content-bearing settle(deliver)
+	// — proving the §3.7 reservation gate passed (credit-funded hold) and
+	// content genuinely moved, not merely that a trigger message exists.
+	if n := deliverMessagesWithContent(t, h); n != 1 {
+		t.Fatalf("expected exactly 1 settle(deliver) carrying content after credit-funded buyer-accept, got %d", n)
+	}
+
+	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
+
+	// complete (antecedent = the operator's deliver TRIGGER message, not the
+	// engine-emitted content message — deliverToMatch keys off the trigger,
+	// matching e2e_test.go's documented antecedent choice).
 	completePayload, _ := json.Marshal(map[string]any{
 		"price":    salePrice,
 		"entry_id": inv[0].EntryID,

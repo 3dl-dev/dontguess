@@ -27,7 +27,13 @@ func TestWarmCompression_MatchTriggersAssign(t *testing.T) {
 	eng := h.newEngine()
 
 	const tokenCost int64 = 20000
-	const wantBounty int64 = tokenCost * exchange.WarmCompressionBountyPct / 100 // 60000
+	// PINNED LITERAL (dontguess-29b wave-6 fix): this MUST NOT be computed as
+	// `tokenCost * exchange.WarmCompressionBountyPct / 100` — that formula
+	// recomputes to match whatever WarmCompressionBountyPct currently is,
+	// which makes the assertion below pass even if WarmCompressionBountyPct
+	// were reverted 300->30 (the exact regression this fix protects against).
+	// 60000 = 20000 * 300 / 100, the ruled-on 10x bounty (dontguess-96e).
+	const wantBounty int64 = 60000
 
 	contentHash := "sha256:" + fmt.Sprintf("%064x", 77)
 

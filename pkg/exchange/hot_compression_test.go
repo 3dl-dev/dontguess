@@ -294,8 +294,11 @@ func TestHotAndWarmCompressionAssign_Coexistence(t *testing.T) {
 	eng := h.newEngine()
 
 	const tokenCost int64 = 20000
-	const wantHotBounty int64 = tokenCost * exchange.HotCompressionBountyPct / 100   // 10000
-	const wantWarmBounty int64 = tokenCost * exchange.WarmCompressionBountyPct / 100 // 6000
+	const wantHotBounty int64 = tokenCost * exchange.HotCompressionBountyPct / 100 // 10000 (50%, unaffected by dontguess-96e)
+	// PINNED LITERAL (dontguess-29b wave-6 fix): NOT computed via the formula
+	// — see warm_compression_test.go's TestWarmCompression_MatchTriggersAssign
+	// for why. 60000 = 20000 * 300 / 100, the ruled-on 10x bounty (dontguess-96e).
+	const wantWarmBounty int64 = 60000
 
 	contentHash := "sha256:" + fmt.Sprintf("%064x", 201)
 

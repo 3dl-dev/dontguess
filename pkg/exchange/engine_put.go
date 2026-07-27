@@ -158,13 +158,25 @@ func (e *Engine) emitPutAccept(msg *Message, offeredPrice int64, pending *Invent
 
 // paySellerForBuyMiss pays the seller scrip for a buy-miss fulfillment and emits
 // the scrip-put-pay convention message. Non-fatal: errors are logged only.
+//
+// AUTOMATIC REPAYMENT (dontguess-29b wave-6 fix — see creditRepaymentWithholdPct's
+// doc comment in engine_credit.go): if the seller carries outstanding
+// deliver-on-credit debt, a fraction of offeredPrice is withheld here and
+// applied to that debt via applyRepayment instead of paid out. No-op for a
+// seller with no active loans — the overwhelming common case — so this
+// changes nothing for existing sellers.
 func (e *Engine) paySellerForBuyMiss(msg *Message, pending *InventoryEntry, offeredPrice, tokenCost int64) {
 	if e.opts.ScripStore == nil {
 		return
 	}
 	ctx := e.engineCtx()
-	if _, _, err := e.opts.ScripStore.AddBudget(ctx, pending.SellerKey, scrip.BalanceKey, offeredPrice, ""); err != nil {
+	withheld := e.repaymentAmount(pending.SellerKey, offeredPrice)
+	netPrice := offeredPrice - withheld
+	if _, _, err := e.opts.ScripStore.AddBudget(ctx, pending.SellerKey, scrip.BalanceKey, netPrice, ""); err != nil {
 		e.opts.log("engine: buy-miss put-accept: AddBudget for seller %s: %v", shortKey(pending.SellerKey), err)
+	}
+	if withheld > 0 {
+		e.applyRepayment(pending.SellerKey, withheld, msg.ID)
 	}
 	// result_hash is audit metadata only — the scrip ledger fold (applyPutPay)
 	// reads Seller + Amount and IGNORES it. For a v2 confidential entry
@@ -182,7 +194,7 @@ func (e *Engine) paySellerForBuyMiss(msg *Message, pending *InventoryEntry, offe
 	// Emit scrip-put-pay so CampfireScripStore can replay the payment.
 	payPayload, marshalErr := e.marshal(scrip.PutPayPayload{
 		Seller:      pending.SellerKey,
-		Amount:      offeredPrice,
+		Amount:      netPrice,
 		TokenCost:   tokenCost,
 		DiscountPct: 100 - BuyMissOfferRate,
 		ResultHash:  resultHash,

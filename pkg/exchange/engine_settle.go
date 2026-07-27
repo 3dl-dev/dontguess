@@ -250,8 +250,19 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 	// — single source of truth shared with computePrice's amortization divisor
 	// so pricing and settlement can never disagree about the residual rate).
 	residualDenom := residualDenominatorFor(settledEntry)
-	residual := price / residualDenom
-	exchangeRevenue := price - residual
+	residualGross := price / residualDenom
+	exchangeRevenue := price - residualGross
+
+	// AUTOMATIC REPAYMENT (dontguess-29b wave-6 fix — see
+	// creditRepaymentWithholdPct's doc comment in engine_credit.go). If the
+	// seller carries outstanding deliver-on-credit debt, withhold a fraction
+	// of ITS OWN residual (never touching exchangeRevenue, which is computed
+	// above from residualGross and is unaffected) and apply it to the loan via
+	// applyRepayment below. No-op (withheld=0) for a seller with no active
+	// loans — the overwhelming common case — so this changes nothing for
+	// existing sellers.
+	withheld := e.repaymentAmount(sellerKey, residualGross)
+	residual := residualGross - withheld
 
 	operatorKey := e.state.OperatorKey
 
@@ -323,6 +334,16 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 	// error, never a restore/retry (see block above).
 	if err := e.creditResidualToSeller(ctx, sellerKey, reservationID, residual); err != nil {
 		return err
+	}
+
+	// Apply the withheld fraction (if any) to the seller's outstanding loan(s)
+	// via a real scrip:loan-repay emission. Best-effort/logged-only by design
+	// (applyRepayment) — the withheld scrip was already excluded from the
+	// residual credited above, so a failure here never double-charges the
+	// seller and never silently forgives the debt (reconciled on next Replay
+	// once the log carries the repay message).
+	if withheld > 0 {
+		e.applyRepayment(sellerKey, withheld, msg.ID)
 	}
 
 	// Credit exchange revenue to operator. Post-durable-emit: failure is a loud
