@@ -14,14 +14,25 @@ package exchange_test
 //
 // THE FIXES (both additive, both guarded by ScripStore != nil):
 //   §3.7 handleSettleDeliverContent REQUIRES a live reservationFor(match) before
-//        emitDeliverContent — no reservation ⇒ no content.
+//        emitDeliverContent — no reservation ⇒ no content. STILL TRUE, UNCHANGED
+//        by dontguess-29b — this is the load-bearing invariant this file protects.
 //   §3.6 a failed decAndSaveHold (ErrBudgetExceeded) emits a DURABLE, wire-visible
 //        settle(buyer-accept-reject) (reason:"insufficient_scrip") before
-//        returning — the buyer learns why instead of only timing out.
+//        returning — the buyer learns why instead of only timing out. STILL the
+//        fallback path when credit (below) is unavailable or does not cover it.
 //
-// This test drives the exact attack and asserts: the reject is on the wire, NO
-// settle(deliver) carrying content is ever emitted, no reservation/hold/settle
-// exists, the buyer's balance is untouched, and total scrip supply is conserved.
+// UPDATED BY dontguess-29b (deliver-on-credit): at fleet tier (ScripStore
+// configured, not BrokeredMatchMode/federation), an "underfunded" buyer-accept
+// no longer hits §3.6's reject — engine_credit.go's ensureCreditForShortfall
+// mints exactly the shortfall via scrip:loan-mint BEFORE the hold, so the hold
+// now SUCCEEDS and a reservation IS created. Content therefore DOES move for
+// what was previously a §3.6 rejection — but it is NOT free: a wire-visible
+// LoanRecord captures the debt (Active, principal = shortfall), and total
+// scrip supply increases by EXACTLY that principal (a conscious, auditable
+// mint), never silently. §3.7's reservation gate is what makes this safe: it
+// still refuses to move content for ANY buyer-accept that did not produce a
+// live reservation, by credit or by balance — that is the invariant this test
+// now proves, in place of the old "reject, no content, conserved supply" one.
 
 import (
 	"context"
@@ -30,6 +41,7 @@ import (
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 	"github.com/3dl-dev/dontguess/pkg/store"
 )
 
@@ -70,10 +82,18 @@ func buyerAcceptRejectMessages(t *testing.T, h *testHarness) []store.MessageReco
 	return msgs
 }
 
-// TestUnfundedBuyerAcceptDeliver_NoFreeContent_ed2D is the ed2-D exploit-closed
-// proof: an underfunded buyer that sends buyer-accept + settle(deliver) receives
-// the durable reject and NO content; scrip supply is conserved.
-func TestUnfundedBuyerAcceptDeliver_NoFreeContent_ed2D(t *testing.T) {
+// TestUnfundedBuyerAcceptDeliver_FleetCreditCoversHold_ed2D29b is the updated
+// ed2-D proof for dontguess-29b: an underfunded FLEET-TIER buyer's buyer-accept
+// no longer rejects — the credit rail (engine_credit.go) mints exactly the
+// shortfall via scrip:loan-mint, the hold succeeds, a reservation is created,
+// and the buyer's subsequent settle(deliver) DOES receive content. This is not
+// the free-content exploit reopened: total scrip supply increases by EXACTLY
+// the loan principal (a durable, wire-visible, auditable mint — never silent),
+// the buyer's live balance nets to exactly 0 (funds + shortfall - holdAmount),
+// and a LoanRecord captures the debt. §3.7's reservation gate (still enforced,
+// unchanged) is what makes this safe: content moves ONLY because a live
+// reservation now genuinely exists, by credit instead of by prior balance.
+func TestUnfundedBuyerAcceptDeliver_FleetCreditCoversHold_ed2D29b(t *testing.T) {
 	t.Parallel()
 
 	h := newTestHarness(t)
@@ -131,7 +151,9 @@ func TestUnfundedBuyerAcceptDeliver_NoFreeContent_ed2D(t *testing.T) {
 	// guard, unlike the funded buyer-accept hold).
 	<-done
 
-	// ── ATTACK STEP 1: buyer-accept from the underfunded buyer. The hold fails. ──
+	shortfall := holdAmount - buyerFunds
+
+	// ── STEP 1: buyer-accept from the underfunded buyer. Credit covers it. ──
 	buyerAcceptPayload, _ := json.Marshal(map[string]any{
 		"phase":    "buyer-accept",
 		"entry_id": entry.EntryID,
@@ -152,48 +174,40 @@ func TestUnfundedBuyerAcceptDeliver_NoFreeContent_ed2D(t *testing.T) {
 		t.Fatalf("GetMessage(buyer-accept): %v", err)
 	}
 	dispErr := eng.DispatchForTest(exchange.FromStoreRecord(baRec))
-	// The dispatch surfaces the budget error (logged+dropped by the real poll
-	// loop). We tolerate it here — the point is the WIRE side effects below.
-	if dispErr == nil {
-		t.Fatal("expected buyer-accept dispatch to fail (insufficient scrip), got nil")
+	if dispErr != nil {
+		t.Fatalf("expected buyer-accept to succeed on fleet-tier credit, got error: %v", dispErr)
 	}
 
-	// §3.6 assertion: a DURABLE, wire-visible buyer-accept-reject was emitted,
-	// antecedent = the buyer-accept id, reason = insufficient_scrip.
-	rejects := buyerAcceptRejectMessages(t, h)
-	if len(rejects) != 1 {
-		t.Fatalf("expected exactly 1 settle(buyer-accept-reject), got %d (ed2-D §3.6 regression)", len(rejects))
-	}
-	rej := rejects[0]
-	if rej.Sender != h.operator.PublicKeyHex() {
-		t.Fatalf("buyer-accept-reject sender = %s, want operator %s", rej.Sender, h.operator.PublicKeyHex())
-	}
-	if len(rej.Antecedents) != 1 || rej.Antecedents[0] != buyerAccept.ID {
-		t.Fatalf("buyer-accept-reject antecedents = %v, want [%s]", rej.Antecedents, buyerAccept.ID)
-	}
-	var rejPayload struct {
-		Phase  string `json:"phase"`
-		Reason string `json:"reason"`
-	}
-	if err := json.Unmarshal(rej.Payload, &rejPayload); err != nil {
-		t.Fatalf("unmarshal buyer-accept-reject payload: %v", err)
-	}
-	if rejPayload.Phase != exchange.SettlePhaseStrBuyerAcceptReject {
-		t.Fatalf("buyer-accept-reject phase = %q, want %q", rejPayload.Phase, exchange.SettlePhaseStrBuyerAcceptReject)
-	}
-	if rejPayload.Reason != "insufficient_scrip" {
-		t.Fatalf("buyer-accept-reject reason = %q, want %q", rejPayload.Reason, "insufficient_scrip")
+	// dontguess-29b: NO buyer-accept-reject — the shortfall was covered, not rejected.
+	if rejects := buyerAcceptRejectMessages(t, h); len(rejects) != 0 {
+		t.Fatalf("expected 0 settle(buyer-accept-reject) once credit covers the shortfall, got %d", len(rejects))
 	}
 
-	// No scrip hold was durably recorded — the reservation does not exist.
-	if resID := extractReservationIDFromLog(t, h); resID != "" {
-		t.Fatalf("expected NO scrip-buy-hold reservation after failed buyer-accept, got %q", resID)
+	// A scrip-loan-mint message must exist for exactly the shortfall.
+	loanPayload := extractLoanMintFromLog(t, h)
+	if loanPayload == nil {
+		t.Fatal("expected a scrip-loan-mint message covering the shortfall")
+	}
+	if loanPayload.Borrower != h.buyer.PublicKeyHex() {
+		t.Fatalf("loan borrower = %s, want %s", loanPayload.Borrower, h.buyer.PublicKeyHex())
+	}
+	if loanPayload.Principal != shortfall {
+		t.Fatalf("loan principal = %d, want %d (holdAmount=%d - buyerFunds=%d)",
+			loanPayload.Principal, shortfall, holdAmount, buyerFunds)
+	}
+	loan, ok := cs.GetLoan(loanPayload.LoanID)
+	if !ok || loan.Status != scrip.LoanActive {
+		t.Fatalf("expected LoanRecord %s to exist and be Active, got ok=%v status=%v", loanPayload.LoanID, ok, loan)
 	}
 
-	// ── ATTACK STEP 2: pull the content anyway. Operator emits a settle(deliver) ──
-	// trigger e-tagging the buyer-accept (buyerAcceptToMatch was folded
-	// unconditionally, so the antecedent chain resolves). WITHOUT the §3.7 guard
-	// this would emit the full content FREE.
+	// A scrip hold WAS durably recorded — the reservation now exists.
+	resID := extractReservationIDFromLog(t, h)
+	if resID == "" {
+		t.Fatal("expected a scrip-buy-hold reservation after credit-covered buyer-accept, got none")
+	}
+
+	// ── STEP 2: settle(deliver). §3.7's reservation gate now passes because a ──
+	// live reservation genuinely exists (credit-funded) — content moves.
 	deliverTriggerPayload, _ := json.Marshal(map[string]any{
 		"phase":    "deliver",
 		"entry_id": entry.EntryID,
@@ -215,20 +229,25 @@ func TestUnfundedBuyerAcceptDeliver_NoFreeContent_ed2D(t *testing.T) {
 		t.Fatalf("deliver dispatch returned error: %v", err)
 	}
 
-	// §3.7 assertion (THE money-integrity gate): NO settle(deliver) carrying
-	// content was emitted. The only deliver on the log is our contentless trigger.
-	if n := deliverMessagesWithContent(t, h); n != 0 {
-		t.Fatalf("FREE-CONTENT EXPLOIT OPEN: %d settle(deliver) message(s) carry content for an unfunded buyer (ed2-D §3.7 regression)", n)
+	// §3.7 STILL HOLDS: content moves because (and only because) a live
+	// reservation exists. This is the credit-funded case, not a bypass.
+	if n := deliverMessagesWithContent(t, h); n != 1 {
+		t.Fatalf("expected exactly 1 settle(deliver) carrying content once a credit-funded reservation exists, got %d", n)
 	}
 
-	// No scrip-settle happened, and total supply is conserved (no mint, no burn).
+	// No settle(complete) happened, so no scrip-settle yet — that is a later step.
 	if n := countScripSettle(t, h); n != 0 {
-		t.Fatalf("expected 0 scrip-settle for an unfunded exploit attempt, got %d", n)
+		t.Fatalf("expected 0 scrip-settle before settle(complete), got %d", n)
 	}
-	if got := cs.Balance(h.buyer.PublicKeyHex()); got != buyerFunds {
-		t.Fatalf("buyer balance moved: got %d, want %d (no scrip should move)", got, buyerFunds)
+	// Buyer's live balance nets to exactly 0: funds + shortfall (loan) - holdAmount.
+	if got := cs.Balance(h.buyer.PublicKeyHex()); got != 0 {
+		t.Fatalf("buyer balance after credit-covered hold: got %d, want 0 (funds=%d + shortfall=%d - hold=%d)",
+			got, buyerFunds, shortfall, holdAmount)
 	}
-	if got := cs.TotalSupply(); got != supplyBefore {
-		t.Fatalf("total scrip supply changed: got %d, want %d (supply must be conserved)", got, supplyBefore)
+	// Total scrip supply increases by EXACTLY the loan principal — a conscious,
+	// auditable mint (not silent, not more than the shortfall).
+	if got := cs.TotalSupply(); got != supplyBefore+shortfall {
+		t.Fatalf("total scrip supply: got %d, want %d (supplyBefore=%d + loan principal=%d)",
+			got, supplyBefore+shortfall, supplyBefore, shortfall)
 	}
 }

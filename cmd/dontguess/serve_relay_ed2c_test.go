@@ -42,6 +42,7 @@ import (
 	"github.com/3dl-dev/dontguess/pkg/identity"
 	"github.com/3dl-dev/dontguess/pkg/relay"
 	"github.com/3dl-dev/dontguess/pkg/relayclient"
+	"github.com/3dl-dev/dontguess/pkg/scrip"
 	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
@@ -368,6 +369,23 @@ func (f *ed2cFixture) matchStoreID(t *testing.T) string {
 	return rec.ID
 }
 
+// firstLoanMintPayload returns the first operator-authored scrip:loan-mint
+// record's decoded payload (dontguess-29b deliver-on-credit), and whether one
+// exists.
+func (f *ed2cFixture) firstLoanMintPayload(t *testing.T) (scrip.LoanMintPayload, bool) {
+	t.Helper()
+	recs, _ := f.ls.ReadAll()
+	rec, ok := firstLocalRecordWithTags(recs, scrip.TagScripLoanMint)
+	if !ok {
+		return scrip.LoanMintPayload{}, false
+	}
+	var p scrip.LoanMintPayload
+	if err := json.Unmarshal(rec.Payload, &p); err != nil {
+		t.Fatalf("unmarshal scrip-loan-mint payload: %v", err)
+	}
+	return p, true
+}
+
 // --- (1) HAPPY PATH via RunE: content in hand byte-exact + scrip moved --------
 
 // TestEd2C_RunBuy_TeamHit_SettlesContentAndMovesScrip drives the ACTUAL `dontguess
@@ -424,20 +442,18 @@ func TestEd2C_RunBuy_TeamHit_SettlesContentAndMovesScrip(t *testing.T) {
 	}
 }
 
-// --- (2) UNDERFUNDED via RunE: reject RECEIVED via the per-phase filter (H3) ---
+// --- (2) UNMINTED buyer via RunE: covered by credit, not rejected (dontguess-29b) ---
 
-// TestEd2C_RunBuy_UnderfundedBuyer_ReceivesRejectViaPerPhaseFilter proves the H3
-// correctness point: an UNMINTED buyer's client RECEIVES + surfaces the operator's
-// durable settle(buyer-accept-reject) (reason:insufficient_scrip) — a DISTINGUISHED
-// LOUD outcome, NOT a bare timeout.
-//
-// This is the H3 proof BY CONSTRUCTION: the reject e-tags the buyer-accept WIRE id,
-// never buyID. The hub's ed2cMatchFilter is a faithful #e matcher, so the ONLY way
-// the client sees the reject is its per-phase #e:[buyer-accept] subscription (§3.5).
-// A client that subscribed #e:[buyID] for the settle chain would receive NOTHING and
-// this test would FAIL with an ambiguous timeout instead of the insufficient_scrip
-// reject asserted below.
-func TestEd2C_RunBuy_UnderfundedBuyer_ReceivesRejectViaPerPhaseFilter(t *testing.T) {
+// TestEd2C_RunBuy_UnmintedBuyer_CoveredByCredit proves the updated H3 point
+// (dontguess-29b): an UNMINTED buyer's client no longer dead-ends at the
+// operator's settle(buyer-accept-reject) — the deliver-on-credit loan rail
+// (pkg/exchange/engine_credit.go) mints the FULL holdAmount via a durable
+// scrip:loan-mint (balance was 0) BEFORE the hold, so the buy SUCCEEDS exactly
+// like a funded buy: content is delivered byte-exact and a LoanRecord captures
+// the debt. This REPLACES the pre-29b
+// TestEd2C_RunBuy_UnderfundedBuyer_ReceivesRejectViaPerPhaseFilter, whose
+// premise (hard reject, no content) no longer holds at fleet tier.
+func TestEd2C_RunBuy_UnmintedBuyer_CoveredByCredit(t *testing.T) {
 	fx := newEd2cFixture(t)
 	buyer, buyerHome := newBuyerAgent(t) // deliberately NOT minted
 	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got != 0 {
@@ -456,27 +472,39 @@ func TestEd2C_RunBuy_UnderfundedBuyer_ReceivesRejectViaPerPhaseFilter(t *testing
 		"timeout":    "30s",
 	})
 	err := runBuy(cmd, nil)
-	if err == nil {
-		t.Fatalf("expected a LOUD underfunded error; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	if err != nil {
+		t.Fatalf("expected the unminted buy to succeed on fleet-tier credit, got error: %v\nstdout=%q stderr=%q",
+			err, stdout.String(), stderr.String())
 	}
-	// The reject was RECEIVED (not a timeout): the error + stderr carry the operator's
-	// insufficient_scrip reason and the actionable mint instruction.
-	if !strings.Contains(err.Error(), "insufficient_scrip") {
-		t.Fatalf("error %q does not surface the RECEIVED insufficient_scrip reject (H3: was the per-phase #e:[buyer-accept] filter used?)\nstderr:\n%s", err, stderr.String())
+	if !strings.Contains(stderr.String(), "SETTLED") {
+		t.Fatalf("stderr does not surface the SETTLED outcome:\n%s", stderr.String())
 	}
-	if !strings.Contains(err.Error(), "dontguess mint") {
-		t.Fatalf("error %q does not surface the actionable mint instruction", err)
+	// Content IS delivered, byte-exact — the shortfall was covered, not rejected.
+	if !bytes.Equal(stdout.Bytes(), ed2cContent) {
+		t.Fatalf("delivered content mismatch.\n got (%d bytes): %q\nwant (%d bytes): %q",
+			stdout.Len(), stdout.String(), len(ed2cContent), string(ed2cContent))
 	}
-	if !strings.Contains(stderr.String(), "UNDERFUNDED") {
-		t.Fatalf("stderr does not surface the distinguished UNDERFUNDED outcome (not a bare timeout):\n%s", stderr.String())
+
+	// A durable scrip:loan-mint covers the FULL holdAmount (balance was 0).
+	loanPayload, ok := fx.firstLoanMintPayload(t)
+	if !ok {
+		t.Fatal("expected a scrip-loan-mint record covering the unminted buyer's shortfall")
 	}
-	// No content was delivered, and no scrip moved.
-	if stdout.Len() != 0 {
-		t.Fatalf("underfunded buyer received content on stdout (%d bytes): %q", stdout.Len(), stdout.String())
+	if loanPayload.Borrower != buyer.PubKeyHex() {
+		t.Fatalf("loan borrower = %s, want %s", loanPayload.Borrower, buyer.PubKeyHex())
 	}
-	if got := fx.st.scrip.Balance(fx.seller.PubKeyHex()); got != 0 {
-		t.Fatalf("seller credited %d on an underfunded buy — no scrip should have moved", got)
+	if loanPayload.Principal <= 0 {
+		t.Fatalf("loan principal = %d, want > 0", loanPayload.Principal)
 	}
+
+	waitFor(t, 8*time.Second, "seller credited the residual", func() bool {
+		return fx.st.scrip.Balance(fx.seller.PubKeyHex()) > 0
+	})
+	// Buyer's live balance settles to exactly 0: loan principal (== holdAmount,
+	// since balance was 0) minus the full hold.
+	waitFor(t, 8*time.Second, "buyer balance settles to 0 (loan principal - hold)", func() bool {
+		return fx.st.scrip.Balance(buyer.PubKeyHex()) == 0
+	})
 }
 
 // --- (3) PREVIEW path END-TO-END via the client Settle against the full stack -

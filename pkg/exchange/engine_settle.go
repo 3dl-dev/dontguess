@@ -250,8 +250,30 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 	// — single source of truth shared with computePrice's amortization divisor
 	// so pricing and settlement can never disagree about the residual rate).
 	residualDenom := residualDenominatorFor(settledEntry)
-	residual := price / residualDenom
-	exchangeRevenue := price - residual
+	residualGross := price / residualDenom
+	exchangeRevenue := price - residualGross
+
+	// AUTOMATIC REPAYMENT (dontguess-29b wave-6 fix — see
+	// creditRepaymentWithholdPct's doc comment in engine_credit.go). If the
+	// seller carries outstanding deliver-on-credit debt, a fraction of ITS OWN
+	// residual (never touching exchangeRevenue, which is computed above from
+	// residualGross and is unaffected) is clawed back and applied to the loan
+	// via applyRepayment below.
+	//
+	// CONSERVATION (dontguess-29b, fixes a double-count): the seller is
+	// credited the FULL residualGross here — NOT a pre-reduced amount — and
+	// applyRepayment below separately DEBITS the seller's own balance for
+	// withheld (paired with the totalSupply burn in applyLoanRepay). The
+	// previous shape credited only `residualGross - withheld` while
+	// applyLoanRepay ALSO burned `withheld` from totalSupply — that burn was
+	// never paired with any matching balance debit (the seller was simply
+	// never credited the withheld piece, and nothing else was debited for
+	// it), so totalSupply silently drifted below sum(balances) by the
+	// withheld amount on every repayment. Crediting the full amount and then
+	// debiting the seller for the withheld piece makes the burn balance
+	// against a real, debited account instead of an omission.
+	residual := residualGross
+	withheld := e.repaymentAmount(sellerKey, residualGross)
 
 	operatorKey := e.state.OperatorKey
 
@@ -325,14 +347,27 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 		return err
 	}
 
+	// Claw back the withheld fraction (if any) from the seller's own balance
+	// — just credited the FULL residualGross above — and apply it to the
+	// seller's outstanding loan(s) via a real scrip:loan-repay emission
+	// (applyRepayment -> applyLoanRepay debits the loan's BorrowerKey, i.e.
+	// this same seller, and burns the same amount from totalSupply — see
+	// applyLoanRepay's CONSERVATION doc comment). Best-effort/logged-only by
+	// design: a failure here leaves the seller holding the full residual
+	// live (never a double-charge) and the debt is reconciled from the
+	// durable log on the next Replay once the repay message folds.
+	if withheld > 0 {
+		e.applyRepayment(sellerKey, withheld, msg.ID)
+	}
+
 	// Credit exchange revenue to operator. Post-durable-emit: failure is a loud
 	// hard error, never a restore/retry (see block above).
 	if err := e.creditRevenueToOperator(ctx, operatorKey, reservationID, exchangeRevenue); err != nil {
 		return err
 	}
 
-	e.opts.log("engine: settle: reservation=%s seller=%s price=%d residual=%d fee_burned=%d exchange=%d",
-		shortKey(reservationID), shortKey(sellerKey), price, residual, fee, exchangeRevenue)
+	e.opts.log("engine: settle: reservation=%s seller=%s price=%d residual=%d withheld=%d fee_burned=%d exchange=%d",
+		shortKey(reservationID), shortKey(sellerKey), price, residual, withheld, fee, exchangeRevenue)
 	return nil
 }
 
@@ -573,6 +608,17 @@ func (e *Engine) handleSettleBuyerAcceptScrip(msg *Message) error {
 	bestPrice := e.computePrice(entry)
 	fee := bestPrice / MatchingFeeRate
 	holdAmount := bestPrice + fee
+
+	// Deliver-on-credit (dontguess-29b). Top up a shortfall via the loan rail
+	// (pkg/scrip/loan.go) BEFORE attempting the hold, so a buyer who found the
+	// exact entry it needed is not turned away broke (measured: 13 of 26
+	// buyer-accepts, exactly half, were rejected insufficient_scrip). See
+	// ensureCreditForShortfall's doc comment for the tier gate (fleet only —
+	// never federation) and why a top-up failure is non-fatal here.
+	if creditErr := e.ensureCreditForShortfall(msg.Sender, holdAmount, msg.ID, matchMsgID); creditErr != nil {
+		e.opts.log("engine: buyer-accept scrip: credit top-up failed for buyer %s (falling through to normal insufficient-scrip handling): %v",
+			shortKey(msg.Sender), creditErr)
+	}
 
 	err := e.decAndSaveHold(msg, matchMsgID, holdAmount, bestPrice, fee)
 	if err != nil {
@@ -1082,7 +1128,7 @@ func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, buyerKe
 		"content":      base64.StdEncoding.EncodeToString(content),
 		"content_hash": contentHash,
 		"buyer":        buyerKey,
-		"guide":        "Content delivered. Verify integrity: SHA-256 hash the decoded content and compare to content_hash. To confirm receipt, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns 30% of token_cost in scrip (you have the content cached, making you the ideal compressor).",
+		"guide":        fmt.Sprintf("Content delivered. Verify integrity: SHA-256 hash the decoded content and compare to content_hash. To confirm receipt, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns %d%% of token_cost in scrip (you have the content cached, making you the ideal compressor; token_cost is OUTPUT tokens and compression is OUTPUT-token labor, so it is paid at OUTPUT rates, not a fraction of the read price you just paid).", WarmCompressionBountyPct),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("engine: settle-deliver: marshal content payload for entry=%s: %w", shortKey(entry.EntryID), err)
@@ -1108,7 +1154,7 @@ func (e *Engine) emitDeliverPointer(msg *Message, entry *InventoryEntry, buyerKe
 		"blob_pointer": entry.BlobPointer,
 		"content_hash": entry.ContentHash,
 		"buyer":        buyerKey,
-		"guide":        "Content is stored off-relay in Blossom (too large to inline). Fetch it via blob_pointer, then verify integrity YOURSELF before trusting it: SHA-256 hash the fetched bytes and compare to content_hash. A mismatch means the blob host served tampered or corrupted bytes — discard it and dispute rather than send settle(complete). To confirm receipt after a successful verify, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns 30% of token_cost in scrip (you have the content cached, making you the ideal compressor).",
+		"guide":        fmt.Sprintf("Content is stored off-relay in Blossom (too large to inline). Fetch it via blob_pointer, then verify integrity YOURSELF before trusting it: SHA-256 hash the fetched bytes and compare to content_hash. A mismatch means the blob host served tampered or corrupted bytes — discard it and dispute rather than send settle(complete). To confirm receipt after a successful verify, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns %d%% of token_cost in scrip (you have the content cached, making you the ideal compressor).", WarmCompressionBountyPct),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("engine: settle-deliver: marshal pointer payload for entry=%s: %w", shortKey(entry.EntryID), err)

@@ -17,7 +17,8 @@ import (
 // message is emitted with:
 //   - task_type = "compress"
 //   - exclusive_sender = buyer's public key
-//   - reward = 30% of the entry's token_cost (floor)
+//   - reward = WarmCompressionBountyPct (300%, dontguess-29b) of the entry's
+//     token_cost (floor) — paid at OUTPUT rates, see the constant's doc comment
 //   - entry_id = the put message ID
 func TestWarmCompression_MatchTriggersAssign(t *testing.T) {
 	t.Parallel()
@@ -26,7 +27,13 @@ func TestWarmCompression_MatchTriggersAssign(t *testing.T) {
 	eng := h.newEngine()
 
 	const tokenCost int64 = 20000
-	const wantBounty int64 = tokenCost * 30 / 100 // 6000
+	// PINNED LITERAL (dontguess-29b wave-6 fix): this MUST NOT be computed as
+	// `tokenCost * exchange.WarmCompressionBountyPct / 100` — that formula
+	// recomputes to match whatever WarmCompressionBountyPct currently is,
+	// which makes the assertion below pass even if WarmCompressionBountyPct
+	// were reverted 300->30 (the exact regression this fix protects against).
+	// 60000 = 20000 * 300 / 100, the ruled-on 10x bounty (dontguess-96e).
+	const wantBounty int64 = 60000
 
 	contentHash := "sha256:" + fmt.Sprintf("%064x", 77)
 
@@ -136,7 +143,7 @@ func TestWarmCompression_MatchTriggersAssign(t *testing.T) {
 			payload.ExclusiveSender, h.buyer.PublicKeyHex())
 	}
 	if payload.Reward != wantBounty {
-		t.Errorf("reward = %d, want %d (30%% of token_cost %d)", payload.Reward, wantBounty, tokenCost)
+		t.Errorf("reward = %d, want %d (%d%% of token_cost %d)", payload.Reward, wantBounty, exchange.WarmCompressionBountyPct, tokenCost)
 	}
 	if payload.EntryID != putMsg.ID {
 		t.Errorf("entry_id = %q, want put msg ID %q", payload.EntryID, putMsg.ID)

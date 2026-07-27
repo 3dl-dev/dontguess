@@ -860,9 +860,12 @@ func (e *Engine) sendCompressionAssign(entry *InventoryEntry) error {
 }
 
 // sendWarmCompressionAssign sends an exchange:assign message for a compress task
-// directed exclusively at the buyer of the matched entry. The bounty is 30% of
-// the entry's token_cost (floor integer division). The buyer just consumed the
-// raw content and has it in cache, making them the ideal compressor.
+// directed exclusively at the buyer of the matched entry. The bounty is
+// WarmCompressionBountyPct (300%, dontguess-29b) of the entry's token_cost
+// (floor integer division) — paid at OUTPUT rates because compression is
+// OUTPUT-token labor (see the constant's doc comment). The buyer just
+// consumed the raw content and has it in cache, making them the ideal,
+// zero-read-cost compressor.
 //
 // Called after a successful match when no compressed derivative exists for the
 // matched entry. Failure is non-fatal to the caller — the error is logged and
