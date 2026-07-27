@@ -54,6 +54,16 @@ type redeemHandler struct {
 	mu sync.Mutex
 }
 
+// dgHome is the exchange home the issuer policy and child-grant edges live in.
+// Sourced from the promotion controller rather than a duplicate field so the two
+// can never disagree about which config they are reading and writing.
+func (rh *redeemHandler) dgHomePath() string {
+	if rh.ctrl == nil {
+		return ""
+	}
+	return rh.ctrl.dgHome
+}
+
 // newRedeemHandler builds the handler over the live promotion controller, engine,
 // and a durable redeemed-id store at storePath. A nil logf defaults to a no-op. It
 // returns an error only if the redeemed-id store cannot be opened (a fail-closed
@@ -93,10 +103,15 @@ func (rh *redeemHandler) handle(ev *nostr.Event) bool {
 		return false
 	}
 
-	// AUTHORITATIVE VERIFY (ADV-2): member signature, embedded operator-signed
-	// invite, operator-key PIN, invite-id binding, and freshness — all re-derived
-	// from the signed events themselves, never from any relay write policy.
-	redeem, err := nostr.VerifyRedeem(ev, rh.operatorKey, rh.nowUnix())
+	// AUTHORITATIVE VERIFY (ADV-2): member signature, embedded issuer-signed
+	// invite, ISSUER GATE, invite-id binding, and freshness — all re-derived from
+	// the signed events themselves, never from any relay write policy.
+	//
+	// The issuer gate (dontguess-09a) accepts the operator key OR a parent already
+	// on the operator's OWN allowlist. It is evaluated here, operator-side, against
+	// persisted config — never against anything the redeem claims about itself — so
+	// a dumb or hostile relay still cannot admit anyone.
+	redeem, err := nostr.VerifyRedeemWithIssuer(ev, newIssuerAuthorizer(rh.dgHomePath(), rh.operatorKey), rh.nowUnix())
 	if err != nil {
 		rh.logf("SECURITY: invite redeem REJECTED event %s: %v", shortRedeemID(ev.ID), err)
 		return false
@@ -133,6 +148,20 @@ func (rh *redeemHandler) handle(ev *nostr.Event) bool {
 		// already durable, so this grant is consumed — the operator can admit the
 		// member manually (`allowlist add`) without re-running the mint.
 		return true // authentic event; promote failure is a local fault, cursor may advance
+	}
+
+	// (3b) RECORD the parent -> child edge for a delegated admission, so removing the
+	// parent later cascades to this child. Deliberately AFTER promote: a crash here
+	// loses the edge (child admitted, revocation will not reach it — visible and
+	// fixable with `allowlist remove`) rather than recording an edge for a key that
+	// was never admitted (invisible). Not fatal to the redeem either way.
+	if redeem.ViaParent {
+		if err := recordChildGrant(rh.dgHomePath(), member, redeem.IssuerHexKey); err != nil {
+			rh.logf("invite redeem: member %s admitted under parent %s but recording the child edge FAILED: %v (revocation of the parent will NOT cascade to this child; `allowlist remove` it directly)",
+				shortHex(member), shortHex(redeem.IssuerHexKey), err)
+		} else {
+			rh.logf("invite redeem: member %s admitted under PARENT %s (delegated, depth 1)", shortHex(member), shortHex(redeem.IssuerHexKey))
+		}
 	}
 
 	// (4) MINT the optional genesis grant. 0 = none.

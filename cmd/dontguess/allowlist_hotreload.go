@@ -115,9 +115,41 @@ func (c *allowlistController) apply(action, targetHex string, auth *identity.Eve
 	// (or re-include a just-removed one) — a durable membership desync, since the
 	// roster is authoritative-on-fold. The persisted config is immune: it is the
 	// operator intent we hold c.mu across.
+	// CASCADING REVOCATION (dontguess-09a): removing a parent removes every child it
+	// admitted via a parent-signed grant, in this same operator-signed republish, so
+	// revoking a parent actually revokes. Computed BEFORE the parent's own removal
+	// so the edges are still present to read.
+	var cascaded []string
+	if action == allowlistActionRemove {
+		if cfg, cerr := exchange.LoadConfig(c.dgHome); cerr == nil {
+			cascaded = childrenOf(cfg, targetHex)
+		}
+	}
+
 	cfgMembers, err := persistFleetAllowlistChange(c.dgHome, action, targetHex)
 	if err != nil {
 		return fmt.Errorf("allowlist: persist config: %w", err)
+	}
+	// Persist each cascaded child the same way, so the roster below is built from a
+	// config that already excludes them. A child that fails to persist is surfaced
+	// rather than silently left admitted under a revoked parent.
+	for _, kid := range cascaded {
+		m, kerr := persistFleetAllowlistChange(c.dgHome, allowlistActionRemove, kid)
+		if kerr != nil {
+			return fmt.Errorf("allowlist: cascade remove child %s of %s: %w", kid, targetHex, kerr)
+		}
+		cfgMembers = m
+	}
+	if len(cascaded) > 0 {
+		if ferr := forgetChildGrants(c.dgHome, cascaded); ferr != nil {
+			return fmt.Errorf("allowlist: cascade drop child edges of %s: %w", targetHex, ferr)
+		}
+	}
+	// A key removed in its own right is no longer anybody's child either.
+	if action == allowlistActionRemove {
+		if ferr := forgetChildGrants(c.dgHome, []string{targetHex}); ferr != nil {
+			return fmt.Errorf("allowlist: drop child edge for %s: %w", targetHex, ferr)
+		}
 	}
 
 	// Individual/no-relay tier: no live admission gate to reload. The config
@@ -146,6 +178,16 @@ func (c *allowlistController) apply(action, targetHex string, auth *identity.Eve
 		// seller's accepted inventory from the index NOW (dontguess-23c).
 		if c.onRevoke != nil {
 			c.onRevoke(targetHex)
+		}
+		// Cascade to children in the LIVE set as well. The roster echo would
+		// eventually correct this via ReplaceAll over the persisted config, but that
+		// leaves a window in which a revoked parent's child still passes the trust
+		// check — enforcement must be immediate, same as the parent's.
+		for _, kid := range cascaded {
+			c.keys.Remove(kid)
+			if c.onRevoke != nil {
+				c.onRevoke(kid)
+			}
 		}
 	}
 

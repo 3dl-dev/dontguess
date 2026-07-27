@@ -271,10 +271,39 @@ type Redeem struct {
 	// cryptographically bound: VerifyRedeem re-verified the member's signature over
 	// the redeem event, so this pubkey provably possesses the member private key.
 	MemberHexKey string
-	// Invite is the decoded, operator-signature-verified, PIN-checked, unexpired
+	// Invite is the decoded, signature-verified, issuer-checked, unexpired
 	// invite the redeem embedded.
 	Invite *Invite
+	// IssuerHexKey is the hex pubkey that SIGNED the embedded invite — the operator
+	// for a classic `dontguess invite`, or an allowlisted parent for a delegated
+	// child grant (dontguess-09a).
+	IssuerHexKey string
+	// ViaParent is true when the invite was signed by an allowlisted parent rather
+	// than by the operator itself. The caller records the parent -> child edge so
+	// revoking the parent cascades to the child.
+	ViaParent bool
 }
+
+// IssuerRole is what an invite's signing key is authorized to do.
+type IssuerRole int
+
+const (
+	// IssuerUnauthorized: this key may not issue invites at all.
+	IssuerUnauthorized IssuerRole = iota
+	// IssuerOperator: the exchange operator key — the classic invite path.
+	IssuerOperator
+	// IssuerParent: a key on the operator's OWN fleet allowlist, delegating
+	// admission to a child it provisions (dontguess-09a §3).
+	IssuerParent
+)
+
+// IssuerAuthorizer answers whether a given invite-signing pubkey may admit.
+//
+// The operator supplies this; pkg/nostr never decides policy. Depth is the
+// caller's business too: the fleet-tier implementation returns IssuerUnauthorized
+// for a key that was ITSELF admitted as a child, which is what keeps admission one
+// level deep (design §4 — a simplicity property, not a security bound).
+type IssuerAuthorizer func(issuerHexKey string) IssuerRole
 
 // VerifyRedeem is the AUTHORITATIVE operator-side gate on a kind-3410 redeem event.
 // It runs 100% of the verification the operator needs, trusting NOTHING about
@@ -294,6 +323,29 @@ type Redeem struct {
 // redeemed-id set (a replay of an already-redeemed grant is rejected there, so it
 // survives a process restart). operatorKey may be npub or hex.
 func VerifyRedeem(ev *Event, operatorKey string, nowUnix int64) (*Redeem, error) {
+	opHex, err := normalizeOperatorKey(operatorKey)
+	if err != nil {
+		return nil, fmt.Errorf("nostr: VerifyRedeem: %w", err)
+	}
+	return VerifyRedeemWithIssuer(ev, func(issuer string) IssuerRole {
+		if strings.EqualFold(issuer, opHex) {
+			return IssuerOperator
+		}
+		return IssuerUnauthorized
+	}, nowUnix)
+}
+
+// VerifyRedeemWithIssuer is VerifyRedeem generalized over WHO may issue the
+// embedded invite (dontguess-09a). Every other check is identical and runs in the
+// same order; only step (4) changes, from "signed by THIS operator" to "signed by
+// a key the authorizer accepts". Verification remains 100% operator-side — a dumb
+// or hostile relay still cannot admit anyone, because the authorizer is evaluated
+// here against the operator's own allowlist, never against anything the redeem
+// claims about itself.
+func VerifyRedeemWithIssuer(ev *Event, authorize IssuerAuthorizer, nowUnix int64) (*Redeem, error) {
+	if authorize == nil {
+		return nil, fmt.Errorf("nostr: VerifyRedeemWithIssuer: nil authorizer")
+	}
 	if ev == nil {
 		return nil, fmt.Errorf("nostr: VerifyRedeem: nil event")
 	}
@@ -305,19 +357,19 @@ func VerifyRedeem(ev *Event, operatorKey string, nowUnix int64) (*Redeem, error)
 	if err := VerifyEventSignature(ev); err != nil {
 		return nil, fmt.Errorf("nostr: VerifyRedeem: member signature: %w", err)
 	}
-	opHex, err := normalizeOperatorKey(operatorKey)
-	if err != nil {
-		return nil, fmt.Errorf("nostr: VerifyRedeem: %w", err)
-	}
-	// (3) Decode + verify the embedded operator-signed invite.
+	// (3) Decode + verify the embedded, issuer-signed invite.
 	in, err := ParseInviteToken(ev.Content)
 	if err != nil {
-		return nil, fmt.Errorf("nostr: VerifyRedeem: %w", err)
+		return nil, fmt.Errorf("nostr: VerifyRedeemWithIssuer: %w", err)
 	}
-	// (4) PIN: the invite MUST be signed by THIS operator, not merely by some key.
-	if !strings.EqualFold(in.OperatorPubKey, opHex) {
-		return nil, fmt.Errorf("%w: invite operator %s != this operator %s",
-			ErrForgedInvite, shortKey(in.OperatorPubKey), shortKey(opHex))
+	// (4) ISSUER GATE (was: operator PIN). The invite must be signed by a key the
+	// operator authorizes to admit — itself, or an allowlisted parent. Fail closed:
+	// anything the authorizer does not recognise is a forged invite.
+	issuer := strings.ToLower(strings.TrimSpace(in.OperatorPubKey))
+	role := authorize(issuer)
+	if role == IssuerUnauthorized {
+		return nil, fmt.Errorf("%w: invite issuer %s is neither this operator nor an admitting parent",
+			ErrForgedInvite, shortKey(issuer))
 	}
 	// (5) The redeem's invite-id tag must match the signed grant id — a mismatch is
 	// a spliced redeem (member advertises one id in the tag, embeds another token).
@@ -328,7 +380,12 @@ func VerifyRedeem(ev *Event, operatorKey string, nowUnix int64) (*Redeem, error)
 	if err := CheckInviteFresh(in, nowUnix); err != nil {
 		return nil, err
 	}
-	return &Redeem{MemberHexKey: strings.ToLower(strings.TrimSpace(ev.PubKey)), Invite: in}, nil
+	return &Redeem{
+		MemberHexKey: strings.ToLower(strings.TrimSpace(ev.PubKey)),
+		Invite:       in,
+		IssuerHexKey: issuer,
+		ViaParent:    role == IssuerParent,
+	}, nil
 }
 
 // firstTagValue returns the value of the first tag named name, or "".

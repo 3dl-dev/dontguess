@@ -91,6 +91,20 @@ type Config struct {
 	// individual tier (no relays) never reads it.
 	// See docs/design/nostr-admission-scrip-rehome-3b8.md §6.
 	FleetAllowlist []string `json:"fleet_allowlist,omitempty"`
+	// ChildGrants maps an admitted CHILD key (hex) to the PARENT key (hex) that
+	// admitted it via a parent-signed grant (dontguess-09a). Two purposes, both
+	// load-bearing:
+	//
+	//   1. Cascading revocation — removing a parent removes every child it admitted,
+	//      in the same operator-signed roster republish, so revoking actually revokes.
+	//   2. Depth 1 — a key present as a KEY in this map was itself admitted as a
+	//      child and therefore may not issue grants of its own. This keeps redeem
+	//      verification a single signature check with no delegation chain to walk.
+	//      It is a simplicity property, not a Sybil bound: at fleet tier every key
+	//      belongs to the operator (design §4).
+	//
+	// Absent/empty on an exchange that has never used delegated admission.
+	ChildGrants map[string]string `json:"child_grants,omitempty"`
 	// RevokedSellers is the durable set of seller pubkeys explicitly de-allowlisted
 	// FOR CAUSE (dontguess-23c). It is the anti-poisoning tombstone: a revoked
 	// seller's already-accepted inventory stays OUT of the searchable match index
