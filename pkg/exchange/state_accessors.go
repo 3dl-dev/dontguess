@@ -28,6 +28,30 @@ func (s *State) Inventory() []*InventoryEntry {
 	return out
 }
 
+// AllInventoryEntries returns a snapshot of EVERY accepted inventory entry,
+// including expired ones — unlike Inventory(), which filters IsExpired()
+// because it feeds the live buy/match path where an expired entry must not
+// be discoverable. dontguess-b2b's retroactive repricing migration needs the
+// unfiltered set: an entry's declared token_cost still needs auditable
+// reinterpretation, and its residual math on any already-sold copy still
+// needs to be reconstructible, regardless of whether the entry has since
+// expired off the live matching surface. Each entry is a copy — callers may
+// not mutate returned entries.
+func (s *State) AllInventoryEntries() []*InventoryEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*InventoryEntry, 0, len(s.inventory))
+	for _, e := range s.inventory {
+		cp := *e // shallow copy of the struct
+		if len(e.Domains) > 0 {
+			cp.Domains = make([]string, len(e.Domains))
+			copy(cp.Domains, e.Domains)
+		}
+		out = append(out, &cp)
+	}
+	return out
+}
+
 // ActiveOrders returns a snapshot of all unfulfilled, non-expired buy orders.
 func (s *State) ActiveOrders() []*ActiveOrder {
 	s.mu.RLock()

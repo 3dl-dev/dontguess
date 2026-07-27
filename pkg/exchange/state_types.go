@@ -82,6 +82,18 @@ const (
 	// This prevents load traffic from inflating or deflating production stats.
 	TagSynthetic = "exchange:synthetic"
 
+	// TagReprice marks an operator-emitted, auditable, reversible repricing
+	// event (dontguess-b2b, operator ruling dontguess-96e decision 2). Emitted
+	// once per inventory entry by RepriceInventoryForRuling to record the
+	// entry's price under the OLD (pre-ruling) formula and the NEW (post-ruling,
+	// two-unit/af3) formula, plus the basis and ruling reference — NEVER by
+	// mutating any stored price field (InventoryEntry has none to mutate; the
+	// buyer-facing price is always computed on demand by computePrice). This is
+	// the audit trail the operator's retroactive-reinterpretation override
+	// (over the recommended grandfather option) made mandatory: rollback is
+	// State.RollbackReprice reading old_price back out of the event log alone.
+	TagReprice = "exchange:reprice"
+
 	SettlePhaseStrPutAccept   = "put-accept"
 	SettlePhaseStrPutReject   = "put-reject"
 	SettlePhaseStrBuyerAccept = "buyer-accept"
@@ -433,6 +445,34 @@ type PriceRecord struct {
 	// SalePrice is what the buyer paid the exchange.
 	SalePrice int64
 	// Timestamp is when the settlement occurred (nanoseconds).
+	Timestamp int64
+}
+
+// RepriceRecord is a single auditable, reversible repricing event
+// (dontguess-b2b, operator ruling dontguess-96e decision 2). It is folded
+// PURELY from an exchange:reprice message (TagReprice) — nothing else in
+// State is mutated to produce it, and nothing else in State is required to
+// reconstruct it: replaying the log alone rebuilds every RepriceRecord.
+//
+// OldPrice is what the PRE-ruling one-off-commission formula would have
+// quoted for the entry at repricing time; NewPrice is the CURRENT computePrice
+// result (unchanged by this record — af3 owns computePrice, this item does not
+// touch it). Recording both, rather than mutating a price field in place, is
+// what makes the retroactive reinterpretation reversible: State.RollbackReprice
+// recovers OldPrice straight from these records, no re-derivation required.
+type RepriceRecord struct {
+	// EntryID is the repriced inventory entry (= its put message ID).
+	EntryID string
+	// OldPrice is the pre-ruling (one-off-commission formula) price.
+	OldPrice int64
+	// NewPrice is the post-ruling (two-unit/af3 amortized) price.
+	NewPrice int64
+	// Basis is a human-readable description of the repricing rationale.
+	Basis string
+	// RulingRef is the rd item ID of the operator ruling authorizing this
+	// repricing (e.g. "dontguess-96e").
+	RulingRef string
+	// Timestamp is the reprice message's engine timestamp (nanoseconds).
 	Timestamp int64
 }
 
@@ -1343,6 +1383,19 @@ type State struct {
 	hopDepthCounted   map[string]struct{}
 	consumeCounted    map[string]struct{}
 	disputeCounted    map[string]struct{}
+
+	// repriceEvents holds the auditable repricing event history (dontguess-b2b),
+	// keyed by EntryID, appended in log order. It is the sole state produced by
+	// TagReprice messages — nothing else is mutated — so it is fully rebuilt by
+	// Replay from the log alone, which is what makes rollback (RollbackReprice)
+	// possible without re-derivation. Reset on Replay.
+	repriceEvents map[string][]RepriceRecord
+
+	// repriceCounted is the per-message-ID dedup guard for repriceEvents,
+	// same shape and rationale as consumeCounted/disputeCounted (dontguess-f86):
+	// without it, a concurrent live Apply racing a Replay of the same message
+	// could double-append the same reprice event. Reset on Replay.
+	repriceCounted map[string]struct{}
 
 	// blobStore is the optional Blossom client seam (dontguess-7783). When set,
 	// applyPut offloads oversize content (> BlossomOffloadThreshold bytes) to the

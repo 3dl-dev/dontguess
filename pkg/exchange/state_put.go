@@ -63,7 +63,7 @@ func isExchangeOpTag(t string) bool {
 		scrip.TagScripMint, scrip.TagScripBurn, scrip.TagScripPutPay, scrip.TagScripBuyHold,
 		scrip.TagScripSettle, scrip.TagScripAssignPay, scrip.TagScripDisputeRefund,
 		scrip.TagScripLoanMint, scrip.TagScripLoanRepay, scrip.TagScripLoanVigAccrue,
-		TagConsume:
+		TagConsume, TagReprice:
 		return true
 	}
 	return false

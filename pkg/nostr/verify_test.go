@@ -56,6 +56,8 @@ func TestVerifyOperatorAuthorship_AllowsRealOperatorOps(t *testing.T) {
 		tags [][]string
 	}{
 		{"match", KindMatch, nil},
+		{"consume", KindConsume, nil},
+		{"reprice", KindReprice, nil},
 		{"settle/put-accept", KindSettle, [][]string{phaseTag(exchange.SettlePhaseStrPutAccept)}},
 		{"settle/put-reject", KindSettle, [][]string{phaseTag(exchange.SettlePhaseStrPutReject)}},
 		{"settle/preview", KindSettle, [][]string{phaseTag(exchange.SettlePhaseStrPreview)}},
@@ -105,6 +107,8 @@ func TestVerifyOperatorAuthorship_RejectsForgedOperatorKind(t *testing.T) {
 		tags [][]string
 	}{
 		{"match", KindMatch, nil},
+		{"consume", KindConsume, nil},
+		{"reprice", KindReprice, nil},
 		{"settle/put-accept", KindSettle, [][]string{phaseTag(exchange.SettlePhaseStrPutAccept)}},
 		{"settle/deliver", KindSettle, [][]string{phaseTag(exchange.SettlePhaseStrDeliver)}},
 		{"assign", KindAssign, [][]string{opTag(exchange.TagAssign)}},
