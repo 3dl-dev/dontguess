@@ -100,7 +100,7 @@ func TestReprice_EmitsOneAuditEventPerEntryWithCorrectOldAndNewPrice(t *testing.
 		state.InjectInventoryEntryForTest(e)
 	}
 
-	records, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
+	records, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
 	if err != nil {
 		t.Fatalf("RepriceInventoryForRuling: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestReprice_BothEnvelopeShapesReinterpretedUniformly(t *testing.T) {
 	state.InjectInventoryEntryForTest(legacy)
 	state.InjectInventoryEntryForTest(v2)
 
-	records, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
+	records, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
 	if err != nil {
 		t.Fatalf("RepriceInventoryForRuling: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestReprice_DedupByEventID(t *testing.T) {
 	entry := repriceFixtureEntry("dup-entry", 8000)
 	state.InjectInventoryEntryForTest(entry)
 
-	records, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
+	records, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
 	if err != nil {
 		t.Fatalf("RepriceInventoryForRuling: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestReprice_IdempotentAcrossReruns(t *testing.T) {
 	state.InjectInventoryEntryForTest(repriceFixtureEntry("rerun-a", 8000))
 	state.InjectInventoryEntryForTest(repriceFixtureEntry("rerun-b", 60000))
 
-	first, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
+	first, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
 	if err != nil {
 		t.Fatalf("first RepriceInventoryForRuling: %v", err)
 	}
@@ -229,16 +229,72 @@ func TestReprice_IdempotentAcrossReruns(t *testing.T) {
 		t.Fatalf("first run: got %d records, want 2", len(first))
 	}
 
-	second, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
+	second, secondSkips, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
 	if err != nil {
 		t.Fatalf("second RepriceInventoryForRuling: %v", err)
 	}
 	if len(second) != 0 {
 		t.Fatalf("second run: got %d NEW records, want 0 (idempotent — already repriced under this ruling)", len(second))
 	}
+	if len(secondSkips) != 2 {
+		t.Fatalf("second run: got %d skips, want 2 (both entries reported, not silently dropped)", len(secondSkips))
+	}
+	for _, sk := range secondSkips {
+		if sk.Reason != exchange.RepriceSkipReasonAlreadyRepriced {
+			t.Errorf("skip for %s has reason %q, want %q", sk.EntryID, sk.Reason, exchange.RepriceSkipReasonAlreadyRepriced)
+		}
+	}
 
 	if len(state.Reprices("rerun-a")) != 1 || len(state.Reprices("rerun-b")) != 1 {
 		t.Fatalf("expected exactly 1 reprice event per entry after two runs")
+	}
+}
+
+// TestReprice_ExpiredEntriesAreRepricedNotSilentlySkipped is the required
+// mutation-verified test for the wave-6 rejection finding 3: a prior version
+// of RepriceInventoryForRuling walked State.Inventory(), which filters
+// IsExpired() entries (it feeds the live buy/match surface) — so an expired
+// entry among the 166-entry corpus was silently omitted from the migration
+// walk entirely: no reprice event, no error, no skipped-count, no visible
+// trace it was ever considered. A probe against that version repriced 1 of 2
+// injected entries with a fully "successful" return.
+//
+// This injects one live and one EXPIRED entry (ExpiresAt in the past) and
+// asserts BOTH receive a reprice event — proving the migration now walks
+// AllInventoryEntries (unfiltered), not Inventory() (live-only).
+func TestReprice_ExpiredEntriesAreRepricedNotSilentlySkipped(t *testing.T) {
+	t.Parallel()
+	eng := newMinimalEngine(t)
+	state := eng.State()
+
+	live := repriceFixtureEntry("expiry-live", 8000)
+	expired := repriceFixtureEntry("expiry-expired", 60000)
+	expired.ExpiresAt = time.Now().Add(-24 * time.Hour)
+	if !expired.IsExpired() {
+		t.Fatalf("setup: fixture entry did not come out expired")
+	}
+
+	state.InjectInventoryEntryForTest(live)
+	state.InjectInventoryEntryForTest(expired)
+
+	records, skipped, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit)
+	if err != nil {
+		t.Fatalf("RepriceInventoryForRuling: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("got %d reprice records, want 2 (expired entry must be repriced, not omitted)", len(records))
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("got %d skips on a first run, want 0 — nothing should be idempotency-skipped yet", len(skipped))
+	}
+
+	if len(state.Reprices("expiry-live")) != 1 {
+		t.Errorf("live entry was not repriced")
+	}
+	if recs := state.Reprices("expiry-expired"); len(recs) != 1 {
+		t.Errorf("EXPIRED entry was not repriced (got %d events) — this is the exact silent-omission bug being fixed", len(recs))
+	} else if recs[0].OldPrice != expectedLegacyPrice(60000) {
+		t.Errorf("expired entry OldPrice = %d, want %d", recs[0].OldPrice, expectedLegacyPrice(60000))
 	}
 }
 
@@ -321,7 +377,7 @@ func TestReprice_RollbackScopedToRulingRefNotGloballyOldest(t *testing.T) {
 	}
 
 	// THEN the real dontguess-96e migration reprice, for both entries.
-	if _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
+	if _, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
 		t.Fatalf("RepriceInventoryForRuling: %v", err)
 	}
 	if got := len(state.Reprices("roll-a")); got != 2 {
@@ -361,6 +417,56 @@ func TestReprice_RollbackScopedToRulingRefNotGloballyOldest(t *testing.T) {
 	}
 }
 
+// TestReprice_RollbackWithinSameRulingRefKeepsOldestNotNewest is the required
+// mutation-verified test for wave-6 rejection finding 4: RollbackReprice's
+// documented behavior for an entry repriced MORE THAN ONCE under the SAME
+// rulingRef is "the OLDEST such record's OldPrice: the state immediately
+// before that ruling first took effect" — but nothing in this file exercised
+// that path before this test, so the guard implementing it
+// (`if _, has := out[entryID]; has { continue }` in RollbackReprice) could be
+// deleted — silently flipping the tie-break from oldest-wins to
+// newest-wins — and the full suite still passed.
+//
+// This emits two reprice events for the SAME entry under the SAME ruling ref
+// directly via EmitReprice (RepriceInventoryForRuling's HasReprice
+// idempotency guard would block a second emission through that path, so this
+// models the unusual manual-correction case the doc comment on
+// RollbackReprice explicitly calls out). If the oldest-wins guard is deleted,
+// RollbackReprice would return the SECOND (newest) event's OldPrice instead,
+// and this assertion fails.
+func TestReprice_RollbackWithinSameRulingRefKeepsOldestNotNewest(t *testing.T) {
+	t.Parallel()
+	eng := newMinimalEngine(t)
+	state := eng.State()
+
+	const rulingRef = "dontguess-96e"
+	const entryID = "same-ruling-twice-entry"
+	state.InjectInventoryEntryForTest(repriceFixtureEntry(entryID, 8000))
+
+	// Oldest: emitted first.
+	if _, err := eng.EmitReprice(entryID, 500, 600, "first manual reprice", rulingRef); err != nil {
+		t.Fatalf("EmitReprice (oldest): %v", err)
+	}
+	// Newest: emitted second, under the exact same ruling ref, with an
+	// old_price that could never be confused with the oldest one.
+	if _, err := eng.EmitReprice(entryID, 999999, 1, "second manual correction", rulingRef); err != nil {
+		t.Fatalf("EmitReprice (newest): %v", err)
+	}
+
+	recs := state.Reprices(entryID)
+	if len(recs) != 2 {
+		t.Fatalf("got %d reprice events for entry, want 2 (both manual EmitReprice calls under the same ruling ref)", len(recs))
+	}
+	if recs[0].OldPrice != 500 || recs[1].OldPrice != 999999 {
+		t.Fatalf("setup: reprice events not in emission order, got %+v", recs)
+	}
+
+	got := state.RollbackReprice(rulingRef)
+	if got[entryID] != 500 {
+		t.Errorf("RollbackReprice(%s)[%s] = %d, want 500 (the OLDEST record's OldPrice — the state immediately before this ruling first took effect, not the newest/last one)", rulingRef, entryID, got[entryID])
+	}
+}
+
 // TestReprice_RollbackFromBareReplayNoLiveState proves the "event log alone"
 // property literally: a fresh State object with ZERO prior in-memory data
 // (no InjectInventoryEntryForTest, no engine, no prior Apply calls) must
@@ -387,7 +493,7 @@ func TestReprice_RollbackFromBareReplayNoLiveState(t *testing.T) {
 	entry := repriceFixtureEntry("replay-entry", tokenCost)
 	state.InjectInventoryEntryForTest(entry)
 
-	if _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
+	if _, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
 		t.Fatalf("RepriceInventoryForRuling: %v", err)
 	}
 
@@ -449,7 +555,7 @@ func TestReprice_ReplayTwiceOnUnchangedLogPreservesExactlyOneEventPerEntry(t *te
 	entry := repriceFixtureEntry("replay-twice-entry", tokenCost)
 	state.InjectInventoryEntryForTest(entry)
 
-	if _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
+	if _, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
 		t.Fatalf("RepriceInventoryForRuling: %v", err)
 	}
 	wantOld := expectedLegacyPrice(tokenCost)
@@ -495,7 +601,7 @@ func TestReprice_PutPriceZeroUsesTokenCostFallback(t *testing.T) {
 	entry := repriceFixtureEntryWithSignals("putprice-zero-entry", tokenCost, 0, 0, 0, "")
 	state.InjectInventoryEntryForTest(entry)
 
-	if _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
+	if _, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
 		t.Fatalf("RepriceInventoryForRuling: %v", err)
 	}
 
@@ -543,7 +649,7 @@ func TestReprice_NonDegenerateAgeSizeTierSignalsAffectOldPrice(t *testing.T) {
 	)
 	state.InjectInventoryEntryForTest(entry)
 
-	if _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
+	if _, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
 		t.Fatalf("RepriceInventoryForRuling: %v", err)
 	}
 
@@ -644,7 +750,7 @@ func TestReprice_ResidualMathOnAlreadySoldCopyIsReconstructible(t *testing.T) {
 	preRepriceResidual := sold.SalePrice - exchange.ExchangeRevenueForTest(sold.SalePrice, soldEntry)
 
 	// Now reprice the SAME (already-sold) entry under the ruling.
-	if _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
+	if _, _, err := eng.RepriceInventoryForRuling(exchange.RepriceRulingRef96e, exchange.RepriceBasisTwoUnit); err != nil {
 		t.Fatalf("RepriceInventoryForRuling: %v", err)
 	}
 

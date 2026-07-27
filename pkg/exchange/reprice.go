@@ -141,13 +141,45 @@ func (e *Engine) EmitReprice(entryID string, oldPrice, newPrice int64, basis, ru
 	}, nil
 }
 
+// RepriceSkipReasonAlreadyRepriced is the RepriceSkip.Reason recorded when an
+// entry already carries a reprice event for the ruling being run — the
+// migration's idempotency guard (state.HasReprice). This is an EXPECTED,
+// benign skip on a re-run; it is still reported (not silently dropped) so a
+// caller diffing two runs' skip lists can tell "already done" apart from any
+// future skip reason that would represent an actual gap.
+const RepriceSkipReasonAlreadyRepriced = "already-repriced-for-ruling"
+
+// RepriceSkip records one inventory entry RepriceInventoryForRuling visited
+// but did NOT emit a new reprice event for, and why. This exists because a
+// prior version of this migration walked State.Inventory() (which silently
+// filters IsExpired() entries — see AllInventoryEntries) with no accounting
+// at all: an expired entry was dropped from the walk with no error and no
+// count, so the migration could report full success while an unknown slice
+// of the declared corpus was never repriced. Every entry the migration is
+// responsible for now surfaces either a RepriceRecord (repriced) or a
+// RepriceSkip (why it wasn't) — nothing disappears silently.
+type RepriceSkip struct {
+	EntryID string
+	Reason  string
+}
+
 // RepriceInventoryForRuling implements the dontguess-b2b migration end to
-// end: it walks every LIVE inventory entry and emits one auditable
-// exchange:reprice event per entry that does not already carry one for
-// rulingRef.
+// end: it walks EVERY accepted inventory entry — including expired ones, via
+// AllInventoryEntries, not the live-only Inventory() — and emits one
+// auditable exchange:reprice event per entry that does not already carry one
+// for rulingRef.
 //
-// DEDUP BY EVENT ID (KNOWN DATA HAZARD a, dontguess-8f5): State.Inventory()
-// is a map keyed by EntryID, so a relay double-appended put message already
+// EXPIRED ENTRIES ARE REPRICED, NOT OMITTED: an entry's declared token_cost
+// still needs auditable reinterpretation, and residual math on any
+// already-sold copy still needs to be reconstructible, regardless of whether
+// the entry has since expired off the live buy/match surface. Using
+// State.Inventory() here (as an earlier version of this function did) would
+// silently drop expired entries from the walk with no error and no count —
+// exactly the finding this comment documents. AllInventoryEntries applies no
+// expiry filter, so every entry the corpus contains is visited.
+//
+// DEDUP BY EVENT ID (KNOWN DATA HAZARD a, dontguess-8f5): the inventory is a
+// map keyed by EntryID, so a relay double-appended put message already
 // collapses to a single entry before this function ever iterates it — the
 // naive ~6% inflation dontguess-8f5 measured against raw events.jsonl lines
 // cannot reach this loop.
@@ -156,31 +188,88 @@ func (e *Engine) EmitReprice(entryID string, oldPrice, newPrice int64, basis, ru
 // this function applies NO branch on entry.LegacyPlaintext or
 // entry.WrappedCEKOperator — the 80 legacy-plaintext entries and the 86 v2
 // envelope entries were put under the SAME undefined token_cost semantic, so
-// every live entry is repriced uniformly regardless of shape.
+// every entry is repriced uniformly regardless of shape.
 //
 // IDEMPOTENT: an entry that already has a reprice event for rulingRef
-// (state.HasReprice) is skipped, so re-running this after a partial failure
-// (or simply re-running it) does not emit duplicate audit events.
+// (state.HasReprice) is skipped (recorded as RepriceSkipReasonAlreadyRepriced,
+// not silently dropped), so re-running this after a partial failure (or
+// simply re-running it) does not emit duplicate audit events.
 //
-// Entries are processed in EntryID order for deterministic output.
-func (e *Engine) RepriceInventoryForRuling(rulingRef, basis string) ([]RepriceRecord, error) {
-	entries := e.state.Inventory()
-	sort.Slice(entries, func(i, j int) bool { return entries[i].EntryID < entries[j].EntryID })
+// Entries are processed in EntryID order for deterministic output. Returns
+// the emitted records, a skip report for every entry visited but not
+// repriced, and an error if a write failed partway through (in which case
+// both slices reflect progress up to the failure).
+func (e *Engine) RepriceInventoryForRuling(rulingRef, basis string) ([]RepriceRecord, []RepriceSkip, error) {
+	candidates, skipped := e.candidateEntriesForReprice(rulingRef)
 
-	out := make([]RepriceRecord, 0, len(entries))
-	for _, entry := range entries {
-		if e.state.HasReprice(entry.EntryID, rulingRef) {
-			continue
-		}
+	out := make([]RepriceRecord, 0, len(candidates))
+	for _, entry := range candidates {
 		oldPrice := e.legacyComputePrice(entry)
 		newPrice := e.computePrice(entry)
 		rec, err := e.EmitReprice(entry.EntryID, oldPrice, newPrice, basis, rulingRef)
 		if err != nil {
-			return out, err
+			return out, skipped, err
 		}
 		out = append(out, *rec)
 	}
-	return out, nil
+	return out, skipped, nil
+}
+
+// RepricePreview is what RepriceInventoryForRuling WOULD emit for one entry —
+// the old/new price pair — WITHOUT ever calling EmitReprice: no message is
+// signed, appended, or folded, and State is left completely untouched.
+type RepricePreview struct {
+	EntryID  string
+	OldPrice int64
+	NewPrice int64
+}
+
+// PreviewRepriceInventoryForRuling is the read-only "dry run" counterpart to
+// RepriceInventoryForRuling — required so an operator (via `dontguess
+// reprice-migration --dry-run`) can see exactly what a real run WOULD change
+// before committing to writing 166 audit events. It walks the identical
+// candidate set (same AllInventoryEntries + HasReprice idempotency skip,
+// same EntryID ordering, same legacyComputePrice/computePrice formulas
+// RepriceInventoryForRuling uses) but never calls EmitReprice, so it has zero
+// side effects: no message is signed or appended, no repriceEvents entry is
+// created, State.Reprices/HasReprice are unaffected by having run this.
+func (e *Engine) PreviewRepriceInventoryForRuling(rulingRef string) ([]RepricePreview, []RepriceSkip) {
+	candidates, skipped := e.candidateEntriesForReprice(rulingRef)
+
+	out := make([]RepricePreview, 0, len(candidates))
+	for _, entry := range candidates {
+		out = append(out, RepricePreview{
+			EntryID:  entry.EntryID,
+			OldPrice: e.legacyComputePrice(entry),
+			NewPrice: e.computePrice(entry),
+		})
+	}
+	return out, skipped
+}
+
+// candidateEntriesForReprice is the shared walk RepriceInventoryForRuling and
+// PreviewRepriceInventoryForRuling both use: every accepted inventory entry
+// (including expired ones — AllInventoryEntries, not the live-only
+// Inventory()), in deterministic EntryID order, split into "needs a reprice
+// event for rulingRef" (returned) and "already has one" (reported as a
+// RepriceSkip, RepriceSkipReasonAlreadyRepriced — never silently dropped).
+// Keeping this walk in exactly one place is what guarantees the dry-run
+// preview and the real run can never silently diverge on WHICH entries they
+// consider.
+func (e *Engine) candidateEntriesForReprice(rulingRef string) ([]*InventoryEntry, []RepriceSkip) {
+	entries := e.state.AllInventoryEntries()
+	sort.Slice(entries, func(i, j int) bool { return entries[i].EntryID < entries[j].EntryID })
+
+	candidates := make([]*InventoryEntry, 0, len(entries))
+	var skipped []RepriceSkip
+	for _, entry := range entries {
+		if e.state.HasReprice(entry.EntryID, rulingRef) {
+			skipped = append(skipped, RepriceSkip{EntryID: entry.EntryID, Reason: RepriceSkipReasonAlreadyRepriced})
+			continue
+		}
+		candidates = append(candidates, entry)
+	}
+	return candidates, skipped
 }
 
 // applyReprice folds an exchange:reprice message into s.repriceEvents.

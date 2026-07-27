@@ -109,6 +109,15 @@ func eventPhase(ev *Event) string {
 //     (dontguess-d52). A non-operator consume would inflate that count, so it is
 //     gated here at intake with the same crypto re-verify as match/scrip, mirroring
 //     the exchange fold's own operator-sender guard on applyConsume.
+//   - reprice (3407): always operator-authored — the exchange:reprice audit
+//     event (dontguess-b2b) is the ONLY artifact of the retroactive token_cost
+//     migration (dontguess-96e); RollbackReprice reads the event log alone to
+//     recover pre-ruling prices. Without this gate, a forged reprice from ANY
+//     writer passed intake and was PERSISTED (State.applyReprice's own
+//     OperatorKey!="" guard fails OPEN when OperatorKey is unset, e.g. during a
+//     bare-log audit replay), so an attacker-authored event silently corrupted
+//     the audit trail the migration exists to make trustworthy. Gated here at
+//     intake with the same crypto re-verify as match/consume/scrip.
 //   - scrip (3411): always operator-authored — the operator is the sole party
 //     that mints, holds, settles, pays, and burns (relay-transport.md §E).
 //   - settle (3404): operator-authored only for the operator phases
@@ -121,7 +130,7 @@ func eventPhase(ev *Event) string {
 //     operator-only; authorship is enforced by other layers, not here.
 func requiresOperatorAuthor(ev *Event) bool {
 	switch ev.Kind {
-	case KindMatch, KindConsume, KindScrip:
+	case KindMatch, KindConsume, KindReprice, KindScrip:
 		return true
 	case KindSettle:
 		_, ok := operatorSettlePhases[eventPhase(ev)]
