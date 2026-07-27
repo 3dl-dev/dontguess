@@ -35,14 +35,22 @@ package main
 //   2. a NON-allowlisted `dontguess put` → the operator's durable put-reject is
 //      RECEIVED and surfaced LOUD by the client (Seam A dropped_unlisted → Outbox
 //      → wire → client), not silently swallowed.
-//   3. an UNDERFUNDED buyer's `dontguess buy` → the operator's durable
-//      settle(buyer-accept-reject) (reason:insufficient_scrip) is RECEIVED via the
-//      per-phase #e:[buyer-accept] filter and surfaced by the client with the mint
-//      hint — a distinguished UNDERFUNDED outcome, NOT a bare timeout (H2/H3).
-//   4. an underfunded buyer that publishes buyer-accept + settle(deliver) receives
-//      NO content: the operator emits ZERO content-carrying settle(deliver) and no
-//      scrip moves — the Layer-0 free-content exploit is closed through the serve
-//      stack (H2, design §3.7).
+//   3. UPDATED BY dontguess-29b (deliver-on-credit): an UNDERFUNDED buyer's
+//      `dontguess buy` at fleet tier no longer hits the settle(buyer-accept-reject)
+//      dead end — the loan rail (pkg/exchange/engine_credit.go) mints exactly the
+//      shortfall via scrip:loan-mint BEFORE the hold, so the buy now SUCCEEDS:
+//      content is delivered byte-exact and a durable, wire-visible LoanRecord
+//      captures the debt. This is not a silent reopening of H2/H3 — the mint is
+//      auditable and the reject path is still reachable (unchanged) whenever
+//      credit itself is unavailable (individual tier / federation).
+//   4. UPDATED BY dontguess-29b: an underfunded buyer's buyer-accept now succeeds
+//      on credit (a live reservation is genuinely created), so AutoDeliverOnBuyerAccept
+//      legitimately delivers content ONCE. The Layer-0 invariant this proves is
+//      narrower but still real: content moves ONLY together with a durable,
+//      accounted hold (balance- or credit-backed) — a forged/duplicate deliver
+//      attempt over an already-settled or already-delivered match still produces
+//      NO additional content and NO additional scrip motion (design §3.7's
+//      reservation gate, unchanged).
 //   5. a client conn DROP mid-await recovers the match via re-subscribe and still
 //      settles the full sale (H5, design §3.2).
 //
@@ -50,9 +58,8 @@ package main
 // buyer-accept e-tagging the preview → deliver → complete) is proven byte-exact
 // by TestEd2C_RunBuy_PreviewFlag_SettlesContentAndMovesScrip (serve_relay_ed2c_test.go),
 // also a package-main cobra-RunE test — referenced here rather than duplicated.
-// The isolated §3.7 reservation-guard proof (operator-authored manual deliver
-// trigger with no live reservation) is pkg/exchange
-// TestUnfundedBuyerAcceptDeliver_NoFreeContent_ed2D.
+// The isolated §3.7 reservation-guard proof, now under credit, is pkg/exchange
+// TestUnfundedBuyerAcceptDeliver_FleetCreditCoversHold_ed2D29b.
 
 import (
 	"bytes"
@@ -263,6 +270,23 @@ func (s *e2eStack) operatorDeliverContentCount(t *testing.T) int {
 	t.Helper()
 	recs, _ := s.ls.ReadAll()
 	return countLocalRecordsWithTags(recs, exchange.TagSettle, deliverPhaseTag)
+}
+
+// firstLoanMintPayload returns the first operator-authored scrip:loan-mint
+// record's decoded payload (dontguess-29b deliver-on-credit), and whether one
+// exists.
+func (s *e2eStack) firstLoanMintPayload(t *testing.T) (scrip.LoanMintPayload, bool) {
+	t.Helper()
+	recs, _ := s.ls.ReadAll()
+	rec, ok := firstLocalRecordWithTags(recs, scrip.TagScripLoanMint)
+	if !ok {
+		return scrip.LoanMintPayload{}, false
+	}
+	var p scrip.LoanMintPayload
+	if err := json.Unmarshal(rec.Payload, &p); err != nil {
+		t.Fatalf("unmarshal scrip-loan-mint payload: %v", err)
+	}
+	return p, true
 }
 
 // --- agent identity ----------------------------------------------------------
@@ -652,15 +676,20 @@ func TestE2E_NonAllowlistedPut_SurfacesLoudPutReject_ClientRunE(t *testing.T) {
 	}
 }
 
-// --- (3) UNDERFUNDED buyer-accept → LOUD reject RECEIVED + surfaced (H2/H3) ----
+// --- (3) UNDERFUNDED buyer-accept → covered by credit, not rejected (dontguess-29b) ----
 
-// TestE2E_UnderfundedBuyerAccept_ReceivesLoudReject_ClientRunE drives the ACTUAL
+// TestE2E_UnderfundedBuyerAccept_CoveredByCredit_ClientRunE drives the ACTUAL
 // `dontguess buy` RunE with a buyer funded enough to MATCH (passes the D1 bound)
-// but NOT enough to cover the buyer-accept hold, and proves the operator's durable
-// settle(buyer-accept-reject) (reason:insufficient_scrip) is RECEIVED via the
-// per-phase #e:[buyer-accept] filter (H3) and surfaced by the client as a
-// DISTINGUISHED UNDERFUNDED outcome with the mint hint — never a bare timeout.
-func TestE2E_UnderfundedBuyerAccept_ReceivesLoudReject_ClientRunE(t *testing.T) {
+// but NOT enough to cover the buyer-accept hold, and proves that — at fleet tier,
+// post dontguess-29b — this NO LONGER dead-ends at settle(buyer-accept-reject).
+// The engine's deliver-on-credit rail (pkg/exchange/engine_credit.go) mints
+// exactly the shortfall via a durable scrip:loan-mint BEFORE the hold, so the
+// buy SUCCEEDS end-to-end through the client exactly like a funded buy: content
+// is delivered byte-exact and a LoanRecord captures the debt. This REPLACES the
+// pre-29b TestE2E_UnderfundedBuyerAccept_ReceivesLoudReject_ClientRunE, which
+// asserted the opposite (hard reject, no content) — that was the exact dead end
+// dontguess-29b's root-cause analysis found destroying half of all buyer-accepts.
+func TestE2E_UnderfundedBuyerAccept_CoveredByCredit_ClientRunE(t *testing.T) {
 	t.Chdir(t.TempDir()) // hermetic: isolate walk-up .dg/ config resolution from an ambient repo .dg/ (dontguess-884)
 	hushRelayLogs(t)
 	dir := t.TempDir()
@@ -697,7 +726,7 @@ func TestE2E_UnderfundedBuyerAccept_ReceivesLoudReject_ClientRunE(t *testing.T) 
 		return len(st.eng.State().Inventory()) == 1
 	})
 
-	st.mint(t, buyer.PubKeyHex(), e2eUnderfundedMint) // passes D1, fails the hold
+	st.mint(t, buyer.PubKeyHex(), e2eUnderfundedMint) // passes D1; short of the hold, but credit now covers it
 
 	cmd := newBuyCmd()
 	var stdout, stderr bytes.Buffer
@@ -706,46 +735,70 @@ func TestE2E_UnderfundedBuyerAccept_ReceivesLoudReject_ClientRunE(t *testing.T) 
 	setBuyFlags(t, cmd, map[string]string{
 		"agent-home": buyerHome,
 		"task":       ed2cBuyTask,
-		"budget":     "1000000", // the buyer LIES about willingness; the BALANCE gates the hold
+		"budget":     "1000000", // the buyer LIES about willingness; the BALANCE (now credit-topped) gates the hold
 		"relay":      hub.wsURL(),
 		"timeout":    "20s",
 	})
 	err = runBuy(cmd, nil)
-	if err == nil {
-		t.Fatalf("expected a LOUD underfunded error; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	if err != nil {
+		t.Fatalf("expected the underfunded buy to succeed on fleet-tier credit, got error: %v\nstdout=%q stderr=%q",
+			err, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(err.Error(), "insufficient_scrip") {
-		t.Fatalf("error %q does not surface the RECEIVED insufficient_scrip reject (H3: was the per-phase #e:[buyer-accept] filter used?)\nstderr:\n%s", err, stderr.String())
+	if !strings.Contains(stderr.String(), "SETTLED") {
+		t.Fatalf("stderr does not surface the SETTLED outcome:\n%s", stderr.String())
 	}
-	if !strings.Contains(err.Error(), "dontguess mint") {
-		t.Fatalf("error %q does not surface the actionable mint instruction", err)
+	// Content IS delivered, byte-exact — the shortfall was covered, not rejected.
+	if !bytes.Equal(stdout.Bytes(), ed2cContent) {
+		t.Fatalf("delivered content mismatch.\n got (%d bytes): %q\nwant (%d bytes): %q",
+			stdout.Len(), stdout.String(), len(ed2cContent), string(ed2cContent))
 	}
-	if !strings.Contains(stderr.String(), "UNDERFUNDED") {
-		t.Fatalf("stderr does not surface the distinguished UNDERFUNDED outcome (not a bare timeout):\n%s", stderr.String())
+
+	// A durable scrip:loan-mint covers exactly the shortfall the buyer's
+	// pre-existing balance did not.
+	loanPayload, ok := st.firstLoanMintPayload(t)
+	if !ok {
+		t.Fatal("expected a scrip-loan-mint record covering the underfunded buyer's shortfall")
 	}
-	// No content delivered, and no scrip moved.
-	if stdout.Len() != 0 {
-		t.Fatalf("underfunded buyer received content on stdout (%d bytes): %q", stdout.Len(), stdout.String())
+	if loanPayload.Borrower != buyer.PubKeyHex() {
+		t.Fatalf("loan borrower = %s, want %s", loanPayload.Borrower, buyer.PubKeyHex())
 	}
-	if got := st.scrip.Balance(buyer.PubKeyHex()); got != e2eUnderfundedMint {
-		t.Fatalf("underfunded buyer balance moved: got %d, want untouched %d (no hold should succeed)", got, e2eUnderfundedMint)
+	if loanPayload.Principal <= 0 {
+		t.Fatalf("loan principal = %d, want > 0", loanPayload.Principal)
 	}
-	if got := st.scrip.Balance(seller.PubKeyHex()); got != 0 {
-		t.Fatalf("seller credited %d on an underfunded buy — no scrip should have moved", got)
-	}
+
+	// Buyer's live balance nets to exactly 0: pre-existing funds + loan
+	// principal, minus the full hold, is exactly what the loan was sized to cover.
+	waitFor(t, 8*time.Second, "buyer balance settles to 0 (funds + loan - hold)", func() bool {
+		return st.scrip.Balance(buyer.PubKeyHex()) == 0
+	})
+	waitFor(t, 8*time.Second, "seller credited the residual", func() bool {
+		return st.scrip.Balance(seller.PubKeyHex()) > 0
+	})
 }
 
-// --- (4) UNDERFUNDED buyer + settle(deliver) → NO free content (H2) -----------
+// --- (4) UNDERFUNDED buyer-accept: credit grants ONE legitimate delivery, a  ---
+// --- forged duplicate deliver still moves NOTHING extra (dontguess-29b/§3.7) --
 
-// TestE2E_UnderfundedDeliver_NoFreeContent_ThroughServeStack drives the free-content
-// exploit through the full serve stack: an underfunded buyer's buy matches, its
-// buyer-accept fails the hold (no reservation saved), and it then publishes a
-// settle(deliver) to pull content anyway. The operator emits ZERO content-carrying
-// settle(deliver) and no scrip moves — the Layer-0 exploit is closed (design §3.7).
-// (The isolated operator-authored-trigger reservation-guard proof is pkg/exchange
-// TestUnfundedBuyerAcceptDeliver_NoFreeContent_ed2D; this is the serve-stack, cache-
-// immune end-to-end variant.)
-func TestE2E_UnderfundedDeliver_NoFreeContent_ThroughServeStack(t *testing.T) {
+// TestE2E_UnderfundedBuyerAccept_CreditDelivers_ForgedDuplicateStillBlocked
+// drives the (formerly) free-content exploit path through the full serve stack
+// under dontguess-29b: an underfunded buyer's buy matches, its buyer-accept is
+// now COVERED by the credit rail (a scrip:loan-mint tops up the shortfall), the
+// hold succeeds, and AutoDeliverOnBuyerAccept legitimately delivers content
+// EXACTLY ONCE. The attacker then publishes a FORGED settle(deliver) e-tagging
+// its own buyer-accept, hoping to pull a second copy or move additional scrip.
+// It is dropped exactly as before dontguess-29b — settle(deliver) is an
+// operator-only phase (TrustOperator; a buyer holds only TrustAllowlisted) and
+// the Intake operator-authorship gate refuses a non-operator deliver — so the
+// content-deliver count STAYS at exactly 1 and the match never settles (no
+// settle(complete) was ever sent). This replaces the pre-29b
+// TestE2E_UnderfundedDeliver_NoFreeContent_ThroughServeStack, whose premise (the
+// hold fails, zero content ever moves) no longer holds — deliver-on-credit
+// means content DOES move for an underfunded buyer, against a durable,
+// auditable loan debt, not for free.
+// (The isolated operator-authored-trigger reservation-guard proof under credit
+// is pkg/exchange TestUnfundedBuyerAcceptDeliver_FleetCreditCoversHold_ed2D29b;
+// this is the serve-stack, cache-immune end-to-end variant.)
+func TestE2E_UnderfundedBuyerAccept_CreditDelivers_ForgedDuplicateStillBlocked(t *testing.T) {
 	hushRelayLogs(t)
 	dir := t.TempDir()
 	ls, err := dgstore.Open(dir + "/events.jsonl")
@@ -767,7 +820,7 @@ func TestE2E_UnderfundedDeliver_NoFreeContent_ThroughServeStack(t *testing.T) {
 		e2eShortPublishInterval, seller.PubKeyHex(), buyer.PubKeyHex())
 	t.Cleanup(func() { cancel(); st.stop() })
 
-	st.mint(t, buyer.PubKeyHex(), e2eUnderfundedMint) // passes D1 so the buy matches; fails the hold
+	st.mint(t, buyer.PubKeyHex(), e2eUnderfundedMint) // passes D1; short of the hold, but credit now covers it
 
 	supplyBefore := st.scrip.TotalSupply()
 
@@ -777,8 +830,8 @@ func TestE2E_UnderfundedDeliver_NoFreeContent_ThroughServeStack(t *testing.T) {
 		knownV2PutPayload(t, seller, operator.PubKeyHex(), ed2cPutDesc, ed2cContent, ed2cTokenCost))
 	st.conn.inject(putEv)
 	// No hub.storePut here: this test drives the buy DIRECTLY over the operator
-	// conn (no ws client) and asserts the operator emits ZERO deliver (no live
-	// reservation), so the buyer never REQ-fetches a ciphertext.
+	// conn (no ws client) — the buyer never REQ-fetches a ciphertext; the
+	// legitimate deliver below carries plaintext content directly.
 	waitFor(t, 8*time.Second, "seller put auto-accepts into inventory", func() bool {
 		return len(st.eng.State().Inventory()) == 1
 	})
@@ -792,33 +845,42 @@ func TestE2E_UnderfundedDeliver_NoFreeContent_ThroughServeStack(t *testing.T) {
 	matchWire := st.conn.receivedByKind(nostr.KindMatch)[0].ID
 	matchStore := st.matchStoreID(t)
 
-	// ATTACK STEP 1 — buyer-accept from the underfunded buyer. The hold fails; the
-	// operator emits a durable buyer-accept-reject and saves NO reservation.
+	// STEP 1 — buyer-accept from the underfunded buyer. dontguess-29b: the credit
+	// rail mints exactly the shortfall via scrip:loan-mint BEFORE the hold, so the
+	// hold now SUCCEEDS and AutoDeliverOnBuyerAccept legitimately delivers content.
 	acceptPayload, _ := json.Marshal(map[string]any{"entry_id": ""})
 	acceptEv := signExchangeEvent(t, buyer,
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrBuyerAccept},
 		[]string{matchWire}, acceptPayload)
 	st.conn.inject(acceptEv)
-	waitFor(t, 8*time.Second, "operator emits the durable buyer-accept-reject (insufficient scrip)", func() bool {
-		recs, _ := st.ls.ReadAll()
-		_, ok := firstLocalRecordWithTags(recs, exchange.TagSettle,
-			exchange.TagPhasePrefix+exchange.SettlePhaseStrBuyerAcceptReject)
-		return ok
+	waitFor(t, 8*time.Second, "operator auto-delivers content for the credit-covered buyer-accept", func() bool {
+		return st.operatorDeliverContentCount(t) == 1
 	})
 
-	// Precondition: the failed buyer-accept auto-delivered NOTHING (the auto-deliver
-	// path is gated on a durable hold, which did not save — design §3.7).
-	if n := st.operatorDeliverContentCount(t); n != 0 {
-		t.Fatalf("FREE-CONTENT EXPLOIT OPEN: %d content deliver(s) for the failed hold, want 0", n)
+	// A durable scrip:loan-mint covers exactly the shortfall.
+	loanPayload, ok := st.firstLoanMintPayload(t)
+	if !ok {
+		t.Fatal("expected a scrip-loan-mint record covering the underfunded buyer's shortfall")
+	}
+	if loanPayload.Borrower != buyer.PubKeyHex() {
+		t.Fatalf("loan borrower = %s, want %s", loanPayload.Borrower, buyer.PubKeyHex())
 	}
 
-	// ATTACK STEP 2 — pull the content anyway: the attacker publishes a
-	// settle(deliver) e-tagging its buyer-accept. This is DROPPED before it can move
-	// content — settle(deliver) is an operator-only phase (TrustOperator; a buyer
-	// holds only TrustAllowlisted) AND the Intake operator-authorship gate refuses a
-	// non-operator deliver, so it never even folds. Prove the exploit STAYS closed
-	// over a bounded window after the injection (regardless of where the forged
-	// deliver dies): zero content delivers, match never settles, no scrip motion.
+	// No settle(buyer-accept-reject) — the shortfall was covered, not rejected.
+	recs, _ := st.ls.ReadAll()
+	if _, rejected := firstLocalRecordWithTags(recs, exchange.TagSettle,
+		exchange.TagPhasePrefix+exchange.SettlePhaseStrBuyerAcceptReject); rejected {
+		t.Fatal("expected NO settle(buyer-accept-reject) once credit covers the shortfall")
+	}
+
+	// STEP 2 — the attacker tries to pull a SECOND copy: a FORGED settle(deliver)
+	// e-tagging its own buyer-accept. This is DROPPED exactly as before
+	// dontguess-29b — settle(deliver) is an operator-only phase (TrustOperator; a
+	// buyer holds only TrustAllowlisted) AND the Intake operator-authorship gate
+	// refuses a non-operator deliver, so it never even folds. Prove the forged
+	// attempt moves NOTHING EXTRA over a bounded window: the content-deliver count
+	// stays at exactly 1 (the one legitimate, credit-funded delivery) and the
+	// match never settles (no settle(complete) was ever sent in this test).
 	deliverPayload, _ := json.Marshal(map[string]any{"entry_id": ""})
 	deliverEv := signExchangeEvent(t, buyer,
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrDeliver},
@@ -827,24 +889,29 @@ func TestE2E_UnderfundedDeliver_NoFreeContent_ThroughServeStack(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if n := st.operatorDeliverContentCount(t); n != 0 {
-			t.Fatalf("FREE-CONTENT EXPLOIT OPEN: operator emitted %d content deliver(s) for an unfunded buyer (H2 / design §3.7 regression)", n)
+		if n := st.operatorDeliverContentCount(t); n != 1 {
+			t.Fatalf("DUPLICATE-CONTENT REGRESSION: operator emitted %d content deliver(s), want exactly 1 (the legitimate credit-funded delivery, no extra from the forged duplicate)", n)
 		}
 		if st.eng.State().IsMatchSettled(matchStore) {
-			t.Fatalf("match settled for an unfunded buyer — no scrip should have moved")
+			t.Fatalf("match settled without a settle(complete) ever being sent — unexpected scrip motion")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// No scrip moved and total supply is conserved (no mint, no burn).
-	if got := st.scrip.Balance(buyer.PubKeyHex()); got != e2eUnderfundedMint {
-		t.Fatalf("buyer balance moved: got %d, want untouched %d", got, e2eUnderfundedMint)
+	// Buyer's live balance nets to exactly 0 (funds + loan principal - hold);
+	// the forged duplicate deliver moved no additional scrip.
+	if got := st.scrip.Balance(buyer.PubKeyHex()); got != 0 {
+		t.Fatalf("buyer balance after credit-covered hold: got %d, want 0", got)
 	}
+	// No residual paid — settle(complete) never ran.
 	if got := st.scrip.Balance(seller.PubKeyHex()); got != 0 {
-		t.Fatalf("seller credited %d on an unfunded exploit attempt — no scrip should have moved", got)
+		t.Fatalf("seller credited %d before any settle(complete) — no residual should have moved", got)
 	}
-	if got := st.scrip.TotalSupply(); got != supplyBefore {
-		t.Fatalf("total scrip supply changed: got %d, want %d (supply must be conserved)", got, supplyBefore)
+	// Total scrip supply increased by EXACTLY the loan principal — a conscious,
+	// auditable mint (dontguess-29b), not a silent one and not more than the shortfall.
+	if got := st.scrip.TotalSupply(); got != supplyBefore+loanPayload.Principal {
+		t.Fatalf("total scrip supply: got %d, want %d (supplyBefore=%d + loan principal=%d)",
+			got, supplyBefore+loanPayload.Principal, supplyBefore, loanPayload.Principal)
 	}
 }
 

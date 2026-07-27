@@ -277,10 +277,21 @@ func TestBuyerAccept_DecrementsScripAfterPreview(t *testing.T) {
 	}
 }
 
-// TestBuyerAccept_InsufficientScripReturnsError verifies that a buyer-accept with
-// insufficient scrip causes the engine to return an error and NOT create a reservation.
-// The buy step itself succeeds (no balance check at buy time) — only buyer-accept checks.
-func TestBuyerAccept_InsufficientScripReturnsError(t *testing.T) {
+// TestBuyerAccept_InsufficientScripCoveredByCredit verifies that a
+// buyer-accept with insufficient scrip is now covered by the deliver-on-credit
+// loan rail (dontguess-29b) instead of being rejected outright: the engine
+// tops up the shortfall via scrip:loan-mint, then proceeds exactly as if the
+// buyer had been funded — a scrip-buy-hold IS emitted, a reservation IS
+// created, and DispatchForTest returns nil.
+//
+// This test REPLACES the pre-29b TestBuyerAccept_InsufficientScripReturnsError,
+// which asserted the opposite (no hold, no reservation, hard error) — that was
+// the exact behavior dontguess-29b's ROOT CAUSE analysis identified as
+// destroying both the sale and the highest-signal demand event (13 of 26
+// buyer-accepts, exactly half, were rejected insufficient_scrip). See
+// engine_credit_test.go for the dedicated zero-balance end-to-end and
+// partial-balance-shortfall-only tests.
+func TestBuyerAccept_InsufficientScripCoveredByCredit(t *testing.T) {
 	t.Parallel()
 
 	h := newTestHarness(t)
@@ -334,7 +345,7 @@ func TestBuyerAccept_InsufficientScripReturnsError(t *testing.T) {
 			cs.Balance(h.buyer.PublicKeyHex()), buyerBalanceBefore)
 	}
 
-	// Send buyer-accept — this should fail because buyer has insufficient scrip.
+	// Send buyer-accept — this must now SUCCEED via the credit top-up.
 	preBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 
 	buyerAcceptPayload, _ := json.Marshal(map[string]any{
@@ -357,20 +368,30 @@ func TestBuyerAccept_InsufficientScripReturnsError(t *testing.T) {
 		t.Fatalf("GetMessage buyer-accept: %v", err)
 	}
 	dispatchErr := eng.DispatchForTest(exchange.FromStoreRecord(rec))
-	if dispatchErr == nil {
-		t.Error("expected error from buyer-accept with insufficient scrip, got nil")
+	if dispatchErr != nil {
+		t.Errorf("expected buyer-accept to succeed on credit, got error: %v", dispatchErr)
 	}
 
-	// No scrip-buy-hold message should have been emitted.
+	// A scrip-buy-hold message MUST now have been emitted — the hold
+	// succeeded because the loan topped up the balance first.
 	afterBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
-	if len(afterBuyHoldMsgs) > len(preBuyHoldMsgs) {
-		t.Error("expected no scrip-buy-hold message when buyer has insufficient scrip")
+	if len(afterBuyHoldMsgs) <= len(preBuyHoldMsgs) {
+		t.Error("expected a scrip-buy-hold message once the shortfall was covered by credit")
 	}
 
-	// Buyer balance must be unchanged.
-	if cs.Balance(h.buyer.PublicKeyHex()) != buyerBalanceBefore {
-		t.Errorf("buyer balance changed unexpectedly: got %d, want %d",
-			cs.Balance(h.buyer.PublicKeyHex()), buyerBalanceBefore)
+	// A scrip-loan-mint message must exist for exactly the shortfall (1).
+	loanPayload := extractLoanMintFromLog(t, h)
+	if loanPayload == nil {
+		t.Fatal("expected a scrip-loan-mint message covering the shortfall")
+	}
+	if loanPayload.Principal != 1 {
+		t.Errorf("loan principal = %d, want 1 (holdAmount=%d - balance=%d)",
+			loanPayload.Principal, holdAmount, buyerBalanceBefore)
+	}
+
+	// Buyer's final live balance is exactly 0 (topped up by 1, held holdAmount).
+	if bal := cs.Balance(h.buyer.PublicKeyHex()); bal != 0 {
+		t.Errorf("buyer balance after credit-covered hold = %d, want 0", bal)
 	}
 }
 

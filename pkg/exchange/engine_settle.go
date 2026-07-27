@@ -574,6 +574,17 @@ func (e *Engine) handleSettleBuyerAcceptScrip(msg *Message) error {
 	fee := bestPrice / MatchingFeeRate
 	holdAmount := bestPrice + fee
 
+	// Deliver-on-credit (dontguess-29b). Top up a shortfall via the loan rail
+	// (pkg/scrip/loan.go) BEFORE attempting the hold, so a buyer who found the
+	// exact entry it needed is not turned away broke (measured: 13 of 26
+	// buyer-accepts, exactly half, were rejected insufficient_scrip). See
+	// ensureCreditForShortfall's doc comment for the tier gate (fleet only —
+	// never federation) and why a top-up failure is non-fatal here.
+	if creditErr := e.ensureCreditForShortfall(msg.Sender, holdAmount, msg.ID, matchMsgID); creditErr != nil {
+		e.opts.log("engine: buyer-accept scrip: credit top-up failed for buyer %s (falling through to normal insufficient-scrip handling): %v",
+			shortKey(msg.Sender), creditErr)
+	}
+
 	err := e.decAndSaveHold(msg, matchMsgID, holdAmount, bestPrice, fee)
 	if err != nil {
 		if errors.Is(err, scrip.ErrBudgetExceeded) {
@@ -1082,7 +1093,7 @@ func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, buyerKe
 		"content":      base64.StdEncoding.EncodeToString(content),
 		"content_hash": contentHash,
 		"buyer":        buyerKey,
-		"guide":        "Content delivered. Verify integrity: SHA-256 hash the decoded content and compare to content_hash. To confirm receipt, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns 30% of token_cost in scrip (you have the content cached, making you the ideal compressor).",
+		"guide":        fmt.Sprintf("Content delivered. Verify integrity: SHA-256 hash the decoded content and compare to content_hash. To confirm receipt, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns %d%% of token_cost in scrip (you have the content cached, making you the ideal compressor; token_cost is OUTPUT tokens and compression is OUTPUT-token labor, so it is paid at OUTPUT rates, not a fraction of the read price you just paid).", WarmCompressionBountyPct),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("engine: settle-deliver: marshal content payload for entry=%s: %w", shortKey(entry.EntryID), err)
@@ -1108,7 +1119,7 @@ func (e *Engine) emitDeliverPointer(msg *Message, entry *InventoryEntry, buyerKe
 		"blob_pointer": entry.BlobPointer,
 		"content_hash": entry.ContentHash,
 		"buyer":        buyerKey,
-		"guide":        "Content is stored off-relay in Blossom (too large to inline). Fetch it via blob_pointer, then verify integrity YOURSELF before trusting it: SHA-256 hash the fetched bytes and compare to content_hash. A mismatch means the blob host served tampered or corrupted bytes — discard it and dispute rather than send settle(complete). To confirm receipt after a successful verify, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns 30% of token_cost in scrip (you have the content cached, making you the ideal compressor).",
+		"guide":        fmt.Sprintf("Content is stored off-relay in Blossom (too large to inline). Fetch it via blob_pointer, then verify integrity YOURSELF before trusting it: SHA-256 hash the fetched bytes and compare to content_hash. A mismatch means the blob host served tampered or corrupted bytes — discard it and dispute rather than send settle(complete). To confirm receipt after a successful verify, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns %d%% of token_cost in scrip (you have the content cached, making you the ideal compressor).", WarmCompressionBountyPct),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("engine: settle-deliver: marshal pointer payload for entry=%s: %w", shortKey(entry.EntryID), err)

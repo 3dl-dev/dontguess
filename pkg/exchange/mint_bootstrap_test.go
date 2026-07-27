@@ -8,8 +8,10 @@ package exchange_test
 //     Replay of the log re-derives the same credit).
 //   - A minted buyer completes a paid buy end-to-end: buyer -= price+fee,
 //     seller += residual, operator += revenue, fee burned; the ledger conserves.
-//   - An UNFUNDED buyer's buyer-accept fails LOUD with ErrBudgetExceeded — never
-//     silently moves content for free.
+//   - An UNFUNDED buyer's buyer-accept, at fleet tier, is now covered by the
+//     deliver-on-credit loan rail (dontguess-29b) instead of failing: the
+//     shortfall (the full holdAmount, since balance is 0) is minted via
+//     scrip:loan-mint, auditable and wire-visible — never silent, never free.
 //   - The individual tier (ScripStore == nil) rejects mint (scrip disabled).
 
 import (
@@ -203,9 +205,13 @@ func TestMintBootstrap_FundedBuySettlesEndToEnd(t *testing.T) {
 	}
 }
 
-// TestMintBootstrap_UnfundedBuyerFailsLoud proves an unfunded buyer (never
-// minted) hits ErrBudgetExceeded on buyer-accept — content is NOT moved for free.
-func TestMintBootstrap_UnfundedBuyerFailsLoud(t *testing.T) {
+// TestMintBootstrap_UnfundedBuyerCoveredByCredit proves an unfunded buyer
+// (never minted) at fleet tier is now covered by the deliver-on-credit loan
+// rail (dontguess-29b) on buyer-accept: a scrip:loan-mint covers the full
+// holdAmount (balance was 0), the hold succeeds, and a reservation is created
+// — content is not moved for free, it is moved against a durable, auditable
+// loan debt.
+func TestMintBootstrap_UnfundedBuyerCoveredByCredit(t *testing.T) {
 	t.Parallel()
 
 	h := newTestHarness(t)
@@ -224,6 +230,8 @@ func TestMintBootstrap_UnfundedBuyerFailsLoud(t *testing.T) {
 		t.Fatalf("expected 1 inventory entry, got %d", len(inv))
 	}
 	salePrice := eng.ComputePriceForTest(inv[0])
+	fee := salePrice / exchange.MatchingFeeRate
+	holdAmount := salePrice + fee
 
 	// NO mint — buyer balance is zero.
 	if got := cs.Balance(h.buyer.PublicKeyHex()); got != 0 {
@@ -255,20 +263,34 @@ func TestMintBootstrap_UnfundedBuyerFailsLoud(t *testing.T) {
 	}
 
 	dispatchErr := eng.DispatchForTest(exchange.FromStoreRecord(rec))
-	if dispatchErr == nil {
-		t.Fatal("expected LOUD error from unfunded buyer-accept, got nil (content moved for free)")
+	if dispatchErr != nil {
+		t.Fatalf("expected buyer-accept to succeed on fleet-tier credit, got error: %v", dispatchErr)
 	}
-	if !errors.Is(dispatchErr, scrip.ErrBudgetExceeded) {
-		t.Errorf("expected ErrBudgetExceeded, got %v", dispatchErr)
+	if errors.Is(dispatchErr, scrip.ErrBudgetExceeded) {
+		t.Error("dontguess-29b regression: got ErrBudgetExceeded, credit rail did not cover the shortfall")
 	}
 
-	// No hold emitted, balance unchanged.
+	// A hold WAS emitted — the loan topped up the balance first.
 	afterHold, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
-	if len(afterHold) > len(preHold) {
-		t.Error("no scrip-buy-hold must be emitted for an unfunded buyer")
+	if len(afterHold) <= len(preHold) {
+		t.Error("expected a scrip-buy-hold once the shortfall was covered by credit")
 	}
+
+	// A scrip-loan-mint covering the full holdAmount (balance was 0) must exist.
+	loanPayload := extractLoanMintFromLog(t, h)
+	if loanPayload == nil {
+		t.Fatal("expected a scrip-loan-mint message covering the unfunded buyer's shortfall")
+	}
+	if loanPayload.Principal != holdAmount {
+		t.Errorf("loan principal = %d, want %d (full holdAmount, since balance was 0)", loanPayload.Principal, holdAmount)
+	}
+	if loan, ok := cs.GetLoan(loanPayload.LoanID); !ok || loan.Status != scrip.LoanActive {
+		t.Fatalf("expected LoanRecord %s to exist and be Active", loanPayload.LoanID)
+	}
+
+	// Buyer's live balance nets to exactly 0: topped up by holdAmount, then held in full.
 	if got := cs.Balance(h.buyer.PublicKeyHex()); got != 0 {
-		t.Errorf("unfunded buyer balance changed: got %d, want 0", got)
+		t.Errorf("buyer balance after credit-covered hold: got %d, want 0", got)
 	}
 }
 

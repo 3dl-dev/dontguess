@@ -32,13 +32,29 @@ const ResidualRate = 10
 const HotCompressionBountyPct = 50
 
 // WarmCompressionBountyPct is the percentage of token_cost paid as bounty for
-// warm compression (buyer-initiated, content in cache). 30% = 3/10.
-const WarmCompressionBountyPct = 30
+// warm compression (buyer-initiated, content in cache). 300% = 3x token_cost
+// (dontguess-29b, re-derived under the two-unit model, dontguess-96e).
+//
+// This looks insane under scalar (single-unit) thinking and is CORRECT under
+// two units: entry.TokenCost is OUTPUT tokens (dontguess-96e decision 1/3).
+// Compression is itself OUTPUT-token labor (the compressor generates a new,
+// denser artifact), so it must be paid at OUTPUT rates, not at the INPUT rate
+// a buyer pays to read a copy. Break-even for a warm compressor (content
+// already in context, no read cost) is roughly output_tokens *
+// outputToInputMultiplier (engine_pricing.go); cold-start wants real margin
+// over break-even, landing this constant at ~10x its pre-af3/96e value of 30.
+// The bounty is funded by the RESALE SPREAD the two-unit model recovers
+// across repeat sales (computePrice's resaleAmortizationDivisor) — it is NOT
+// paid by inflating what the buyer is charged to read the artifact once. Do
+// not "fix" this back down to look like a fraction of token_cost; that was
+// the pre-96e single-unit error.
+const WarmCompressionBountyPct = 300
 
 // ColdCompressionBountyPct is the percentage of token_cost paid as bounty for
 // cold compression (demand-driven stock maintenance, medium loop). 20% = 1/5.
-// Lower than warm (30%) because there is no urgency — the entry is aging
-// inventory that the exchange wants compressed proactively.
+// Lower than hot/warm because there is no urgency — the entry is aging
+// inventory that the exchange wants compressed proactively, and (unlike warm)
+// the cold poster has no content already in context to discount the labor.
 const ColdCompressionBountyPct = 20
 
 // ReservationExpiryDuration is the time window during which a buyer-accept

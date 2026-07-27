@@ -74,8 +74,12 @@ func TestPostOpenCompressionAssign_PostsColdAssign(t *testing.T) {
 }
 
 // TestPostOpenCompressionAssign_BountyTiers verifies a cold assign carries the
-// ColdCompressionBountyPct (20%) bounty and that the three compression tiers are
-// strictly ordered hot (50%) > warm (30%) > cold (20%).
+// ColdCompressionBountyPct (20%) bounty and that cold is the cheapest tier
+// (dontguess-29b: warm is no longer the "middle" tier — it is now priced at
+// OUTPUT rates, ~10x hot/cold, because a warm compressor pays zero read cost
+// and compression is OUTPUT-token labor; see WarmCompressionBountyPct's doc
+// comment). Cold remains the floor: it has no urgency and no cached-content
+// discount, so it must stay the cheapest of the three.
 //
 // dontguess-20e: the tiers can no longer COEXIST as active assigns on one entry —
 // PostOpenCompressionAssign now atomically defers to any active assign, so a cold
@@ -113,10 +117,13 @@ func TestPostOpenCompressionAssign_BountyTiers(t *testing.T) {
 			ap.Reward, coldBounty, exchange.ColdCompressionBountyPct, tokenCost)
 	}
 
-	// Tier ordering (the rate constants themselves): hot > warm > cold.
-	if !(exchange.ColdCompressionBountyPct < exchange.WarmCompressionBountyPct &&
-		exchange.WarmCompressionBountyPct < exchange.HotCompressionBountyPct) {
-		t.Errorf("compression bounty tiers not strictly ordered: cold=%d warm=%d hot=%d (want cold < warm < hot)",
+	// Tier ordering (the rate constants themselves): cold is the floor — both
+	// hot and warm must exceed it. (dontguess-29b: warm > hot now, since warm
+	// is priced at OUTPUT rates; that is not asserted here, only that cold is
+	// cheapest — see TestPostOpenCompressionAssign_BountyTiers doc comment.)
+	if !(exchange.ColdCompressionBountyPct < exchange.HotCompressionBountyPct &&
+		exchange.ColdCompressionBountyPct < exchange.WarmCompressionBountyPct) {
+		t.Errorf("compression bounty tiers not strictly ordered: cold=%d warm=%d hot=%d (want cold < hot and cold < warm)",
 			exchange.ColdCompressionBountyPct, exchange.WarmCompressionBountyPct, exchange.HotCompressionBountyPct)
 	}
 }
