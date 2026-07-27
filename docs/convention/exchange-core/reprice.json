@@ -1,0 +1,55 @@
+{
+  "convention": "dontguess-exchange",
+  "version": "0.1",
+  "operation": "reprice",
+  "description": "Operator-authored, auditable, reversible repricing event (dontguess-b2b, operator ruling dontguess-96e decision 2). Records that an inventory entry's price basis was reinterpreted under a new ruling — the pre-ruling asking price (old_price), the post-ruling asking price (new_price), the human-readable basis, and the rd item id of the ruling that authorized the change. It never mutates any stored price field in place: InventoryEntry carries no price field to mutate (the buyer-facing price is always computed on demand), so this event IS the migration's entire artifact. A rollback is reconstructed by reading old_price back out of the event log alone, scoped to a specific ruling_ref, via State.RollbackReprice(rulingRef). Nostr kind 3407 (KindReprice) is DEDICATED to this op — see pkg/nostr/kinds.go baseOpToKind/kindToBaseOp and TestRoundTrip_EveryOperatorEmittableOp, whose sole purpose is to catch a canonical op tag added with no kind mapping before it strands the Outbox publish loop (the wave-5 regression this file exists to prevent a recurrence of).",
+  "provenance_level": "present",
+  "signing": "operator_key",
+  "antecedents": "exactly_one(target)",
+  "payload_required": true,
+  "args": [
+    {
+      "name": "entry_id",
+      "type": "message_id",
+      "required": true,
+      "description": "Inventory entry (= its put message ID) being repriced. Also carried as the event's sole e-tag antecedent."
+    },
+    {
+      "name": "old_price",
+      "type": "integer",
+      "required": true,
+      "description": "The asking price the entry would have quoted under the PRE-ruling pricing formula, at the time of repricing. This is what State.RollbackReprice recovers."
+    },
+    {
+      "name": "new_price",
+      "type": "integer",
+      "required": true,
+      "description": "The asking price the entry quotes under the CURRENT (post-ruling) pricing formula (computePrice), at the time of repricing. Informational — not authoritative going forward, since computePrice is re-evaluated live on every match; this is a point-in-time record of what the ruling changed."
+    },
+    {
+      "name": "basis",
+      "type": "string",
+      "required": true,
+      "max_length": 4096,
+      "description": "Human-readable rationale for the repricing (e.g. RepriceBasisTwoUnit)."
+    },
+    {
+      "name": "ruling_ref",
+      "type": "string",
+      "required": true,
+      "description": "The rd item id of the operator ruling authorizing this repricing (e.g. \"dontguess-96e\"). RollbackReprice is scoped by this field so an entry that later accumulates a SECOND, independent reinterpretation under a different ruling remains separately, correctly reversible under either ruling_ref — rollback of ruling A must return exactly what ruling A changed, never whatever the entry's globally-first reprice event happened to record."
+    }
+  ],
+  "produces_tags": [
+    {
+      "tag": "exchange:reprice",
+      "cardinality": "exactly_one"
+    }
+  ],
+  "notes": [
+    "Operator-only fold guard: a non-operator sender is rejected and alarmed (recordFoldDenial), never silently dropped — mirrors every other operator-authored settlement fold (applySettlePutAccept, applyConsume, ...).",
+    "Per-message-ID dedup (repriceCounted) so a relay double-append of the identical event id does not double-record the audit trail (dontguess-8f5 hazard).",
+    "Applies uniformly to legacy-plaintext and v2-confidential-envelope entries alike — both classes were put under the same previously-undefined token_cost semantic (dontguess-5b8 hazard), so this op draws no distinction between them.",
+    "Fully event-sourced: repriceEvents/repriceCounted are derived PURELY from exchange:reprice messages and are rebuilt from scratch on every State.Replay — never persisted independently of the log."
+  ]
+}

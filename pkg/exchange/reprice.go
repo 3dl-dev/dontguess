@@ -262,23 +262,44 @@ func (s *State) AllReprices() map[string][]RepriceRecord {
 	return out
 }
 
-// RollbackReprice reconstructs the pre-ruling price for every repriced entry
-// USING ONLY the reprice event log (s.repriceEvents, itself derived purely by
+// RollbackReprice reconstructs the pre-ruling price, SCOPED TO rulingRef, for
+// every entry that has a reprice event under that ruling — USING ONLY the
+// reprice event log (s.repriceEvents, itself derived purely by
 // folding/replaying TagReprice messages — nothing else in State feeds it).
 // This is the "roll the repricing back from the event log alone" mechanism
-// dontguess-b2b requires: for each entry it returns the OLDEST recorded
-// OldPrice — the first reprice event ever folded for that entry, in log
-// order — not the most recent, so a later re-reinterpretation under a
-// different ruling does not shadow the true original pre-ruling price.
-func (s *State) RollbackReprice() map[string]int64 {
+// dontguess-b2b requires.
+//
+// Scoping by rulingRef (rather than always returning the entry's globally
+// OLDEST reprice record, regardless of which ruling produced it) is what
+// makes a LATER, independent re-interpretation under a DIFFERENT ruling
+// separately recoverable: an entry can accumulate reprice events from more
+// than one ruling over its lifetime (e.g. a pre-96e experimental reprice,
+// then the real dontguess-96e migration reprice), and rolling back a specific
+// ruling must return exactly what THAT ruling changed — the entry's price
+// immediately before that ruling first repriced it — never whatever the
+// entry's very first reprice event ever recorded happened to be. Passing the
+// wrong (or no) ruling_ref would silently recover the wrong price under a
+// later re-interpretation.
+//
+// For an entry repriced more than once under the SAME rulingRef (unusual —
+// RepriceInventoryForRuling's HasReprice idempotency guard prevents this on
+// the normal migration path, but a manual EmitReprice call could), this
+// returns the OLDEST such record's OldPrice: the state immediately before
+// that ruling first took effect for the entry.
+func (s *State) RollbackReprice(rulingRef string) map[string]int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]int64, len(s.repriceEvents))
 	for entryID, recs := range s.repriceEvents {
-		if len(recs) == 0 {
-			continue
+		for _, r := range recs {
+			if r.RulingRef != rulingRef {
+				continue
+			}
+			if _, has := out[entryID]; has {
+				continue
+			}
+			out[entryID] = r.OldPrice
 		}
-		out[entryID] = recs[0].OldPrice
 	}
 	return out
 }
