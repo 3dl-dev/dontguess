@@ -220,10 +220,19 @@ func TestEmitMatchResponse_GuideIncludesTopMatchNetBenefit(t *testing.T) {
 }
 
 // TestEmitMatchResponse_ZeroMatchesOmitsNetBenefit covers the untested
-// zero-match polarity of `if len(matchResults) > 0` in emitMatchResponse: it
-// must not panic on an empty semanticMatches/candidates slice, and the
-// emitted guide must OMIT the net-benefit statement entirely (there is no
-// top match to describe).
+// zero-match polarity of `if len(matchResults) > 0` in emitMatchResponse: the
+// emitted guide must OMIT the net-benefit statement entirely (there is no top
+// match to describe).
+//
+// This test does NOT assert a no-panic guarantee. emitAndReadGuide deliberately
+// recovers when semanticMatches is empty, because emitMatchResponse's
+// pre-existing warm-compression tail unconditionally indexes semanticMatches[0].
+// That tail is unreachable in production — handleBuy (engine_buy.go:77) returns
+// via handleBuyMiss on zero matches, and its line-82 call is the only call site
+// — and hardening it is out of scope for dontguess-d48, which owns the guide
+// text. The recover fires strictly AFTER the match record is written, so the
+// OMIT assertion below is load-bearing, not vacuous: verified by mutation —
+// emitting any "Net benefit" text on the zero-match path fails this test.
 func TestEmitMatchResponse_ZeroMatchesOmitsNetBenefit(t *testing.T) {
 	eng, ls, operatorKey := egressTestEngine(t)
 
