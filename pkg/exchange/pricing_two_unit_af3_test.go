@@ -7,16 +7,23 @@ package exchange_test
 // plausibility-check comment) and DELIVERS copies of it in INPUT tokens (~5x
 // cheaper, outputToInputMultiplier). It therefore runs a deficit on any single
 // sale and recovers that deficit only across resales of the same entry — a
-// flat resaleAmortizationN=4 assumed resale count (ruling decision 4: no
-// cold-start reuse estimator). computePrice's acquisition-scale base (PutPrice
-// * 1.2, or TokenCost * 0.7 pre-accept) is divided by resaleAmortizationN
-// before it becomes the buyer-facing DELIVERY price (engine_pricing.go).
+// resaleAmortizationN=4 assumed resale count (ruling decision 4: no
+// cold-start reuse estimator), applied through a RESIDUAL-AWARE divisor
+// (resaleAmortizationDivisor, engine_pricing.go — dontguess-af3 defect 1 fix)
+// so both the standard (10% residual) and high-reuse (20% residual) classes
+// are net-positive at that assumed count, not just standard. computePrice's
+// acquisition-scale base (PutPrice * 1.2, or TokenCost * 0.7 pre-accept) is
+// divided by resaleAmortizationDivisor(entry) before it becomes the
+// buyer-facing DELIVERY price.
 //
 // These three tests are the item's REQUIRED done condition, not decoration:
-//  1. Net-positive at N=4 resales, net-negative at N=1 — proves the
-//     amortization is real, not asserted. Mutation-verified: deleting the
-//     `price /= resaleAmortizationN` line in engine_pricing.go makes the N=1
-//     case ALSO net-positive (PutPrice*1.2 > PutPrice), failing this test.
+//  1. Net-positive at N=4 resales, net-negative at N=1, for BOTH the standard
+//     and high-reuse reuse classes — proves the amortization is real (through
+//     the actual settlement price-minus-residual math, not price*N with zero
+//     residual outflow) and residual-aware, not just asserted for one class.
+//     Mutation-verified: reverting resaleAmortizationDivisor to the flat
+//     resaleAmortizationN for every class makes the high-reuse subtest's N=4
+//     case net-NEGATIVE again, failing it.
 //  2. Buyer-facing price materially below token_cost — asserts the RELATION
 //     (price well under half of token_cost), not a magic pinned number.
 //  3. No code path converts the OUTPUT-token acquisition figure into the
@@ -28,8 +35,8 @@ import (
 	"github.com/3dl-dev/dontguess/pkg/exchange"
 )
 
-// acceptedEntryForAmortization returns an accepted (post-put-accept) inventory
-// entry with the standard 70% accept rate (RunAutoAccept's
+// acceptedEntryForAmortization returns an accepted (post-put-accept) STANDARD
+// inventory entry with the standard 70% accept rate (RunAutoAccept's
 // StandardAcceptPriceNumerator), matching the real steady state a served
 // match is priced from. ContentSize=0 and PutTimestamp=0 eliminate the size
 // and age multipliers so only the acquisition base and amortization are in
@@ -45,35 +52,79 @@ func acceptedEntryForAmortization(tokenCost int64) *exchange.InventoryEntry {
 	}
 }
 
+// highReuseAcceptedEntryForAmortization returns an accepted HIGH-REUSE
+// inventory entry (85% accept rate, HighReuseAcceptPriceNumerator) whose
+// Description/ContentType genuinely classify via IsHighReuseArtifact — the
+// same §4-class fixture description used in
+// settle_highreuse_residual_test.go's ground-source residual test, so this
+// package's two high-reuse fixtures can never silently drift apart.
+func highReuseAcceptedEntryForAmortization(t *testing.T, tokenCost int64) *exchange.InventoryEntry {
+	t.Helper()
+	entry := &exchange.InventoryEntry{
+		TokenCost:    tokenCost,
+		PutPrice:     tokenCost * 85 / 100, // what RunAutoAccept credits a high-reuse seller
+		ContentSize:  0,
+		PutTimestamp: 0,
+		Description:  "flock contention test pattern for Go goroutine synchronization",
+		ContentType:  "code",
+	}
+	if !exchange.IsHighReuseArtifactForTest(entry) {
+		t.Fatalf("test fixture error: entry must classify as high-reuse")
+	}
+	return entry
+}
+
 // TestComputePrice_AmortizationNetPositiveAtN4NetNegativeAtN1 is the item's
 // required test 1: the exchange must be NET-POSITIVE on an entry sold to 4
-// buyers and NET-NEGATIVE if it only ever sells to 1.
+// buyers and NET-NEGATIVE if it only ever sells to 1 — for BOTH the standard
+// (10% residual) and high-reuse (20% residual) reuse classes.
 //
-// acquisitionCost is what the exchange actually paid the seller (entry.PutPrice,
-// per RunAutoAccept/applySettlePutAccept — the seller's real scrip credit).
-// Revenue at N sales is computePrice(entry) * N (the same per-copy price is
-// charged to each of the N buyers — the ranker/match path does not know in
-// advance how many resales an entry will get, per ruling decision 4's flat
-// assumption).
+// dontguess-af3 defect 1 (veracity-reproduced 2026-07-27): the original
+// version of this test modeled revenue as price*N with ZERO residual
+// outflow, which cannot see that high-reuse entries pay DOUBLE the standard
+// residual rate. Revenue here is computed through the REAL settlement
+// arithmetic (price - residual, correct denominator per class —
+// ExchangeRevenueForTest mirrors engine_settle.go's performScripSettlement
+// exactly, same residualDenominatorFor helper) so a residual-blind
+// amortization regression cannot pass silently.
+//
+// acquisitionCost is what the exchange actually paid the seller
+// (entry.PutPrice, per RunAutoAccept/applySettlePutAccept — the seller's real
+// scrip credit).
+//
+// Mutation-verified: reverting computePrice's resaleAmortizationDivisor to
+// the flat resaleAmortizationN for every class makes the high-reuse subtest's
+// N=4 case net-NEGATIVE again (the exact defect this item fixes), failing it.
 func TestComputePrice_AmortizationNetPositiveAtN4NetNegativeAtN1(t *testing.T) {
 	t.Parallel()
 	eng := newMinimalEngine(t)
 
-	entry := acceptedEntryForAmortization(8000) // the CLAUDE.md/dontguess-96e live example
-	acquisitionCost := entry.PutPrice           // 5600 — actually paid to the seller
-
-	price := eng.ComputePriceForTest(entry)
-
-	revenueAt1 := price * 1
-	revenueAt4 := price * 4
-
-	if revenueAt1 >= acquisitionCost {
-		t.Errorf("revenue at N=1 (price=%d) = %d, want < acquisitionCost=%d (net NEGATIVE on a single sale)",
-			price, revenueAt1, acquisitionCost)
+	cases := []struct {
+		name  string
+		entry *exchange.InventoryEntry
+	}{
+		{"standard", acceptedEntryForAmortization(8000)},
+		{"high-reuse", highReuseAcceptedEntryForAmortization(t, 8000)}, // the CLAUDE.md/dontguess-96e live example, high-reuse variant
 	}
-	if revenueAt4 <= acquisitionCost {
-		t.Errorf("revenue at N=4 (price=%d) = %d, want > acquisitionCost=%d (net POSITIVE across resales)",
-			price, revenueAt4, acquisitionCost)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			acquisitionCost := tc.entry.PutPrice // actually paid to the seller
+			price := eng.ComputePriceForTest(tc.entry)
+
+			revenuePerSale := exchange.ExchangeRevenueForTest(price, tc.entry)
+			revenueAt1 := revenuePerSale * 1
+			revenueAt4 := revenuePerSale * 4
+
+			if revenueAt1 >= acquisitionCost {
+				t.Errorf("%s: revenue at N=1 (price=%d, post-residual=%d) = %d, want < acquisitionCost=%d (net NEGATIVE on a single sale)",
+					tc.name, price, revenuePerSale, revenueAt1, acquisitionCost)
+			}
+			if revenueAt4 <= acquisitionCost {
+				t.Errorf("%s: revenue at N=4 (price=%d, post-residual=%d) = %d, want > acquisitionCost=%d (net POSITIVE across resales, accounting for the real residual payout)",
+					tc.name, price, revenuePerSale, revenueAt4, acquisitionCost)
+			}
+		})
 	}
 }
 

@@ -246,11 +246,10 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 	price := res.Amount * MatchingFeeRate / (MatchingFeeRate + 1)
 	fee := price / MatchingFeeRate
 
-	// High-reuse residual classification.
-	residualDenom := int64(ResidualRate)
-	if settledEntry != nil && IsHighReuseArtifact(settledEntry) {
-		residualDenom = HighReuseResidualDenominator
-	}
+	// High-reuse residual classification (residualDenominatorFor, engine_pricing.go
+	// — single source of truth shared with computePrice's amortization divisor
+	// so pricing and settlement can never disagree about the residual rate).
+	residualDenom := residualDenominatorFor(settledEntry)
 	residual := price / residualDenom
 	exchangeRevenue := price - residual
 

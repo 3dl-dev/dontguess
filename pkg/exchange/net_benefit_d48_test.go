@@ -15,25 +15,34 @@ import (
 // cost (scrip + input tokens to read), a net saving figure, and a ratio VALUE
 // — not just ranking prose. Uses the real-world example from the item
 // (price=6723, token_cost_original=8000) to pin the exact numbers.
+//
+// contentSize=28712 bytes (arbitrary, chosen so contentSize/approxBytesPerToken
+// is a round 7178) is the buyer's read-cost input (dontguess-af3 defect 2):
+// tokenCostOriginal must NOT be used for that figure anymore.
 func TestNetBenefitStatement(t *testing.T) {
 	const price = int64(6723)
 	const tokenCostOriginal = int64(8000)
+	const contentSize = int64(28712)
 
-	got := netBenefitStatement(price, tokenCostOriginal)
+	got := netBenefitStatement(price, tokenCostOriginal, contentSize)
 
 	wantAvoided := tokenCostOriginal * derivationMultiplier // 40000
-	wantReadCost := price + tokenCostOriginal               // 14723
-	wantNetSaving := wantAvoided - wantReadCost             // 25277
+	wantReadTokens := contentSize / approxBytesPerToken     // 7178
+	wantReadCost := price + wantReadTokens                  // 13901
+	wantNetSaving := wantAvoided - wantReadCost             // 26099
 	wantRatio := float64(wantAvoided) / float64(wantReadCost)
 
 	if wantAvoided != 40000 {
 		t.Fatalf("sanity: wantAvoided = %d, want 40000", wantAvoided)
 	}
-	if wantNetSaving != 25277 {
-		t.Fatalf("sanity: wantNetSaving = %d, want 25277", wantNetSaving)
+	if wantReadTokens != 7178 {
+		t.Fatalf("sanity: wantReadTokens = %d, want 7178", wantReadTokens)
+	}
+	if wantNetSaving != 26099 {
+		t.Fatalf("sanity: wantNetSaving = %d, want 26099", wantNetSaving)
 	}
 
-	for _, want := range []string{"40000", "6723", "8000", "25277"} {
+	for _, want := range []string{"40000", "6723", "8000", "7178", "26099"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("netBenefitStatement() = %q, missing expected figure %q", got, want)
 		}
@@ -47,6 +56,22 @@ func TestNetBenefitStatement(t *testing.T) {
 	}
 	if strings.Contains(got, "ranked by") {
 		t.Errorf("netBenefitStatement() should not duplicate ranking prose, got %q", got)
+	}
+	// dontguess-af3 defect 2 regression: the buyer-facing "input tokens to
+	// read" figure must be derived from contentSize, NEVER equal to
+	// tokenCostOriginal (a live 1:1 OUTPUT->INPUT collapse — tokenCostOriginal
+	// is OUTPUT tokens the seller burned producing the artifact, not what the
+	// buyer reads). This fixture deliberately picks contentSize so
+	// wantReadTokens (7178) != tokenCostOriginal (8000): a reintroduced
+	// `price + tokenCostOriginal` regression would emit "8000" as the read
+	// cost instead of "7178", failing the exact-fragment check below.
+	wantCostFrag := fmt.Sprintf("this costs %d scrip + ~%d input tokens to read", price, wantReadTokens)
+	if !strings.Contains(got, wantCostFrag) {
+		t.Errorf("netBenefitStatement() = %q, missing read-cost fragment %q (buyer read cost must come from contentSize, not tokenCostOriginal)", got, wantCostFrag)
+	}
+	regressionFrag := fmt.Sprintf("this costs %d scrip + ~%d input tokens to read", price, tokenCostOriginal)
+	if strings.Contains(got, regressionFrag) {
+		t.Errorf("netBenefitStatement() = %q, contains the FORBIDDEN 1:1 collapse fragment %q (tokenCostOriginal used as buyer read cost)", got, regressionFrag)
 	}
 }
 
@@ -73,6 +98,7 @@ type parsedNetBenefitMatch struct {
 	EntryID           string `json:"entry_id"`
 	Price             int64  `json:"price"`
 	TokenCostOriginal int64  `json:"token_cost_original"`
+	ContentSize       int64  `json:"content_size"`
 }
 
 // emitAndReadGuide drives emitMatchResponse (the real wiring, per the
@@ -181,20 +207,34 @@ func TestEmitMatchResponse_GuideIncludesTopMatchNetBenefit(t *testing.T) {
 
 	topPrice := results[0].Price
 	topTokenCost := results[0].TokenCostOriginal
+	topContentSize := results[0].ContentSize
 	if topTokenCost != top.TokenCost {
 		t.Fatalf("results[0].TokenCostOriginal = %d, want %d", topTokenCost, top.TokenCost)
 	}
+	if topContentSize != top.ContentSize {
+		t.Fatalf("results[0].ContentSize = %d, want %d", topContentSize, top.ContentSize)
+	}
 
 	avoidedITE := topTokenCost * derivationMultiplier
-	readCost := topPrice + topTokenCost
+	topReadTokens := topContentSize / approxBytesPerToken
+	readCost := topPrice + topReadTokens
 	netSaving := avoidedITE - readCost
 	ratio := float64(avoidedITE) / float64(readCost)
+
+	// dontguess-af3 defect 2 regression: the fixture's TokenCost (8000) must
+	// differ from its content-size-derived read tokens, so a reintroduced
+	// `price + tokenCostOriginal` collapse (using TokenCost as the buyer's
+	// read cost) is DISTINGUISHABLE from the correct contentSize-derived
+	// figure below, not accidentally identical.
+	if topReadTokens == topTokenCost {
+		t.Fatalf("test fixture error: topReadTokens (%d) == topTokenCost (%d) -- fixture cannot distinguish the two units, strengthen it (bigger TokenCost or ContentSize)", topReadTokens, topTokenCost)
+	}
 
 	// Bind each figure to its role via the exact surrounding format, not a
 	// bare substring -- so a swap of avoidedITE<->netSaving, or a read from
 	// the wrong match, cannot pass by accident.
 	wantAvoidedFrag := fmt.Sprintf("avoid ~%d ITE of derivation (%d output tokens burned x %dx)", avoidedITE, topTokenCost, derivationMultiplier)
-	wantCostFrag := fmt.Sprintf("this costs %d scrip + ~%d input tokens to read", topPrice, topTokenCost)
+	wantCostFrag := fmt.Sprintf("this costs %d scrip + ~%d input tokens to read", topPrice, topReadTokens)
 	wantSavingFrag := fmt.Sprintf("net saving ~%d ITE (%.1fx)", netSaving, ratio)
 
 	if !strings.Contains(guide, wantAvoidedFrag) {
@@ -205,6 +245,18 @@ func TestEmitMatchResponse_GuideIncludesTopMatchNetBenefit(t *testing.T) {
 	}
 	if !strings.Contains(guide, wantSavingFrag) {
 		t.Errorf("guide = %q, missing top-match saving fragment %q", guide, wantSavingFrag)
+	}
+
+	// dontguess-af3 defect 2: the buyer-facing string itself must not carry a
+	// 1:1 OUTPUT->INPUT collapse. This drives the REAL emitMatchResponse wiring
+	// (not just netBenefitStatement in isolation, per TestNetBenefitStatement
+	// above) and asserts the collapse fragment is ABSENT from the actual
+	// emitted guide -- catching a regression anywhere between MatchResult
+	// construction and the guide string, not just in netBenefitStatement's
+	// own arithmetic.
+	regressionFrag := fmt.Sprintf("this costs %d scrip + ~%d input tokens to read", topPrice, topTokenCost)
+	if strings.Contains(guide, regressionFrag) {
+		t.Errorf("guide = %q, contains the FORBIDDEN 1:1 collapse fragment %q (TokenCostOriginal used as buyer read cost instead of ContentSize)", guide, regressionFrag)
 	}
 
 	// Regression guard against reading matchResults[len-1] (the "other"

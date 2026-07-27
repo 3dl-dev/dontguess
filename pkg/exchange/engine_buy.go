@@ -286,6 +286,30 @@ func (e *Engine) mergeSemanticAndFallback(task string, candidates []*InventoryEn
 // lands and closes." Value unchanged (5); only the source of truth moved.
 const derivationMultiplier = outputToInputMultiplier
 
+// approxBytesPerToken is the exchange's existing ~4-bytes-per-token heuristic
+// (state_settle.go's applySettleSmallContentDispute plausibility check —
+// "content_size < threshold*4 bytes (tokens * ~4 bytes/token)" — uses the
+// same ratio) for estimating a token count from a byte length. It is the
+// INPUT side of the two-unit model: a buyer's real read cost must be derived
+// from entry.ContentSize (bytes actually delivered), never from TokenCost
+// (OUTPUT tokens — a completely different quantity, dontguess-96e decision
+// 3). Using TokenCost as a stand-in for the buyer's input-token read cost is
+// exactly the forbidden 1:1 OUTPUT->INPUT collapse (dontguess-af3 defect 2,
+// veracity-reproduced 2026-07-27: netBenefitStatement's prior `readCost :=
+// price + tokenCostOriginal` did exactly this).
+const approxBytesPerToken = 4
+
+// estimatedReadTokens converts a content size in bytes to an approximate
+// INPUT-token read cost using approxBytesPerToken. Returns 0 for a
+// non-positive size (unknown/undeclared content size) rather than
+// fabricating a number from TokenCost.
+func estimatedReadTokens(contentSize int64) int64 {
+	if contentSize <= 0 {
+		return 0
+	}
+	return contentSize / approxBytesPerToken
+}
+
 // netBenefitStatement renders the net-benefit arithmetic for a single match so
 // a buyer can see the real economics without doing scalar math on price vs.
 // token_cost_original (which quotes different units and reads as a weak
@@ -293,9 +317,17 @@ const derivationMultiplier = outputToInputMultiplier
 // already present on the match payload (see MatchResult.Price /
 // MatchResult.TokenCostOriginal above); this is presentation only, it does
 // not change pricing, denomination, or the scrip ledger.
-func netBenefitStatement(price, tokenCostOriginal int64) string {
+//
+// contentSize (bytes, MatchResult.ContentSize) is the buyer's real read-cost
+// input — NOT tokenCostOriginal, which is OUTPUT tokens the SELLER burned
+// producing the artifact (dontguess-96e decision 3). The prior version of
+// this function used tokenCostOriginal for both the avoided-derivation figure
+// AND the buyer's read cost, a live 1:1 OUTPUT->INPUT collapse (dontguess-af3
+// defect 2).
+func netBenefitStatement(price, tokenCostOriginal, contentSize int64) string {
 	avoidedITE := tokenCostOriginal * derivationMultiplier
-	readCost := price + tokenCostOriginal
+	readTokens := estimatedReadTokens(contentSize)
+	readCost := price + readTokens
 	netSaving := avoidedITE - readCost
 	ratio := 0.0
 	if readCost > 0 {
@@ -304,7 +336,7 @@ func netBenefitStatement(price, tokenCostOriginal int64) string {
 	return fmt.Sprintf(
 		"Net benefit (top match): you avoid ~%d ITE of derivation (%d output tokens burned x %dx); "+
 			"this costs %d scrip + ~%d input tokens to read; net saving ~%d ITE (%.1fx).",
-		avoidedITE, tokenCostOriginal, derivationMultiplier, price, tokenCostOriginal, netSaving, ratio,
+		avoidedITE, tokenCostOriginal, derivationMultiplier, price, readTokens, netSaving, ratio,
 	)
 }
 
@@ -324,6 +356,7 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 		IsPartialMatch    bool    `json:"is_partial_match"`
 		SellerReputation  int     `json:"seller_reputation"`
 		TokenCostOriginal int64   `json:"token_cost_original"`
+		ContentSize       int64   `json:"content_size"`
 		AgeHours          int     `json:"age_hours"`
 	}
 
@@ -367,6 +400,7 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 			IsPartialMatch:    rc.isPartialMatch,
 			SellerReputation:  rep,
 			TokenCostOriginal: entry.TokenCost,
+			ContentSize:       entry.ContentSize,
 			AgeHours:          ageHours,
 		}
 	}
@@ -375,7 +409,7 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 
 	guide := "Results are ranked by: (1) correctness gate — only entries that completed similar tasks pass, (2) transaction efficiency — tokens saved per scrip spent, (3) value composite — confidence × freshness × reputation × diversity, (4) market novelty — discovery boost for underrepresented sellers. Higher confidence = stronger semantic match. Reputation 70+ is established; below 30 is untested. To purchase: send settle(preview-request) to sample content before committing scrip. Price shown includes dynamic market adjustments."
 	if len(matchResults) > 0 {
-		guide += " " + netBenefitStatement(matchResults[0].Price, matchResults[0].TokenCostOriginal)
+		guide += " " + netBenefitStatement(matchResults[0].Price, matchResults[0].TokenCostOriginal, matchResults[0].ContentSize)
 	}
 
 	matchPayload, err := e.marshal(map[string]any{

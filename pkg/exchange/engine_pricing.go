@@ -83,8 +83,79 @@ const (
 	// reader). Instead every entry's asking price is amortized as if it will be
 	// resold resaleAmortizationN times; break-even is re-derived (not trusted)
 	// in the pricing_two_unit_af3_test.go net-positive-at-N4 test.
+	//
+	// resaleAmortizationN is calibrated against the STANDARD residual rate
+	// (standardResidualFraction, 10%) — see resaleAmortizationDivisor below,
+	// which is what computePrice actually divides by. A flat N applied
+	// unmodified to a class with a DIFFERENT residual rate (high-reuse, 20%)
+	// under-recovers: that was defect 1 of the veracity review on
+	// dontguess-af3 (a live token_cost=8000 high-reuse entry lost 272 scrip
+	// net across the assumed 4 resales instead of profiting).
 	resaleAmortizationN = 4.0
+
+	// standardResidualFraction is the residual payout fraction for standard
+	// (non-high-reuse) entries: price / ResidualRate = 10%. resaleAmortizationN
+	// was calibrated against this rate — it is the baseline resaleAmortizationDivisor
+	// scales other residual classes against.
+	standardResidualFraction = 1.0 / float64(ResidualRate)
 )
+
+// residualDenominatorFor returns the residual divisor (10 standard, 5
+// high-reuse) for entry's reuse class. Single source of truth shared by
+// settlement (performScripSettlement, engine_settle.go) and pricing
+// (resaleAmortizationDivisor below) so the two paths can never disagree about
+// which residual rate applies to a given entry — a prerequisite for pricing
+// to amortize correctly against the residual settlement will actually pay.
+func residualDenominatorFor(entry *InventoryEntry) int64 {
+	if entry != nil && IsHighReuseArtifact(entry) {
+		return HighReuseResidualDenominator
+	}
+	return int64(ResidualRate)
+}
+
+// residualFractionFor returns the fraction of the DELIVERY price paid out as
+// seller residual for entry's reuse class (0.10 standard, 0.20 high-reuse),
+// derived from residualDenominatorFor so it can never drift from the real
+// settlement rate.
+func residualFractionFor(entry *InventoryEntry) float64 {
+	return 1.0 / float64(residualDenominatorFor(entry))
+}
+
+// resaleAmortizationDivisor returns the residual-aware amortization divisor
+// computePrice actually divides the acquisition-scale base by (dontguess-af3
+// defect 1 fix, veracity-reproduced 2026-07-27).
+//
+// The flat resaleAmortizationN=4 divisor recovers, net of residual, exactly
+// base*(1-frac) across N sales. That was calibrated so standard entries
+// (frac=10%) net a small profit over PutPrice at N=4 (reproduced: token_cost
+// 8000 standard nets +448 scrip over PutPrice=5600 at 4 sales — the
+// already-working case). High-reuse entries pay DOUBLE residual (frac=20%)
+// but were divided by the SAME flat 4, so they net a LOSS at N=4 (reproduced:
+// token_cost 8000 high-reuse nets -272 scrip at 4 sales, breaking even only
+// at ~4.17 sales) — the assumed resale count silently didn't cover the real
+// payout for that class.
+//
+// Fix: scale the divisor by the entry's residual burden relative to the
+// standard baseline, so every reuse class recovers the SAME margin over
+// PutPrice at exactly N=resaleAmortizationN sales:
+//
+//	D(entry) = N * (1 - residualFraction(entry)) / (1 - standardResidualFraction)
+//
+// For standard entries this reduces to exactly N (unchanged — the
+// already-validated case is untouched, so no regression on the existing
+// pinned standard-case tests). For high-reuse (frac=0.20): D = 4*0.8/0.9 ≈
+// 3.556 — a SMALLER divisor than the flat 4, i.e. a HIGHER buyer price,
+// because the exchange must collect more upfront per sale to fund the bigger
+// residual payout it owes the seller. (A LARGER divisor — e.g. N/(1-frac) —
+// would make the price and therefore post-residual revenue SMALLER for
+// high-reuse: the wrong direction. Verified by the net-positive-at-N4 test
+// for both classes in pricing_two_unit_af3_test.go, and by mutation:
+// reverting to the flat resaleAmortizationN for all classes makes the
+// high-reuse subtest net-negative at N=4 again.)
+func resaleAmortizationDivisor(entry *InventoryEntry) float64 {
+	frac := residualFractionFor(entry)
+	return resaleAmortizationN * (1.0 - frac) / (1.0 - standardResidualFraction)
+}
 
 // computePrice returns the exchange's DELIVERY (buyer-facing) asking price for
 // an entry — the scrip a buyer pays for one copy, not what the exchange paid
@@ -164,11 +235,15 @@ func (e *Engine) computePrice(entry *InventoryEntry) int64 {
 
 	// Step 2: DELIVERY amortization (dontguess-af3/96e). Convert the
 	// acquisition-scale figure into a per-copy DELIVERY price by dividing
-	// across resaleAmortizationN assumed resales. This is the two-unit spread:
-	// the exchange recovers what it paid the seller in OUTPUT tokens across N
-	// copies sold, rather than charging one buyer the full amount as a one-off
-	// commission (the defect this fixes).
-	price /= resaleAmortizationN
+	// across a residual-aware divisor (resaleAmortizationDivisor) built from
+	// resaleAmortizationN assumed resales. This is the two-unit spread: the
+	// exchange recovers what it paid the seller in OUTPUT tokens across N
+	// copies sold, rather than charging one buyer the full amount as a
+	// one-off commission (the defect this fixes). The divisor is scaled by
+	// entry's residual class (standard vs. high-reuse) so BOTH classes are
+	// net-positive at the assumed N — a flat divisor under-recovers the
+	// higher (20%) high-reuse residual rate (defect 1 of the veracity review).
+	price /= resaleAmortizationDivisor(entry)
 
 	// Clamp and round (nearest-integer, not truncate, for stable results).
 	rounded := math.Round(price)
