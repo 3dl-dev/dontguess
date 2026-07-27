@@ -202,10 +202,21 @@ func TestSettle_HighReuseResidualIs20Pct(t *testing.T) {
 			salePrice/exchange.ResidualRate)
 	}
 
-	// The high-reuse residual must be exactly double the standard residual.
+	// The high-reuse residual must be double the standard residual, modulo the
+	// integer-division rounding both floor independently: floor(P/5) -
+	// 2*floor(P/10) = floor((P mod 10)/5) ∈ {0,1} for ResidualRate=10,
+	// HighReuseResidualDenominator=5 (10 = 2×5 exactly). A tolerance of 1
+	// absorbs that truncation artifact without masking a real regression in
+	// the 20%/10% split (dontguess-af3/96e: amortized prices are smaller and
+	// no longer land on a multiple of 10 for this fixture, which is what
+	// surfaced this pre-existing rounding edge case).
 	standardResidual := salePrice / exchange.ResidualRate
-	if expectedResidual != 2*standardResidual {
-		t.Errorf("high-reuse residual (%d) should be exactly 2× standard residual (%d) — arithmetic sanity check",
+	diff := expectedResidual - 2*standardResidual
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 1 {
+		t.Errorf("high-reuse residual (%d) should be ~2× standard residual (%d) (±1 rounding) — arithmetic sanity check",
 			expectedResidual, standardResidual)
 	}
 

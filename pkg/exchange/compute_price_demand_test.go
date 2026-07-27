@@ -17,7 +17,9 @@ package exchange_test
 // completed purchase.
 //
 // Formula: price = round(base * demandFactor * repFactor)
-//   base = PutPrice * 1.2 = 1000 * 1.2 = 1200
+//   base = (PutPrice * 1.2) / resaleAmortizationN = (1000 * 1.2) / 4 = 300
+//   (dontguess-af3/96e: the acquisition-scale figure 1200 is amortized across
+//   4 assumed resales before demand/rep adjust it — see engine_pricing.go)
 //   demandFactor = 1 + min(N, 10) * 0.10
 //   repFactor = 0.8 + rep/100 * 0.4  (rep rises by 1 per purchase; +3 bonus at 3+ buyers)
 
@@ -168,7 +170,7 @@ func completeBuyTransactionForBuyer(
 //	repFactor = 0.8 + rep/100 * 0.4
 //	price = round(base * demandFactor * repFactor)
 func demandPriceExpected(demandCount int, rep int) int64 {
-	const base float64 = 1200.0
+	const base float64 = 300.0 // (1000 * 1.2) / resaleAmortizationN(4) — dontguess-af3/96e
 	dc := demandCount
 	if dc > 10 {
 		dc = 10

@@ -69,6 +69,10 @@ Read this before putting or federating anything:
 
 Scrip is denominated in token cost. It is not redeemable for cash. It is only exchangeable for other cached inference on the marketplace. New scrip enters the system via x402 purchase or labor (assigned work). Matching fees burn scrip (deflationary pressure).
 
+**`token_cost` definition (operator ruling dontguess-96e, implemented dontguess-af3): `token_cost` IS DEFINED AS OUTPUT TOKENS** — what the seller's model actually generated to produce the put content, not total inference cost (input/exploration tokens are NOT folded in). There is no separate wire field for an input-token component, and none is planned — this is a semantic definition, not a convention-spec (wire format) change, so it does not trigger the CLAUDE.md architecture-change cascade. Enforced at put validation via the existing plausibility check (`pkg/exchange/state_put.go`, `token_cost <= content_size * MaxTokensPerByte`).
+
+**Two-unit pricing model.** The exchange ACQUIRES in OUTPUT tokens (`token_cost`, expensive — ~5x input tokens across every model tier: Fable 10/50, Opus 5/25, Sonnet 3/15, Haiku 1/5) and DELIVERS in INPUT tokens (cheap — a buyer's read cost is derived from `ContentSize`, already stored, never from `token_cost`). The exchange therefore runs a deficit on any single sale and recovers it only across resales of the same entry — the publisher model this CLAUDE.md already documented ("Original author earns residuals in scrip as copies sell"), now implemented in `pkg/exchange/engine_pricing.go`'s `computePrice` via a flat `resaleAmortizationN=4` assumed resale count (no cold-start reuse estimator; the fast/medium loops adjust from observed demand). Buyer-facing price is the acquisition-scale figure (seller's accept price) divided by `resaleAmortizationN` — never the acquisition figure passed through 1:1. Migration of the 166 pre-ruling entries' declared `token_cost` under this definition is tracked separately (dontguess-b2b); this pricing fix does not retroactively reprice existing inventory.
+
 ### The Three Loops (Heritage from toolrank)
 
 | Loop | Cadence | Reads | Writes | Purpose |

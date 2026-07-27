@@ -13,16 +13,18 @@ import (
 // TestComputePrice_Density_CompressedDerivativeMarkup verifies the core
 // density markup formula:
 //
-//	raw entry:  PutPrice=1000 (base=1200 after 1.2x operator margin),
+//	raw entry:  PutPrice=1000 (acquisition-scale=1200 after 1.2x operator
+//	            margin; delivery = 1200/4 = 300, dontguess-af3/96e amortization),
 //	            ContentSize=10240 (10 KB)
 //	derivative: ContentSize=2048 (2 KB), CompressedFrom=raw.EntryID
 //
 // Expected per-token price multiplier: (10240/2048) * 1.2 = 5 * 1.2 = 6.0
-// Expected derivative price: 1200 * 6.0 = 7200 scrip
+// Expected derivative acquisition-scale price: 1200 * 6.0 = 7200; delivery
+// (amortized /4) = 1800 scrip.
 //
-// Total cost comparison: raw buyer pays 1200 for 10 KB; derivative buyer pays
-// 7200 for 2 KB. Per-token price is higher, but the buyer receives 5x fewer
-// tokens — and 7200 tokens-worth of content is still cheaper per unit of
+// Total cost comparison: raw buyer pays 300 for 10 KB; derivative buyer pays
+// ~1800 for 2 KB. Per-token price is higher, but the buyer receives 5x fewer
+// tokens — and 1800 tokens-worth of content is still cheaper per unit of
 // delivered information than paying for 10 KB of raw content.
 //
 // NOTE: "total cost lower than raw" in the item spec refers to the buyer
@@ -54,10 +56,11 @@ func TestComputePrice_Density_CompressedDerivativeMarkup(t *testing.T) {
 	eng.State().InjectInventoryEntryForTest(rawEntry)
 
 	// Verify raw entry price. ContentSize=10240 → sizeFactor = 1 + 10*0.003 = 1.03.
-	// rawPrice = 1200 * 1.03 = 1236. We verify it is stable (> 1200, < 1300).
+	// acquisition-scale = 1200 * 1.03 = 1236; delivery (amortized /4,
+	// dontguess-af3/96e) = 309. We verify it is stable (> 300, < 325).
 	rawPrice := eng.ComputePriceForTest(rawEntry)
-	if rawPrice < 1200 || rawPrice > 1300 {
-		t.Fatalf("raw entry price = %d, want in [1200, 1300] (baseline check)", rawPrice)
+	if rawPrice < 300 || rawPrice > 325 {
+		t.Fatalf("raw entry price = %d, want in [300, 325] (baseline check)", rawPrice)
 	}
 
 	// Inject a derivative entry. CompressedFrom=rawEntry.EntryID,
@@ -82,13 +85,14 @@ func TestComputePrice_Density_CompressedDerivativeMarkup(t *testing.T) {
 	// density ratio = 10240/2048 = 5.0
 	// densityFactor = 5.0 * 1.2 = 6.0
 	// sizeFactor (2KB) = 1 + 2*0.003 = 1.006
-	// price = 1200 * 1.006 * 6.0 = 7243.2 → rounds to 7243
+	// acquisition-scale = 1200 * 1.006 * 6.0 = 7243.2; delivery (amortized /4,
+	// dontguess-af3/96e) = 1810.8 → rounds to 1811.
 	derivPrice := eng.ComputePriceForTest(derivative)
 
-	// Expected: base=1200, sizeFactor=1.006, densityFactor=6.0 -> 7243
-	const wantDerivPrice = int64(7243)
+	// Expected: base=1200, sizeFactor=1.006, densityFactor=6.0, /4 -> 1811
+	const wantDerivPrice = int64(1811)
 	if derivPrice != wantDerivPrice {
-		t.Errorf("derivative price = %d, want %d (base=1200 * sizeFactor=1.006 * densityFactor=6.0)",
+		t.Errorf("derivative price = %d, want %d (base=1200 * sizeFactor=1.006 * densityFactor=6.0 / 4)",
 			derivPrice, wantDerivPrice)
 	}
 
@@ -113,21 +117,24 @@ func TestComputePrice_Density_NoMarkupWithoutCompressedFrom(t *testing.T) {
 	}
 	price := eng.ComputePriceForTest(entry)
 
-	// No density factor: base=1200, sizeFactor = 1 + (2*0.003) = 1.006 -> ~1207
-	// The exact value is not the focus here; the focus is that it is NOT 7200.
-	if price == 7200 {
+	// No density factor: acquisition-scale=1200, sizeFactor = 1 + (2*0.003) =
+	// 1.006 -> ~1207; delivery (amortized /4) -> ~302.
+	// The exact value is not the focus here; the focus is that it is NOT 1800
+	// (the derivative's amortized price, dontguess-af3/96e).
+	if price == 1800 {
 		t.Errorf("non-derivative entry got derivative price %d: density markup was incorrectly applied", price)
 	}
 	// Must be in the normal range (not inflated by 6x).
-	if price > 2000 {
-		t.Errorf("non-derivative price %d is unexpectedly high (> 2000); density markup may have leaked", price)
+	if price > 500 {
+		t.Errorf("non-derivative price %d is unexpectedly high (> 500); density markup may have leaked", price)
 	}
 }
 
 // TestComputePrice_Density_FallbackWhenOriginalMissing verifies that a
 // derivative whose CompressedFrom entry is NOT in inventory falls back to base
 // pricing without markup (non-fatal). ContentSize=0 keeps sizeFactor=1.0 for a
-// clean baseline assertion of exactly 1200.
+// clean baseline assertion of exactly 300 (acquisition-scale 1200, amortized
+// /4 per dontguess-af3/96e).
 func TestComputePrice_Density_FallbackWhenOriginalMissing(t *testing.T) {
 	t.Parallel()
 	eng := newMinimalEngine(t)
@@ -139,9 +146,10 @@ func TestComputePrice_Density_FallbackWhenOriginalMissing(t *testing.T) {
 	}
 	price := eng.ComputePriceForTest(derivative)
 
-	// Should fall back to base price 1200 (PutPrice=1000 * 1.2 = 1200, no density markup).
-	if price != 1200 {
-		t.Errorf("fallback price (missing original) = %d, want 1200 (base only, no markup)", price)
+	// Should fall back to acquisition-scale price PutPrice=1000 * 1.2 = 1200,
+	// amortized (/4) = 300 (no density markup).
+	if price != 300 {
+		t.Errorf("fallback price (missing original) = %d, want 300 (base only, no markup)", price)
 	}
 }
 
@@ -192,10 +200,11 @@ func TestComputePrice_Density_ConfigurableMarkupFactor(t *testing.T) {
 	price := eng.ComputePriceForTest(derivative)
 
 	// base=1200, sizeFactor(2KB)=1.006, densityFactor=5.0*2.0=10.0
-	// price = 1200 * 1.006 * 10.0 = 12072
-	const wantPrice = int64(12072)
+	// acquisition-scale = 1200 * 1.006 * 10.0 = 12072; delivery (amortized /4,
+	// dontguess-af3/96e) = 3018.
+	const wantPrice = int64(3018)
 	if price != wantPrice {
-		t.Errorf("custom markup price = %d, want %d (base=1200 * sizeFactor=1.006 * density=10.0)", price, wantPrice)
+		t.Errorf("custom markup price = %d, want %d (base=1200 * sizeFactor=1.006 * density=10.0 / 4)", price, wantPrice)
 	}
 }
 

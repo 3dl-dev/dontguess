@@ -53,14 +53,137 @@ const (
 	tierMultiplierHot  = 1.5 // "hot"  — frequently hit, highly current
 	tierMultiplierWarm = 1.2 // "warm" — moderately active
 	tierMultiplierCold = 1.0 // "cold" or unset — no premium
+
+	// --- Two-unit pricing model (dontguess-af3, operator ruling dontguess-96e) ---
+	//
+	// The exchange ACQUIRES in OUTPUT tokens and DELIVERS in INPUT tokens — two
+	// units, deliberately, not one unit collapsed with a multiplier. TokenCost
+	// (and the PutPrice derived from it at accept time) IS DEFINED AS OUTPUT
+	// TOKENS — what the seller actually burned producing the artifact. See
+	// CLAUDE.md §Scrip and state_put.go's plausibility check for the same
+	// definition. There is no separate wire field for input tokens (ruling
+	// decision 3): a buyer's real read cost is proxied by entry.ContentSize
+	// (already stored, already feeding sizeFactor above) — never by TokenCost.
+	//
+	// outputToInputMultiplier documents WHY the acquisition side is expensive
+	// relative to the delivery side (output tokens cost ~5x input tokens across
+	// every model tier this exchange has seen — Fable 10/50, Opus 5/25, Sonnet
+	// 3/15, Haiku 1/5 — output is consistently ~5x input). It is not multiplied
+	// into computePrice's arithmetic directly (there is no code path that
+	// converts one unit into the other 1:1 or otherwise here); it exists as the
+	// single named source other pricing-adjacent code (e.g. engine_buy.go's
+	// netBenefitStatement) can reference instead of re-deriving the ratio.
+	outputToInputMultiplier = 5
+
+	// resaleAmortizationN is the flat assumed resale count (ruling decision 4:
+	// no cold-start reuse estimator — the fast/medium loops adjust later from
+	// observed demand). The exchange cannot recover a seller's full OUTPUT-token
+	// acquisition cost from a single buyer's INPUT-token read — that was the
+	// defect this item fixes (a live match once quoted 84% of token_cost to one
+	// reader). Instead every entry's asking price is amortized as if it will be
+	// resold resaleAmortizationN times; break-even is re-derived (not trusted)
+	// in the pricing_two_unit_af3_test.go net-positive-at-N4 test.
+	//
+	// resaleAmortizationN is calibrated against the STANDARD residual rate
+	// (standardResidualFraction, 10%) — see resaleAmortizationDivisor below,
+	// which is what computePrice actually divides by. A flat N applied
+	// unmodified to a class with a DIFFERENT residual rate (high-reuse, 20%)
+	// under-recovers: that was defect 1 of the veracity review on
+	// dontguess-af3 (a live token_cost=8000 high-reuse entry lost 272 scrip
+	// net across the assumed 4 resales instead of profiting).
+	resaleAmortizationN = 4.0
+
+	// standardResidualFraction is the residual payout fraction for standard
+	// (non-high-reuse) entries: price / ResidualRate = 10%. resaleAmortizationN
+	// was calibrated against this rate — it is the baseline resaleAmortizationDivisor
+	// scales other residual classes against.
+	standardResidualFraction = 1.0 / float64(ResidualRate)
 )
 
-// computePrice returns the exchange's asking price for an entry.
+// residualDenominatorFor returns the residual divisor (10 standard, 5
+// high-reuse) for entry's reuse class. Single source of truth shared by
+// settlement (performScripSettlement, engine_settle.go) and pricing
+// (resaleAmortizationDivisor below) so the two paths can never disagree about
+// which residual rate applies to a given entry — a prerequisite for pricing
+// to amortize correctly against the residual settlement will actually pay.
+func residualDenominatorFor(entry *InventoryEntry) int64 {
+	if entry != nil && IsHighReuseArtifact(entry) {
+		return HighReuseResidualDenominator
+	}
+	return int64(ResidualRate)
+}
+
+// residualFractionFor returns the fraction of the DELIVERY price paid out as
+// seller residual for entry's reuse class (0.10 standard, 0.20 high-reuse),
+// derived from residualDenominatorFor so it can never drift from the real
+// settlement rate.
+func residualFractionFor(entry *InventoryEntry) float64 {
+	return 1.0 / float64(residualDenominatorFor(entry))
+}
+
+// resaleAmortizationDivisor returns the residual-aware amortization divisor
+// computePrice actually divides the acquisition-scale base by (dontguess-af3
+// defect 1 fix, veracity-reproduced 2026-07-27).
 //
-// Base price: PutPrice * 1.2 (20% operator margin) when a put-accept exists,
-// otherwise TokenCost * 0.7 (seller's 70% share as a proxy pending acceptance).
+// The flat resaleAmortizationN=4 divisor recovers, net of residual, exactly
+// base*(1-frac) across N sales. That was calibrated so standard entries
+// (frac=10%) net a small profit over PutPrice at N=4 (reproduced: token_cost
+// 8000 standard nets +448 scrip over PutPrice=5600 at 4 sales — the
+// already-working case). High-reuse entries pay DOUBLE residual (frac=20%)
+// but were divided by the SAME flat 4, so they net a LOSS at N=4 (reproduced:
+// token_cost 8000 high-reuse nets -272 scrip at 4 sales, breaking even only
+// at ~4.17 sales) — the assumed resale count silently didn't cover the real
+// payout for that class.
 //
-// Six inventory signals adjust the base price:
+// Fix: scale the divisor by the entry's residual burden relative to the
+// standard baseline, so every reuse class recovers the SAME margin over
+// PutPrice at exactly N=resaleAmortizationN sales:
+//
+//	D(entry) = N * (1 - residualFraction(entry)) / (1 - standardResidualFraction)
+//
+// For standard entries this reduces to exactly N (unchanged — the
+// already-validated case is untouched, so no regression on the existing
+// pinned standard-case tests). For high-reuse (frac=0.20): D = 4*0.8/0.9 ≈
+// 3.556 — a SMALLER divisor than the flat 4, i.e. a HIGHER buyer price,
+// because the exchange must collect more upfront per sale to fund the bigger
+// residual payout it owes the seller. (A LARGER divisor — e.g. N/(1-frac) —
+// would make the price and therefore post-residual revenue SMALLER for
+// high-reuse: the wrong direction. Verified by the net-positive-at-N4 test
+// for both classes in pricing_two_unit_af3_test.go, and by mutation:
+// reverting to the flat resaleAmortizationN for all classes makes the
+// high-reuse subtest net-negative at N=4 again.)
+func resaleAmortizationDivisor(entry *InventoryEntry) float64 {
+	frac := residualFractionFor(entry)
+	return resaleAmortizationN * (1.0 - frac) / (1.0 - standardResidualFraction)
+}
+
+// computePrice returns the exchange's DELIVERY (buyer-facing) asking price for
+// an entry — the scrip a buyer pays for one copy, not what the exchange paid
+// to acquire the entry.
+//
+// Two-unit model (dontguess-af3, operator ruling dontguess-96e): ACQUISITION
+// (exchange <- seller) is denominated in OUTPUT tokens — entry.TokenCost IS
+// DEFINED AS OUTPUT TOKENS (see CLAUDE.md §Scrip, state_put.go plausibility
+// check). DELIVERY (exchange -> buyer) is denominated in INPUT tokens, which
+// are ~5x cheaper (outputToInputMultiplier) — a buyer's real read cost is
+// proxied by entry.ContentSize, never by TokenCost.
+//
+// Acquisition-scale base: PutPrice * 1.2 (20% operator margin) when a
+// put-accept exists, otherwise TokenCost * 0.7 (seller's 70% share as a proxy
+// pending acceptance) — this is what the exchange paid or will pay the
+// seller, unchanged from before this fix.
+//
+// That acquisition-scale figure is then AMORTIZED across resaleAmortizationN
+// (flat 4, ruling decision 4) assumed resales before it becomes the buyer's
+// per-copy asking price: the exchange runs a deficit on any single sale and
+// recovers it only across resales of the same entry (the publisher model
+// already documented in CLAUDE.md, never implemented in pricing until now).
+// This is the fix for the one-off-commission defect: a live match once quoted
+// price=6723 against token_cost_original=8000 (84%) — a reader was charged
+// near-full production cost. Post-fix, the equivalent buyer price is a
+// fraction of that (see TestComputePrice_BuyerPriceMaterialyBelowTokenCost).
+//
+// Six inventory signals adjust the acquisition-scale base BEFORE amortization:
 //   - Demand count: +10% per distinct completed buyer, capped at +100%.
 //   - Age decay: decays from 1.0 to 0.5 linearly over 60 days (PutTimestamp=0 = no decay).
 //   - Reputation: rep=0 -> 0.8x, rep=50 -> 1.0x, rep=100 -> 1.2x.
@@ -74,8 +197,12 @@ const (
 // Invariants:
 //   - Returns at least computePriceMinPrice (never 0 or negative).
 //   - Guards against int64 overflow for large TokenCost and PutPrice values.
+//   - No code path converts the OUTPUT-token acquisition figure into the
+//     INPUT-token delivery figure at 1:1 — it is always divided by
+//     resaleAmortizationN.
 func (e *Engine) computePrice(entry *InventoryEntry) int64 {
-	// Step 1: base price
+	// Step 1: acquisition-scale base (OUTPUT-token denominated — what the
+	// exchange paid or will pay the seller; see dontguess-96e decision 1/3).
 	var base float64
 	if entry.PutPrice > 0 {
 		if entry.PutPrice > math.MaxInt64/operatorMarginOverflowGuard {
@@ -103,8 +230,20 @@ func (e *Engine) computePrice(entry *InventoryEntry) int64 {
 	densityFactor := e.computeDensityFactor(entry)
 	tierFactor := computeTierFactor(entry.CompressionTier)
 
-	// Compound all multipliers.
+	// Compound all multipliers (still acquisition-scale, OUTPUT-token terms).
 	price := base * demandFactor * ageFactor * repFactor * sizeFactor * fastFactor * densityFactor * tierFactor
+
+	// Step 2: DELIVERY amortization (dontguess-af3/96e). Convert the
+	// acquisition-scale figure into a per-copy DELIVERY price by dividing
+	// across a residual-aware divisor (resaleAmortizationDivisor) built from
+	// resaleAmortizationN assumed resales. This is the two-unit spread: the
+	// exchange recovers what it paid the seller in OUTPUT tokens across N
+	// copies sold, rather than charging one buyer the full amount as a
+	// one-off commission (the defect this fixes). The divisor is scaled by
+	// entry's residual class (standard vs. high-reuse) so BOTH classes are
+	// net-positive at the assumed N — a flat divisor under-recovers the
+	// higher (20%) high-reuse residual rate (defect 1 of the veracity review).
+	price /= resaleAmortizationDivisor(entry)
 
 	// Clamp and round (nearest-integer, not truncate, for stable results).
 	rounded := math.Round(price)

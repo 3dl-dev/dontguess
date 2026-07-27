@@ -152,6 +152,19 @@ func (e *Engine) RecordBuyerSettlementForTest(buyerKey, entryID string) {
 // Tests can call this directly to check classifier output without running the engine.
 var IsHighReuseArtifactForTest = IsHighReuseArtifact
 
+// ExchangeRevenueForTest exposes the REAL settlement math (price minus
+// residual, residualDenominatorFor's per-class denominator selection —
+// engine_settle.go's performScripSettlement uses the exact same helper) so
+// pricing tests can assert net-positive/net-negative through the actual
+// settlement formula instead of a reimplemented one that could drift from it
+// (dontguess-af3 defect 1: the prior test modeled revenue as price*N with
+// zero residual outflow, which could not see a residual-blind amortization
+// bug).
+func ExchangeRevenueForTest(price int64, entry *InventoryEntry) int64 {
+	residual := price / residualDenominatorFor(entry)
+	return price - residual
+}
+
 // StagePredictionsForTest exposes stagePredictions for unit tests.
 func (e *Engine) StagePredictionsForTest(settledEntryID string) {
 	e.stagePredictions(settledEntryID)
