@@ -18,7 +18,7 @@
       "name": "results",
       "type": "json",
       "required": true,
-      "description": "Array of match results ranked by composite score. Each element: {entry_id: string, put_msg_id: string, seller_key: string, description: string, content_hash: string, content_type: string, price: integer, confidence: float 0.0-1.0, seller_reputation: integer 0-100, token_cost_original: integer, age_hours: integer, preview: string max 512 chars}. TAINTED: description and preview are seller-controlled."
+      "description": "Array of match results ranked by composite score. Each element: {entry_id: string, put_msg_id: string, seller_key: string, description: string, content_hash: string, content_type: string, price: integer, confidence: float 0.0-1.0, seller_reputation: integer 0-100, token_cost_original: integer (OUTPUT tokens \u2014 see CLAUDE.md \u00a7Scrip), content_size: integer (bytes; the buyer's INPUT-token read cost is derived from this, never from token_cost_original), age_hours: integer, preview: string max 512 chars}. TAINTED: description and preview are seller-controlled."
     },
     {
       "name": "search_meta",
