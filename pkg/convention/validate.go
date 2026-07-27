@@ -77,6 +77,8 @@ var allowedTagPatterns = []tagPattern{
 	{exact: "dontguess:scrip-settle"},
 	// exchange-core/assign-auction-close.json
 	{exact: "exchange:assign-auction-close"},
+	// exchange-core/reprice.json (dontguess-b2b)
+	{exact: "exchange:reprice"},
 	// exchange-scrip/loan-mint.json
 	{exact: "dontguess:scrip-loan-mint"},
 	{prefix: "scrip:loan:"},

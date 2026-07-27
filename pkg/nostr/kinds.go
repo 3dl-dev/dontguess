@@ -41,6 +41,7 @@ const (
 	KindSettle              = 3404  // exchange:settle         (regular, immutable)
 	KindAssign              = 3405  // exchange:assign* (7 sub-ops, single kind)
 	KindConsume             = 3406  // exchange:consume        (regular, operator behavioral signal)
+	KindReprice             = 3407  // exchange:reprice        (regular, operator audit event — dontguess-b2b)
 	KindInvite              = 3410  // exchange:invite-redeem  (regular, join-token redemption — docs/design/onboarding-tiered-scaling-federation.md §1)
 	KindScrip               = 3411  // dontguess:scrip-*       (regular, team-tier)
 	KindInventoryProjection = 30401 // inventory+price PROJECTION (addressable, NOT source of truth)
@@ -67,6 +68,7 @@ var DontguessKinds = []int{
 	KindSettle,
 	KindAssign,
 	KindConsume,
+	KindReprice,
 	KindInvite,
 	KindScrip,
 	KindFleetRoster,
@@ -94,11 +96,12 @@ const (
 
 // baseOpToKind maps the exchange operations that each own a DEDICATED kind — the
 // four base client ops (put/buy/match/settle) plus the operator-authored consume
-// behavioral signal (dontguess-d52). For all of these the kind alone fully
-// determines the op tag, so the op tag is consumed by the kind (not re-emitted)
-// and reconstructed from the kind on the reverse path. (consume rides here rather
-// than an ["op", …] discriminator because, like the base ops, it is the sole op on
-// its kind — the discriminator mechanism only exists for the SHARED assign/scrip
+// behavioral signal (dontguess-d52) and the operator-authored reprice audit event
+// (dontguess-b2b). For all of these the kind alone fully determines the op tag,
+// so the op tag is consumed by the kind (not re-emitted) and reconstructed from
+// the kind on the reverse path. (consume and reprice ride here rather than an
+// ["op", …] discriminator because, like the base ops, each is the sole op on its
+// kind — the discriminator mechanism only exists for the SHARED assign/scrip
 // kinds where the kind cannot disambiguate the sub-op.)
 var baseOpToKind = map[string]int{
 	exchange.TagPut:     KindPut,
@@ -106,6 +109,7 @@ var baseOpToKind = map[string]int{
 	exchange.TagMatch:   KindMatch,
 	exchange.TagSettle:  KindSettle,
 	exchange.TagConsume: KindConsume,
+	exchange.TagReprice: KindReprice,
 }
 
 // kindToBaseOp is the inverse of baseOpToKind.
@@ -115,6 +119,7 @@ var kindToBaseOp = map[int]string{
 	KindMatch:   exchange.TagMatch,
 	KindSettle:  exchange.TagSettle,
 	KindConsume: exchange.TagConsume,
+	KindReprice: exchange.TagReprice,
 }
 
 // assignOps is the set of the seven assign sub-op tags. They all share kind 3405;

@@ -118,6 +118,7 @@ func TestRoundTrip_AllOpKinds(t *testing.T) {
 		{"assign_expire", exchange.TagAssignExpire, nil, KindAssign},
 		{"assign_auction_close", exchange.TagAssignAuctionClose, nil, KindAssign},
 		{"consume", exchange.TagConsume, nil, KindConsume},
+		{"reprice", exchange.TagReprice, nil, KindReprice},
 		{"scrip_mint", scrip.TagScripMint, nil, KindScrip},
 		{"scrip_settle", scrip.TagScripSettle, nil, KindScrip},
 	}
@@ -180,6 +181,15 @@ func TestRoundTrip_EveryOperatorEmittableOp(t *testing.T) {
 
 		// --- engine_settle.go:476: the consume behavioral signal (THE d52 gap) ---
 		{"consume", []string{exchange.TagConsume}, KindConsume},
+
+		// --- reprice.go: the dontguess-b2b auditable/reversible repricing event.
+		// THIS CASE IS THE RECURRENCE GUARD for the wave-5 regression: TagReprice
+		// was added to state_types.go with no kind mapping, so EmitReprice's
+		// sendOperatorMessage -> ToNostrEvent call failed "no recognised exchange
+		// operation tag" for every reprice event — the migration's SOLE ARTIFACT
+		// could never reach a relay. Had this case existed before the kind was
+		// added, it would have failed here instead of shipping.
+		{"reprice", []string{exchange.TagReprice}, KindReprice},
 
 		// --- engine_core.go / engine_buy.go: operator assign sub-ops ---
 		{"assign", []string{exchange.TagAssign}, KindAssign},
