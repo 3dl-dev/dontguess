@@ -45,7 +45,17 @@ type clientConfig struct {
 	// OperatorNpub is the exchange operator's npub (put encrypts to it; buy may
 	// pin it). Consulted when --operator-npub is not passed.
 	OperatorNpub string `json:"operator_npub,omitempty"`
+	// AutoAdmit controls whether a newly provisioned agent in this tree claims
+	// admission under the tree's existing identity (dontguess-09a). Nil means
+	// unset, which reads as ENABLED — the default is on, per operator direction.
+	// Set false to require manual operator admission for every key in this tree.
+	AutoAdmit *bool `json:"auto_admit,omitempty"`
 }
+
+// autoAdmitEnabled reports whether walk-up auto-admission applies in this tree.
+// Absent config means enabled: the point is that agents stop being denied by
+// default, so opting OUT is the deliberate act.
+func (c clientConfig) autoAdmitEnabled() bool { return c.AutoAdmit == nil || *c.AutoAdmit }
 
 // findDgDir walks up from startDir to the filesystem root, returning the path of
 // the nearest .dg directory, or "" if none exists.

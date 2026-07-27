@@ -1,6 +1,6 @@
 # Hierarchical agent admission (dontguess-09a)
 
-**Status:** ruled, ready to implement. No further decisions outstanding.
+**Status:** IMPLEMENTED (91b8719, and the auto-admission step that follows it). No decisions outstanding.
 **Operator direction (2026-07-27):** "the walk up should find an identity that can admit a local
 `.dg` identity. so each agent gets their own, and the project/user/machine can be admitted once and
 configurably (default yes) auto admit subfolder agent identities."
@@ -133,14 +133,41 @@ opt in explicitly, never inherit this by default.
 
 ---
 
-## 6. Implementation order
+## 6. Implementation — landed
 
-1. Parent-signed grant minting + operator-side verification of the four conditions in §3.3.
-2. Parent → child edge in the roster fold, with cascading revocation.
-3. `agent-init` walk-up auto-admission, default on.
-4. Tests: a child admitted under a parent can put, buy AND borrow immediately; revoking the parent
-   revokes the child across a restart; a grant signed by a key NOT on the allowlist is refused; a
-   grant signed by a key that was itself admitted as a child is refused (depth 1).
+1. ✅ **Issuer gate.** `nostr.VerifyRedeemWithIssuer` generalizes step (4) of `VerifyRedeem` from
+   "signed by THIS operator" to "signed by a key the authorizer accepts". `VerifyRedeem` remains as
+   an operator-only wrapper, so no existing caller changed behaviour. Policy lives in
+   `cmd/dontguess/child_grants.go` (`newIssuerAuthorizer`) and reads the operator's own persisted
+   config — never anything the redeem claims about itself.
+2. ✅ **Parent → child edge + cascading revocation.** `Config.ChildGrants` (child → parent) is
+   durable. `allowlistController.apply` computes a parent's children BEFORE removing it, persists
+   each child's removal so the republished roster already excludes them, AND removes them from the
+   live KeySet — the roster echo would eventually correct the live set via `ReplaceAll`, but that
+   leaves a window in which a revoked parent's child still passes the trust check.
+3. ✅ **Walk-up auto-admission**, `cmd/dontguess/auto_admit.go`, default on. `agent-init
+   --fleet-member` resolves the tree's existing default identity as parent, mints a parent-signed
+   grant (5-minute TTL — it is minted and redeemed in the same breath), and publishes the child's
+   redeem. Best-effort by construction: any miss falls through to the pre-existing manual-admission
+   notice, so a relay outage cannot fail provisioning. Opt out with `--no-auto-admit` or
+   `"auto_admit": false` in `.dg/config.json`.
+
+**Mutation-verified**, not merely green:
+
+| mutation | test that breaks |
+|---|---|
+| strip the depth-1 check | `DepthOneChildMayNotAdmit` |
+| authorizer defaults open | `RefusesStranger` |
+| auto-admit defaults off | `AutoAdmit_DefaultsOnAndOptsOut` |
+| a key may parent itself | `AutoAdmit_SelfIsNotItsOwnParent` |
+
+Also covered: fail-closed when config is unreadable, case-insensitive allowlist matching, self-edges
+refused, a cascade that does not reach another parent's children, the bootstrap case (first identity
+in a tree has no parent), and the individual tier (no relay → decline cleanly, do not error).
+
+**Not covered by unit tests, and deliberately so:** the live relay round-trip. `autoAdmitChild`
+publishes to a real relay and the operator folds the redeem out of band, which no fixture reproduces.
+That path is exercised by the running exchange.
 
 Related: dontguess-5a3 (PoW/Sybil, federation tier), dontguess-29b (credit rail), dontguess-4c1
 (credit policy), dontguess-31b (legacy non-secp256k1 identities).

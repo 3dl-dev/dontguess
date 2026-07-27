@@ -68,6 +68,8 @@ func init() {
 		"provision a persistent fleet member with its own npub (required when --parent is not given; fail-closed default)")
 	agentInitCmd.Flags().String("relay", "",
 		"exchange relay URL(s) to record in .dg/config.json (comma-separated) — so put/buy need no DONTGUESS_RELAY_URLS")
+	agentInitCmd.Flags().Bool("no-auto-admit", false,
+		"do not claim admission under this tree's existing identity (dontguess-09a); provision only")
 	agentInitCmd.Flags().String("operator-npub", "",
 		"exchange operator npub to record in .dg/config.json — so put/buy need no --operator-npub")
 	rootCmd.AddCommand(agentInitCmd)
@@ -76,6 +78,7 @@ func init() {
 func runAgentInit(cmd *cobra.Command, args []string) error {
 	parent := ""
 	fleetMember := false
+	noAutoAdmit := false
 	relay := ""
 	operatorNpub := ""
 	if cmd != nil {
@@ -83,6 +86,7 @@ func runAgentInit(cmd *cobra.Command, args []string) error {
 		fleetMember, _ = cmd.Flags().GetBool("fleet-member")
 		relay, _ = cmd.Flags().GetString("relay")
 		operatorNpub, _ = cmd.Flags().GetString("operator-npub")
+		noAutoAdmit, _ = cmd.Flags().GetBool("no-auto-admit")
 	}
 	name := args[0]
 
@@ -119,11 +123,31 @@ func runAgentInit(cmd *cobra.Command, args []string) error {
 	// REJECTED as a surprise later (dontguess-874). join bypasses this handler
 	// (it admits via redeem), so the notice only fires for standalone agent-init.
 	if fleetMember && !jsonOutput {
-		if signer, rerr := identity.Resolve(filepath.Join(dgDir, "agents", name)); rerr == nil {
-			w := cmd.ErrOrStderr()
-			fmt.Fprintf(w, "\nNOT admitted yet: this key is not on the operator's allowlist, so `dontguess put` is rejected until it is (buy works anonymously). Either:\n")
-			fmt.Fprintf(w, "  redeem an operator invite:   dontguess join <token>\n")
-			fmt.Fprintf(w, "  or ask the operator to run:  dontguess allowlist add %s\n", signer.Npub())
+		w := cmd.ErrOrStderr()
+		// AUTO-ADMISSION (dontguess-09a): if this tree already holds an admitted
+		// identity, that identity is a parent and can admit this new key without an
+		// operator round-trip. Best-effort by construction — a failure here must
+		// never fail provisioning, or `agent-init` starts depending on relay
+		// reachability. On any miss we fall through to the manual notice, which is
+		// exactly today's behaviour.
+		admitted := false
+		if noAutoAdmit {
+			fmt.Fprintf(w, "\nauto-admission skipped (--no-auto-admit).\n")
+		} else if c, _ := loadClientConfigAt(dgDir); !c.autoAdmitEnabled() {
+			fmt.Fprintf(w, "\nauto-admission disabled for this tree (auto_admit=false in %s).\n", dgConfigFile)
+		} else {
+			ok, aerr := autoAdmitChild(cmd.Context(), dgDir, name, w)
+			if aerr != nil {
+				fmt.Fprintf(w, "\nauto-admission did not complete: %v\n(falling back to manual admission)\n", aerr)
+			}
+			admitted = ok
+		}
+		if !admitted {
+			if signer, rerr := identity.Resolve(filepath.Join(dgDir, "agents", name)); rerr == nil {
+				fmt.Fprintf(w, "\nNOT admitted yet: this key is not on the operator's allowlist, so `dontguess put` is rejected until it is (buy works anonymously). Either:\n")
+				fmt.Fprintf(w, "  redeem an operator invite:   dontguess join <token>\n")
+				fmt.Fprintf(w, "  or ask the operator to run:  dontguess allowlist add %s\n", signer.Npub())
+			}
 		}
 	}
 	return nil

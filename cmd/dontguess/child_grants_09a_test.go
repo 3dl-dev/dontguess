@@ -11,6 +11,8 @@ package main
 //      (depth 1), and revoking a parent revokes its children durably.
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,5 +195,85 @@ func TestChildGrants_RecordAndCascade(t *testing.T) {
 	auth := newIssuerAuthorizer(dg, op.PubKeyHex())
 	if got := auth(kidA.PubKeyHex()); got != nostr.IssuerUnauthorized {
 		t.Errorf("kidA is not on the allowlist, role = %v, want IssuerUnauthorized", got)
+	}
+}
+
+// TestAutoAdmit_BootstrapCaseHasNoParent covers the first identity in a tree: there
+// is nothing to inherit from, so auto-admission must decline cleanly (not error) and
+// let the caller fall back to the manual-admission notice.
+func TestAutoAdmit_BootstrapCaseHasNoParent(t *testing.T) {
+	dg := filepath.Join(t.TempDir(), ".dg")
+	if err := os.MkdirAll(dg, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Empty tree: no agent_name recorded.
+	signer, name, err := parentSignerFor(dg, "first-agent")
+	if err != nil {
+		t.Fatalf("parentSignerFor on empty tree: %v", err)
+	}
+	if signer != nil {
+		t.Errorf("empty tree returned a parent signer %v, want nil -- the first identity has nothing to inherit from", name)
+	}
+}
+
+// TestAutoAdmit_SelfIsNotItsOwnParent guards the case where the tree's default
+// identity IS the key being provisioned (a re-run of agent-init with the same
+// name). Treating it as its own parent would mint a self-signed grant.
+func TestAutoAdmit_SelfIsNotItsOwnParent(t *testing.T) {
+	dg := filepath.Join(t.TempDir(), ".dg")
+	if err := os.MkdirAll(dg, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := writeClientConfig(dg, clientConfig{AgentName: "same-agent"}); err != nil {
+		t.Fatalf("write client config: %v", err)
+	}
+	signer, _, err := parentSignerFor(dg, "same-agent")
+	if err != nil {
+		t.Fatalf("parentSignerFor: %v", err)
+	}
+	if signer != nil {
+		t.Error("a key was offered as its own parent, want nil -- that would mint a self-signed grant")
+	}
+}
+
+// TestAutoAdmit_DefaultsOnAndOptsOut pins the operator direction: default yes,
+// configurable. An unset field must read as enabled, because the entire point is
+// that agents stop being denied by default.
+func TestAutoAdmit_DefaultsOnAndOptsOut(t *testing.T) {
+	if !(clientConfig{}).autoAdmitEnabled() {
+		t.Error("auto-admission defaults OFF, want ON -- opting out must be the deliberate act")
+	}
+	on, off := true, false
+	if !(clientConfig{AutoAdmit: &on}).autoAdmitEnabled() {
+		t.Error("auto_admit=true read as disabled")
+	}
+	if (clientConfig{AutoAdmit: &off}).autoAdmitEnabled() {
+		t.Error("auto_admit=false read as enabled -- the opt-out must be honoured")
+	}
+}
+
+// TestAutoAdmit_NoRelayDeclinesCleanly covers the individual tier: no relay means no
+// operator to read a redeem, so auto-admission declines without erroring.
+func TestAutoAdmit_NoRelayDeclinesCleanly(t *testing.T) {
+	dg := filepath.Join(t.TempDir(), ".dg")
+	if err := os.MkdirAll(filepath.Join(dg, "agents"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A parent exists, but the tree records no relays.
+	if err := writeClientConfig(dg, clientConfig{AgentName: "parent"}); err != nil {
+		t.Fatalf("write client config: %v", err)
+	}
+	if err := runAgentInitCore(dg, "parent", "", true); err != nil {
+		t.Fatalf("provision parent: %v", err)
+	}
+	if err := runAgentInitCore(dg, "child", "", true); err != nil {
+		t.Fatalf("provision child: %v", err)
+	}
+	ok, err := autoAdmitChild(context.Background(), dg, "child", io.Discard)
+	if err != nil {
+		t.Fatalf("autoAdmitChild with no relay errored: %v -- it should decline, not fail", err)
+	}
+	if ok {
+		t.Error("autoAdmitChild claimed success with no relay configured")
 	}
 }
