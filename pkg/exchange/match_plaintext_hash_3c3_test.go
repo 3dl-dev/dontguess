@@ -232,10 +232,19 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 		}
 	}
 
-	// ── COMPRESSION GATE: no exchange:assign references the v2 entry (a compressor
-	//    cannot compress ciphertext and the assign would leak the plaintext hash) on
-	//    the team wire, while the legacy entry DID get a compression assign on the
-	//    individual wire — proving the gate is v2-specific, not a blanket disable. ──
+	// ── COMPRESSION GATE (dontguess-7e21): the v2 entry DOES get a compression
+	//    assign — its assignee is the seller/buyer, which holds the plaintext — and
+	//    the canary above independently proves that assign carries no
+	//    sha256(plaintext). This inverts the original dontguess-3c3 assertion, which
+	//    required NO assign for a v2 entry.
+	//
+	//    That is a STRENGTHENING, not a relaxation. While no v2 assign existed, the
+	//    canary was VACUOUS on the assign wire: there was no assign payload for it to
+	//    inspect. Now an assign is posted on every accepted v2 put and the canary
+	//    must hold on its bytes. Suppressing the assign entirely closed the whole
+	//    compression labor market (zero assigns posted for 12 days, measured
+	//    2026-07-28); suppressing only the HASH is what 3c3's leak actually required.
+	var sawV2Assign bool
 	for _, m := range opMsgs {
 		if !hasTag(m.Tags, exchange.TagAssign) {
 			continue
@@ -247,9 +256,12 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 		if json.Unmarshal(m.Payload, &ap) != nil {
 			continue
 		}
-		if ap.EntryID == v2Entry.EntryID {
-			t.Fatalf("LEAK/NONSENSE: a compression assign (task_type=%q) was posted for the v2 entry — it embeds sha256(plaintext) and orders impossible ciphertext compression", ap.TaskType)
+		if ap.EntryID == v2Entry.EntryID && ap.TaskType == "compress" {
+			sawV2Assign = true
 		}
+	}
+	if !sawV2Assign {
+		t.Fatal("expected a compression assign for the v2 entry — without one the plaintext-hash canary above is vacuous on the assign wire, and the compression labor market has no supply (dontguess-7e21)")
 	}
 	var sawLegacyAssign bool
 	for _, m := range operatorMessages3c3(t, h2) {

@@ -1,6 +1,7 @@
 package exchange_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -89,11 +90,16 @@ func TestCompressionDerivative_FullLifecycle(t *testing.T) {
 	}
 
 	// ── Step 4: agent completes with compressed payload ──────────────────────
-	compressedHash := "sha256:" + fmt.Sprintf("%064x", 100)
-	compressedSize := int64(12000) // smaller than the original 48000 bytes
+	// Real bytes, real hash: createCompressionDerivative re-derives both from the
+	// submitted content (dontguess-7e21) so a fabricated hash over absent content
+	// no longer produces a derivative — it produced a CONTENTLESS one before.
+	compressedBytes := compressedFiller(12000) // smaller than the original 48000 bytes
+	compressedHash := sha256Ref(compressedBytes)
+	compressedSize := int64(len(compressedBytes))
 	completeResult, _ := json.Marshal(map[string]any{
 		"content_hash": compressedHash,
 		"content_size": compressedSize,
+		"content":      base64.StdEncoding.EncodeToString(compressedBytes),
 	})
 	completeMsg := h.sendMessage(worker, completeResult, []string{exchange.TagAssignComplete}, []string{claimMsg.ID})
 
@@ -392,10 +398,12 @@ func TestCompressionDerivative_ReplayIdempotent(t *testing.T) {
 	}
 
 	// ── Step 4: agent completes ──────────────────────────────────────────────
-	compressedHash := "sha256:" + fmt.Sprintf("%064x", 56)
+	compressedBytes := compressedFiller(9000)
+	compressedHash := sha256Ref(compressedBytes)
 	completeResult, _ := json.Marshal(map[string]any{
 		"content_hash": compressedHash,
-		"content_size": int64(9000),
+		"content_size": int64(len(compressedBytes)),
+		"content":      base64.StdEncoding.EncodeToString(compressedBytes),
 	})
 	completeMsg := h.sendMessage(worker, completeResult, []string{exchange.TagAssignComplete}, []string{claimMsg.ID})
 
@@ -453,4 +461,18 @@ func TestCompressionDerivative_ReplayIdempotent(t *testing.T) {
 	if derivative.ContentHash != compressedHash {
 		t.Errorf("derivative.ContentHash = %q, want %q", derivative.ContentHash, compressedHash)
 	}
+}
+
+// compressedFiller returns n deterministic bytes standing in for compressed
+// output. Completions must carry REAL bytes whose sha256 matches the declared
+// content_hash: createCompressionDerivative re-derives the derivative's Content,
+// ContentSize and hash from the submission itself (dontguess-7e21), because
+// before that it read only the hash and size and entered every derivative into
+// inventory and the match index with NO content — matchable and undeliverable.
+func compressedFiller(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte('a' + i%26)
+	}
+	return b
 }

@@ -822,9 +822,12 @@ func (e *Engine) sendBrokeredMatchAssign(buyMsg *Message, task string, maxResult
 // This is sent immediately after a put is accepted (hot path). Failure is
 // non-fatal to the caller — the error is logged and the accept proceeds.
 func (e *Engine) sendCompressionAssign(entry *InventoryEntry) error {
-	if entry.WrappedCEKOperator != "" {
-		return nil // v2 confidential entry: see skipCompressionForV2.
-	}
+	// A v2 confidential entry IS compressible on this path (dontguess-7e21): the
+	// assignee is the entry's own SELLER, which authored the plaintext. The work
+	// order carries CiphertextHash rather than sha256(plaintext) (see
+	// compressionProtocol), and the completed work comes back inside a put
+	// envelope, so no plaintext and no plaintext hash reaches any wire. Only the
+	// COLD tier stays fenced — see sendColdCompressionAssign.
 	if entry.LegacyPlaintext {
 		// Defense-in-depth (dontguess-751): a GRANDFATHERED pre-climb entry's
 		// ContentHash is sha256(plaintext) — the same A1/P1 hash oracle
@@ -836,7 +839,7 @@ func (e *Engine) sendCompressionAssign(entry *InventoryEntry) error {
 		return nil
 	}
 	bounty := entry.TokenCost * HotCompressionBountyPct / 100
-	description := compressionProtocol(entry.EntryID, entry.ContentHash, entry.ContentType, bounty)
+	description := compressionProtocol(entry, bounty)
 	payload, err := json.Marshal(map[string]any{
 		"entry_id":         entry.EntryID,
 		"task_type":        "compress",
@@ -881,9 +884,10 @@ func (e *Engine) sendCompressionAssign(entry *InventoryEntry) error {
 // lock both posters share (opMu cannot serialize the poll path, which never takes
 // it). See engine_core.go compressAssignMu.
 func (e *Engine) sendWarmCompressionAssign(entry *InventoryEntry, buyerKey string) error {
-	if entry.WrappedCEKOperator != "" {
-		return nil // v2 confidential entry: see skipCompressionForV2.
-	}
+	// A v2 confidential entry IS compressible on this path (dontguess-7e21): the
+	// assignee is the BUYER that just received and decrypted this content. This is
+	// the tier the deliver-on-credit loop depends on — borrow to buy, compress what
+	// you now hold, clear the loan from the bounty. See sendCompressionAssign.
 	if entry.LegacyPlaintext {
 		// Defense-in-depth (dontguess-751): see sendCompressionAssign above —
 		// same ContentHash=sha256(plaintext) oracle for a grandfathered entry.
@@ -909,7 +913,7 @@ func (e *Engine) sendWarmCompressionAssign(entry *InventoryEntry, buyerKey strin
 	}
 
 	bounty := entry.TokenCost * WarmCompressionBountyPct / 100
-	description := compressionProtocol(entry.EntryID, entry.ContentHash, entry.ContentType, bounty)
+	description := compressionProtocol(entry, bounty)
 	payload, err := json.Marshal(map[string]any{
 		"entry_id":         entry.EntryID,
 		"task_type":        "compress",
@@ -1038,7 +1042,7 @@ func (e *Engine) sendColdCompressionAssign(entry *InventoryEntry) error {
 	}
 
 	bounty := entry.TokenCost * ColdCompressionBountyPct / 100
-	description := compressionProtocol(entry.EntryID, entry.ContentHash, entry.ContentType, bounty)
+	description := compressionProtocol(entry, bounty)
 	payload, err := json.Marshal(map[string]any{
 		"entry_id":    entry.EntryID,
 		"task_type":   "compress",

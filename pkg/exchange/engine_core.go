@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1887,19 +1888,57 @@ func (e *Engine) createCompressionDerivative(rec *AssignRecord, acceptMsgID stri
 		return fmt.Errorf("original entry %s not found in inventory", shortKey(rec.EntryID))
 	}
 
-	// Parse the result payload to extract content_hash and content_size.
+	// Parse the result payload to extract the submission.
 	var result struct {
 		ContentHash string `json:"content_hash"`
 		ContentSize int64  `json:"content_size"`
+		Content     string `json:"content"`
+		PutEvent    string `json:"put_event"`
 	}
 	if err := json.Unmarshal(rec.Result, &result); err != nil {
 		return fmt.Errorf("parse assign-complete result: %w", err)
 	}
+
+	// PUT-REFERENCED SUBMISSION (dontguess-7e21). The worker published the
+	// compressed bytes as an ordinary encrypted put, so the derivative ALREADY
+	// EXISTS in inventory, fully formed — content, teaser, ciphertext hash and CEK
+	// wrap all set by applyPut. There is nothing to synthesize: link it to the
+	// original and re-index it so the link is visible to ranking.
+	//
+	// validateCompletedCompressionAssign has already proven the referenced put is
+	// in inventory, was sent by this claimant, is not the original itself, and
+	// carries plaintext the operator can read — this runs only after all of that.
+	if result.PutEvent != "" {
+		linked := e.state.MarkEntryCompressedFrom(result.PutEvent, rec.EntryID)
+		if linked == nil {
+			return fmt.Errorf("referenced put %s is not in inventory", shortKey(result.PutEvent))
+		}
+		e.matchIndex.Add(e.inventoryEntryToRankInput(linked))
+		e.opts.log("engine: assign-accept: linked compression derivative entry_id=%s from=%s (worker put)",
+			shortKey(linked.EntryID), shortKey(orig.EntryID))
+		return nil
+	}
+
 	if result.ContentHash == "" {
 		return fmt.Errorf("assign-complete result missing content_hash")
 	}
 	if !strings.HasPrefix(result.ContentHash, "sha256:") {
 		return fmt.Errorf("assign-complete result content_hash %q does not have required sha256: prefix", result.ContentHash)
+	}
+	// The compressed bytes themselves. Before dontguess-7e21 this function parsed
+	// only the hash and size and NEVER read `content`, so every synthesized
+	// derivative was entered into inventory AND the match index with no Content,
+	// no BlobPointer and no envelope — matchable, and undeliverable. Never seen in
+	// production only because no compression assign had ever been completed.
+	derivativeContent, err := base64.StdEncoding.DecodeString(result.Content)
+	if err != nil {
+		return fmt.Errorf("assign-complete result content is not valid base64: %w", err)
+	}
+	if len(derivativeContent) == 0 {
+		return fmt.Errorf("assign-complete result carries no content — refusing to create an undeliverable derivative")
+	}
+	if sha256Ref(derivativeContent) != result.ContentHash {
+		return fmt.Errorf("assign-complete result content_hash does not match the submitted bytes")
 	}
 
 	// Derive a stable EntryID from the accept message ID so that replaying
@@ -1921,7 +1960,10 @@ func (e *Engine) createCompressionDerivative(rec *AssignRecord, acceptMsgID stri
 		ContentType:    orig.ContentType,
 		Domains:        domainsCopy,
 		TokenCost:      orig.TokenCost,
-		ContentSize:    result.ContentSize,
+		// Content and ContentSize come from the bytes the operator itself decoded
+		// and re-hashed above, never from the worker's self-report (dontguess-7e21).
+		Content:     derivativeContent,
+		ContentSize: int64(len(derivativeContent)),
 		PutPrice:       orig.PutPrice,
 		PutTimestamp:   orig.PutTimestamp,
 		CompressedFrom: orig.EntryID,

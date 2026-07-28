@@ -63,6 +63,10 @@ const (
 	assignRejectInsufficientReduction = "insufficient_reduction" // (c) GATE1 < 30% size reduction
 	assignRejectLowSimilarity         = "low_similarity"         // (d) GATE2 cosine < 0.85
 	assignRejectOriginalUnavailable   = "original_unavailable"   // original plaintext not inline in inventory — cannot validate GATE2, fail-closed
+	// dontguess-7e21, put-referenced submissions:
+	assignRejectSubmissionUnavailable = "submission_unavailable" // referenced put not folded / not in inventory / no plaintext on the entry — fail-closed, retryable
+	assignRejectSubmissionNotOwned    = "submission_not_owned"   // referenced put was not sent by the claimant, or IS the original entry (self-reference)
+	assignRejectPlaintextSubmission   = "plaintext_submission"   // inline submission on a confidential (team-tier) exchange — would have published the compressed plaintext
 )
 
 // assignCompressResult is the assign-complete result payload shape a compression
@@ -76,7 +80,26 @@ const (
 type assignCompressResult struct {
 	ContentHash string `json:"content_hash"`
 	ContentSize int64  `json:"content_size"`
-	Content     string `json:"content"` // base64 compressed bytes
+	Content     string `json:"content"` // base64 compressed bytes (inline shape)
+
+	// PutEvent is the CONFIDENTIAL submission shape (dontguess-7e21). Instead of
+	// inlining the compressed PLAINTEXT in this payload — which is a public
+	// signed relay event, so an inline submission publishes the compressed form
+	// of the content in the clear — the worker publishes the compressed bytes as
+	// an ORDINARY exchange:put and names that put's event id here.
+	//
+	// A put is already encrypted end to end by the §541 v2 envelope
+	// (relayclient.buildPutMessage: per-entry CEK, ChaCha20-Poly1305, CEK wrapped
+	// to the operator via NIP-44), already gated, already deduped, and already
+	// folded into inventory with its teaser and ciphertext hash. Reusing it means
+	// this path adds NO new crypto, NO new ciphertext location for a buyer to
+	// fetch from (the derivative is a real kind-3401 put, so every existing
+	// buyer's ciphertext_ref.put_event fetch works unchanged), and the derivative
+	// cannot be contentless the way a synthesized entry was.
+	//
+	// The inline Content shape remains supported for the individual/solo tier,
+	// which has no relay, no operator key, and therefore no envelope to speak of.
+	PutEvent string `json:"put_event"`
 }
 
 // RunAutoAcceptAssigns is the operator-side auto-accept-assign ticker body
@@ -170,17 +193,29 @@ func (e *Engine) validateCompletedCompressionAssign(rec *AssignRecord) (string, 
 		return assignRejectIntegrity, false
 	}
 
+	// (a2) CONFIDENTIALITY (dontguess-7e21, HARD). On a confidential exchange an
+	// INLINE submission is refused outright. assign-complete is a public signed
+	// relay event, so inlining the compressed bytes publishes a compressed form of
+	// the content in the clear — a strictly worse disclosure than the
+	// sha256(plaintext) work-order oracle dontguess-3c3 removed, and the reason
+	// compression could not simply be re-enabled for v2 entries. The worker must
+	// use the put-referenced shape, which is encrypted by construction.
+	//
+	// encryptedRequired's own condition is the test: an operator signer means this
+	// deployment folds v2 puts and holds CEKs. Individual/solo tier (no signer, no
+	// relay, no envelope) keeps the inline shape, which is local-only there.
+	if result.PutEvent == "" && e.state.operatorSigner != nil {
+		return assignRejectPlaintextSubmission, false
+	}
+
 	// (b) INTEGRITY. Re-derive the truth from the submitted bytes; never trust the
-	// worker's self-reported hash/size.
-	decoded, err := base64.StdEncoding.DecodeString(result.Content)
-	if err != nil {
-		return assignRejectIntegrity, false
-	}
-	if int64(len(decoded)) != result.ContentSize {
-		return assignRejectIntegrity, false
-	}
-	if result.ContentHash != sha256Ref(decoded) {
-		return assignRejectIntegrity, false
+	// worker's self-reported hash/size. resolveSubmittedCompression returns the
+	// operator's own copy of the compressed plaintext for BOTH submission shapes —
+	// decoded from the inline payload, or read off the worker's put entry, which
+	// applyPut already decrypted and verified.
+	decoded, reason, ok := e.resolveSubmittedCompression(rec, &result)
+	if !ok {
+		return reason, false
 	}
 
 	// Look up the ORIGINAL entry — the operator holds its plaintext because
@@ -196,7 +231,11 @@ func (e *Engine) validateCompletedCompressionAssign(rec *AssignRecord) (string, 
 	if orig.ContentSize <= 0 {
 		return assignRejectOriginalUnavailable, false
 	}
-	if float64(result.ContentSize) > CompressionMaxSizeRatio*float64(orig.ContentSize) {
+	// Measure the OPERATOR'S OWN bytes (len(decoded)), never result.ContentSize:
+	// for the inline shape those are already proven equal by the integrity check,
+	// and for the put-referenced shape the worker's self-report is not consulted at
+	// all — the authoritative size is what applyPut actually stored.
+	if float64(len(decoded)) > CompressionMaxSizeRatio*float64(orig.ContentSize) {
 		return assignRejectInsufficientReduction, false
 	}
 
@@ -217,6 +256,65 @@ func (e *Engine) validateCompletedCompressionAssign(rec *AssignRecord) (string, 
 	}
 
 	return "", true
+}
+
+// resolveSubmittedCompression returns the operator's own copy of the compressed
+// plaintext for a completion, for either submission shape, along with a reject
+// reason when the submission cannot be trusted (dontguess-7e21).
+//
+// PUT-REFERENCED (confidential, team tier). The worker published the compressed
+// bytes as an ordinary encrypted put and named it here. applyPut has ALREADY
+// unwrapped the CEK, AEAD-opened the ciphertext, run the quality/dedup gates,
+// and stored the recovered plaintext on the entry — so the operator's copy is
+// authoritative and the worker's self-reported hash/size are never consulted at
+// all. Two bindings are enforced before it counts as this worker's submission:
+//
+//	SELLER    the put must have been sent by the CLAIMANT. Without this, a worker
+//	          could claim a bounty by pointing at somebody else's put — including
+//	          the ORIGINAL entry itself, which trivially passes GATE2 against
+//	          itself and would only fail GATE1 by luck of the size ratio.
+//	DISTINCT  the referenced put must not BE the original entry, closing that
+//	          same self-reference even when a worker compresses its own listing.
+//
+// INLINE (individual/solo tier). Unchanged: base64-decode the payload and
+// re-hash/re-measure it, so the worker's self-reported values are still never
+// trusted. This shape is fail-closed at team tier by the caller's confidentiality
+// check — see validateCompletedCompressionAssign.
+func (e *Engine) resolveSubmittedCompression(rec *AssignRecord, result *assignCompressResult) ([]byte, string, bool) {
+	if result.PutEvent != "" {
+		sub := e.state.GetInventoryEntry(result.PutEvent)
+		if sub == nil {
+			// Not yet folded, dropped by applyPut's gates, or simply not a put.
+			// Fail-closed and retryable: the completion stays pending and a later
+			// tick re-validates it once (if ever) the put folds.
+			return nil, assignRejectSubmissionUnavailable, false
+		}
+		if sub.SellerKey != rec.ClaimantKey {
+			return nil, assignRejectSubmissionNotOwned, false
+		}
+		if sub.EntryID == rec.EntryID {
+			return nil, assignRejectSubmissionNotOwned, false
+		}
+		if len(sub.Content) == 0 {
+			// An offloaded (Blossom) put keeps no plaintext on the entry, so the
+			// operator cannot embed it for GATE2. Fail-closed rather than pay
+			// unvalidated — same rule the original-entry check below applies.
+			return nil, assignRejectSubmissionUnavailable, false
+		}
+		return sub.Content, "", true
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(result.Content)
+	if err != nil {
+		return nil, assignRejectIntegrity, false
+	}
+	if int64(len(decoded)) != result.ContentSize {
+		return nil, assignRejectIntegrity, false
+	}
+	if result.ContentHash != sha256Ref(decoded) {
+		return nil, assignRejectIntegrity, false
+	}
+	return decoded, "", true
 }
 
 // validationEmbedder returns the Embedder used for GATE2. It is the engine's

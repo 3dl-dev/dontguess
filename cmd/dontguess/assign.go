@@ -41,6 +41,7 @@ import (
 	"fmt"
 
 	"github.com/3dl-dev/dontguess/pkg/identity"
+	"github.com/3dl-dev/dontguess/pkg/relay"
 	"github.com/3dl-dev/dontguess/pkg/relayclient"
 	"github.com/spf13/cobra"
 )
@@ -273,9 +274,22 @@ func newAssignCompleteCmd() *cobra.Command {
 		Long: `complete signs an exchange:assign-complete(3405) event e-tagging <claim-id>
 (the event id 'dontguess assign claim' printed — NOT the assign id) with the
 AGENT key and publishes it to the team relay. --content is the completed work,
-base64-encoded; the CLI wraps it in the result shape
-createCompressionDerivative parses (content_hash + content_size) alongside the
-content itself, so a "compress" task's derivative can be created on accept.
+base64-encoded.
+
+YOUR WORK IS ENCRYPTED BEFORE IT LEAVES THIS PROCESS (dontguess-7e21). An
+assign-complete is a PUBLIC signed relay event, so submitting the compressed
+bytes inline would publish your work in the clear. Instead this command first
+publishes --content as an ordinary 'dontguess put' — which the §541 envelope
+encrypts end to end, CEK wrapped to the operator — and then submits a completion
+that merely REFERENCES that put. The operator validates against the copy it
+decrypts itself.
+
+That means completing a compression also LISTS it: the compressed derivative
+becomes your inventory entry, you are credited for the put, and you earn
+residuals every time it sells — on top of the bounty. Pass --description
+(the work order prints the original's, so the derivative answers the same
+queries) and --token-cost (your real compression spend; it defaults to the
+compressed byte count, which is a floor, not an estimate).
 
 A relay OK is a transport receipt only — see 'assign claim's doc. Payment
 (assign-accept, operator-only) is a separate step this CLI does not perform;
@@ -284,6 +298,11 @@ run 'dontguess savings' to confirm a bounty landed once the operator accepts.`,
 		RunE: runAssignComplete,
 	}
 	cmd.Flags().String("content", "", "base64-encoded completed content (required)")
+	cmd.Flags().String("description", "", "description for the derivative listing (default: the claim id; pass the original's description so the derivative matches the same queries)")
+	cmd.Flags().Int64("token-cost", 0, "your whole compression spend in tokens (default: the compressed byte count, a floor)")
+	cmd.Flags().String("content-type", "code", "content type of the derivative listing")
+	cmd.Flags().String("operator-npub", "", "operator npub (team tier: wraps the derivative's CEK to the operator)")
+	cmd.Flags().Bool("inline-plaintext", false, "submit the work INLINE and IN THE CLEAR instead of as an encrypted put — only for an exchange with no confidentiality (individual tier); a confidential operator refuses this shape")
 	cmd.Flags().String("relay", "", "relay websocket URL (default: first of DONTGUESS_RELAY_URLS)")
 	cmd.Flags().String("as", "", "override the identity: sign as .dg/agents/<name> (default: the .dg/ found by walk-up)")
 	cmd.Flags().String("agent-home", "", "override the identity home directory (advanced/tests; bypasses .dg/ walk-up)")
@@ -323,16 +342,44 @@ func runAssignComplete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("assign complete: %w", err)
 	}
 
-	result, err := relayclient.BuildAssignResult(content)
-	if err != nil {
-		return fmt.Errorf("assign complete: encode result: %w", err)
-	}
-
 	conn := relayclient.NewConn(relayURL, signer, relayclient.WithRelayAuth(relayAuth))
 	defer conn.Close()
 
 	ctx, cancel := context.WithTimeout(cmdContext(cmd), timeout)
 	defer cancel()
+
+	// Publish the work as an encrypted put FIRST, then reference it (dontguess-7e21).
+	// This is what keeps the submission confidential: the put path performs the
+	// whole §541 envelope (per-entry CEK, ChaCha20-Poly1305, CEK wrapped to the
+	// operator), so the compressed plaintext never touches the wire. Submitting it
+	// inline instead would publish the work in the clear, and the operator rejects
+	// that shape outright on a confidential exchange.
+	//
+	// --inline-plaintext is the explicit opt-out, for an exchange that has no
+	// confidentiality to preserve (individual tier: no operator key, no envelope,
+	// nothing to wrap a CEK to). It is deliberately opt-IN: the safe shape is what
+	// you get by default, and a misconfigured agent that forces this against a real
+	// confidential exchange is still refused by the operator rather than quietly
+	// accepted after the fact.
+	inlinePlaintext, _ := cmd.Flags().GetBool("inline-plaintext")
+	var result []byte
+	if inlinePlaintext {
+		fmt.Fprintln(cmd.OutOrStdout(), "WARNING: --inline-plaintext submits your work UNENCRYPTED on a public event.")
+		result, err = relayclient.BuildAssignResult(content)
+		if err != nil {
+			return fmt.Errorf("assign complete: encode result: %w", err)
+		}
+	} else {
+		putID, perr := publishCompletionAsPut(ctx, cmd, conn, signer, content, claimID)
+		if perr != nil {
+			return perr
+		}
+		result, err = relayclient.BuildAssignResultForPut(putID)
+		if err != nil {
+			return fmt.Errorf("assign complete: encode result: %w", err)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "published derivative as put %s (encrypted; you are its seller and earn residuals on it)\n", short(putID))
+	}
 
 	res, err := relayclient.AssignComplete(ctx, conn, signer, claimID, result)
 	if err != nil {
@@ -362,4 +409,63 @@ func cmdContext(cmd *cobra.Command) context.Context {
 		return base
 	}
 	return context.Background()
+}
+
+// publishCompletionAsPut publishes the completed work as an ordinary encrypted
+// put and returns its event id, for `assign complete` to reference
+// (dontguess-7e21).
+//
+// This exists so a compression worker never has to think about confidentiality:
+// the command it runs is unchanged (`assign complete <claim> --content <b64>`),
+// but the bytes leave this process inside the same §541 envelope every put uses,
+// rather than inline on a public assign-complete event. It also means the
+// derivative is a first-class listing under the worker's own key — content,
+// teaser, ciphertext hash and CEK wrap all correct by construction, so a buyer
+// can actually be delivered the compressed version.
+//
+// Defaults are chosen so the one-liner works without extra flags:
+//   - description falls back to naming the claim, which is poor for matching;
+//     the work order prints the original's description precisely so the worker
+//     can pass it through and have the derivative answer the same queries.
+//   - token-cost falls back to the compressed byte count. That is a FLOOR (you
+//     generated at least that many bytes), not an estimate of the real spend —
+//     pass --token-cost with what the compression actually cost you.
+func publishCompletionAsPut(ctx context.Context, cmd *cobra.Command, conn *relay.Conn, signer identity.Signer, content []byte, claimID string) (string, error) {
+	description, _ := cmd.Flags().GetString("description")
+	if description == "" {
+		description = "compressed derivative (assign claim " + short(claimID) + ")"
+	}
+	tokenCost, _ := cmd.Flags().GetInt64("token-cost")
+	if tokenCost <= 0 {
+		tokenCost = int64(len(content))
+	}
+	contentType, _ := cmd.Flags().GetString("content-type")
+	operatorNpubFlag, _ := cmd.Flags().GetString("operator-npub")
+	operatorNpub := resolveOperatorNpub(operatorNpubFlag)
+	if operatorNpub == "" {
+		return "", fmt.Errorf("assign complete: no operator npub configured — a team-tier submission must wrap its content key to the operator; pass --operator-npub or set it in .dg/config.json")
+	}
+	raw, err := identity.DecodeNpub(operatorNpub)
+	if err != nil {
+		return "", fmt.Errorf("assign complete: --operator-npub is not a valid npub: %w", err)
+	}
+
+	res, err := relayclient.Put(ctx, conn, signer, relayclient.PutRequest{
+		Description:    description,
+		Content:        content,
+		TokenCost:      tokenCost,
+		ContentType:    contentType,
+		OperatorPubKey: fmt.Sprintf("%x", raw),
+		BlobStore:      newSellerBlobStore(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("assign complete: publishing the derivative as a put failed: %w", err)
+	}
+	if res.Rejected {
+		return "", fmt.Errorf("assign complete: the derivative put was REJECTED by the operator: %s (ask the operator to run: dontguess allowlist add %s)", res.RejectReason, signer.Npub())
+	}
+	if res.PutID == "" {
+		return "", fmt.Errorf("assign complete: the derivative put returned no event id — nothing to reference")
+	}
+	return res.PutID, nil
 }

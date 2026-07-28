@@ -874,6 +874,31 @@ func (s *State) InsertDerivativePut(entry *InventoryEntry) {
 	s.applyDerivativePut(entry)
 }
 
+// MarkEntryCompressedFrom links an ALREADY-FOLDED inventory entry to the
+// original it compresses, returning the linked entry (nil if entryID is not in
+// inventory). Thread-safe.
+//
+// This is the put-referenced compression path (dontguess-7e21): the worker
+// published its compressed bytes as an ordinary encrypted put, so the derivative
+// is a real, fully-formed inventory entry the moment applyPut folds it — with
+// content, teaser, ciphertext hash and CEK wrap all correct by construction.
+// Accepting the assign only has to record what the entry IS, rather than
+// synthesizing a second entry from the completion payload.
+//
+// Setting CompressedFrom is also what makes State.HasCompressedVersion(original)
+// true, which is the guard that stops the medium loop re-posting a compression
+// assign for an entry that now has one.
+func (s *State) MarkEntryCompressedFrom(entryID, originalEntryID string) *InventoryEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.inventory[entryID]
+	if !ok {
+		return nil
+	}
+	entry.CompressedFrom = originalEntryID
+	return entry
+}
+
 // ExpireStaleClaimsTS is the thread-safe wrapper around ExpireStaleClaims.
 // It acquires a read lock, scans for expired claims, and returns claim message
 // IDs. Callers must NOT hold s.mu when calling this method.

@@ -1,6 +1,7 @@
 package exchange_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -217,9 +218,12 @@ func TestWarmCompression_SkippedWhenDerivativeExists(t *testing.T) {
 	}
 
 	// Seller completes with compressed payload.
+	compressedBytes := compressedFiller(8000)
+	compressedHash = sha256Ref(compressedBytes)
 	completePayload, _ := json.Marshal(map[string]any{
 		"content_hash": compressedHash,
-		"content_size": int64(8000),
+		"content_size": int64(len(compressedBytes)),
+		"content":      base64.StdEncoding.EncodeToString(compressedBytes),
 	})
 	completeMsg := h.sendMessage(h.seller, completePayload, []string{exchange.TagAssignComplete}, []string{claimMsg.ID})
 	completeExchangeMsg := exchange.FromStoreRecord(mustGetStoreRecord(t, h, completeMsg.ID))
@@ -377,9 +381,12 @@ func TestWarmCompression_DerivativeEntrySkipped(t *testing.T) {
 		t.Fatalf("DispatchForTest(claim): %v", err)
 	}
 
+	derivBytes := compressedFiller(7000)
+	derivHash = sha256Ref(derivBytes)
 	completePayload, _ := json.Marshal(map[string]any{
 		"content_hash": derivHash,
-		"content_size": int64(7000),
+		"content_size": int64(len(derivBytes)),
+		"content":      base64.StdEncoding.EncodeToString(derivBytes),
 	})
 	completeMsg := h.sendMessage(h.seller, completePayload, []string{exchange.TagAssignComplete}, []string{claimMsg.ID})
 	completeExchangeMsg := exchange.FromStoreRecord(mustGetStoreRecord(t, h, completeMsg.ID))

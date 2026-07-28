@@ -73,18 +73,45 @@ func AssignComplete(ctx context.Context, conn *relay.Conn, signer identity.Signe
 	return publishAssignSubOp(ctx, conn, signer, exchange.TagAssignComplete, claimEventID, result)
 }
 
-// BuildAssignResult renders the assign-complete result payload
-// createCompressionDerivative (pkg/exchange/engine_core.go) parses:
-// content_hash (sha256:-prefixed, over the completed content) + content_size.
-// The content itself rides alongside (base64) so an operator/reviewer can
-// inspect the submission without a second fetch — the engine only reads
-// content_hash/content_size.
+// BuildAssignResult renders the INLINE assign-complete result payload:
+// content_hash (sha256:-prefixed, over the completed content) + content_size +
+// the content itself, base64.
+//
+// INDIVIDUAL/SOLO TIER ONLY (dontguess-7e21). An assign-complete is a public
+// signed relay event, so this shape publishes the completed work IN THE CLEAR.
+// That is harmless on a zero-relay individual-tier exchange, where the event
+// never leaves the machine and no envelope exists in the first place. On a
+// confidential (team-tier) exchange it is a disclosure — the operator refuses it
+// outright (assignRejectPlaintextSubmission) rather than accepting a submission
+// that already leaked. Use BuildAssignResultForPut there.
 func BuildAssignResult(content []byte) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"content_hash": sha256Ref(content),
 		"content_size": int64(len(content)),
 		"content":      base64.StdEncoding.EncodeToString(content),
 	})
+}
+
+// BuildAssignResultForPut renders the CONFIDENTIAL assign-complete result
+// payload: a reference to a put event the worker already published, and nothing
+// else (dontguess-7e21).
+//
+// The compressed bytes travel as an ordinary exchange:put, which the §541 v2
+// envelope already encrypts end to end — per-entry CEK, ChaCha20-Poly1305, CEK
+// wrapped to the operator over NIP-44 — so no plaintext and no plaintext hash
+// ever reaches the wire. The operator resolves the reference against the put it
+// has already decrypted, gated and folded, and runs the compression gates on its
+// own copy; nothing in this payload is trusted.
+//
+// Reusing put also means the derivative is a REAL kind-3401 event, so a buyer's
+// existing ciphertext_ref.put_event fetch delivers it with no client change, and
+// the worker becomes its seller — earning residuals on the compressed version
+// as well as the bounty.
+func BuildAssignResultForPut(putEventID string) ([]byte, error) {
+	if putEventID == "" {
+		return nil, fmt.Errorf("relayclient: assign result: empty put event id")
+	}
+	return json.Marshal(map[string]any{"put_event": putEventID})
 }
 
 func publishAssignSubOp(ctx context.Context, conn *relay.Conn, signer identity.Signer, tag, antecedent string, payload []byte) (*AssignActionResult, error) {

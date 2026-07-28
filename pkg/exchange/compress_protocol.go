@@ -12,18 +12,38 @@ import "fmt"
 //   - Size reduction ≥ 30% (size_compressed / size_original ≤ 0.70)
 //   - Semantic similarity ≥ 0.85 (cosine similarity of embeddings)
 //
-// The content is base64-encoded in the entry. Decode it, compress per protocol,
-// base64-encode the result, and submit via assign-complete.
-func compressionProtocol(entryID, contentHash, contentType string, bounty int64) string {
+// You already hold the content: a hot assign goes to the entry's seller, which
+// authored it, and a warm assign to the buyer that just received it. Compress
+// per protocol and submit with `dontguess assign complete`.
+//
+// CONFIDENTIALITY (dontguess-7e21). The work order is a PUBLIC exchange:assign
+// event, so for a v2 confidential entry it must never carry
+// entry.ContentHash = sha256(plaintext) — that is the §4.4 A1/P1
+// guess-confirmation oracle dontguess-3c3 removed. It names the already-public
+// CiphertextHash instead. The entry is identified by its id either way, and the
+// assignee does not need a hash to do the work: it HAS the content.
+//
+// (dontguess-3c3 originally suppressed the whole assign rather than the hash,
+// on the reasoning that "a compressor cannot compress AEAD ciphertext". That is
+// true for a COLD assignee, which holds nothing — and false for hot and warm,
+// which hold the plaintext. Suppressing all three closed the compression labor
+// market entirely: measured 2026-07-28, zero assigns had been posted since the
+// day the last plaintext put was accepted.)
+func compressionProtocol(entry *InventoryEntry, bounty int64) string {
+	hashLabel, hashValue := "Content hash", entry.ContentHash
+	if entry.WrappedCEKOperator != "" {
+		hashLabel, hashValue = "Ciphertext hash", entry.CiphertextHash
+	}
 	header := fmt.Sprintf(`COMPRESSION WORK ORDER
 Entry: %s
-Content hash: %s
+%s: %s
 Content type: %s
+Description: %s
 Bounty: %d scrip
 
 RETRIEVAL
-The entry content was delivered to you (hot/warm) or is retrievable via
-the exchange campfire. Decode the base64 content field to get the raw text.
+You already hold this content — it was delivered to you as the buyer (warm) or
+authored by you as the seller (hot). Compress the copy you have.
 
 ACCEPTANCE CRITERIA (hard gates — both must pass)
   1. Size reduction ≥ 30%% (compressed size / original size ≤ 0.70)
@@ -31,15 +51,24 @@ ACCEPTANCE CRITERIA (hard gates — both must pass)
   Rejection reasons: insufficient_reduction, low_similarity
 
 SUBMISSION
-Send assign-complete with:
-  - evidence_hash: SHA-256 of compressed content (hex, "sha256:" prefix)
-  - size_original: byte count of decoded original
-  - size_compressed: byte count of compressed output
-  - The compressed content itself (base64-encoded in payload)
+  dontguess assign claim <assign-id>
+  dontguess assign complete <claim-id> --content <base64-compressed> \
+      --description "%s" --token-cost <your compression spend>
 
-`, entryID, contentHash, contentType, bounty)
+Your work is ENCRYPTED before it leaves your process: the CLI publishes it as an
+ordinary put (CEK wrapped to the operator) and submits a completion that only
+REFERENCES that put. Never send compressed bytes inline — an assign-complete is
+a public event, and the operator refuses a plaintext submission outright.
 
-	return header + compressionStrategy(contentType)
+Pass --description through as shown so the compressed version answers the same
+queries as the original. You become the derivative's seller: you are credited
+for the put, you earn the bounty on accept, and you earn residuals every time
+the compressed version sells. If you are carrying deliver-on-credit debt, the
+bounty is withheld against it automatically until it clears.
+
+`, entry.EntryID, hashLabel, hashValue, entry.ContentType, entry.Description, bounty, entry.Description)
+
+	return header + compressionStrategy(entry.ContentType)
 }
 
 // compressionStrategy returns content-type-specific compression instructions.

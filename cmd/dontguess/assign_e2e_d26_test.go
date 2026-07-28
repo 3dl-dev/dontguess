@@ -537,6 +537,12 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 		"relay":      hub.wsURL(),
 		"content":    "cnVzdCBib3Jyb3cgY2hlY2tlciBjb21wcmVzc2VkIGNoZWF0c2hlZXQ=", // "rust borrow checker compressed cheatsheet"
 		"timeout":    "20s",
+		// This fixture's engine deliberately omits OperatorSigner (see the
+		// EngineOptions comment above), so it folds PLAINTEXT puts and has no
+		// envelope — the exact no-confidentiality case --inline-plaintext exists
+		// for. A confidential exchange refuses this shape (dontguess-7e21); the
+		// encrypted put-referenced path is covered by the pkg/exchange E2E.
+		"inline-plaintext": "true",
 	})
 	if err := runBounded(t, 45*time.Second, "`dontguess assign complete` publish + await relay OK (runAssignComplete)", func() error {
 		return runAssignComplete(completeC, []string{claimID})
