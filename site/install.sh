@@ -81,12 +81,23 @@ main() {
   [ -z "$DG_VER" ] && die "Could not find latest dontguess release"
   info "  Installing dontguess ${DG_VER}..."
   fetch_and_verify "$DG_REPO" "dontguess" "$LABEL" "$DG_VER" "$TMP"
-  cp "${TMP}/dontguess_${LABEL}/dontguess" "${INSTALL_DIR}/dontguess-operator"
-  chmod +x "${INSTALL_DIR}/dontguess-operator"
+  # Install by RENAME, never by overwrite (dontguess-53a8). cp writes in place,
+  # and Linux refuses that on a binary with a live mapping — a running
+  # `dontguess serve` made every upgrade die on "Text file busy" with the fetch
+  # already done and set -e aborting the rest, so the wrapper below never got
+  # written either. rename(2) is atomic and leaves the running process on its old
+  # inode, so an operator can be upgraded without being stopped first.
+  cp "${TMP}/dontguess_${LABEL}/dontguess" "${INSTALL_DIR}/dontguess-operator.new"
+  chmod +x "${INSTALL_DIR}/dontguess-operator.new"
+  mv -f "${INSTALL_DIR}/dontguess-operator.new" "${INSTALL_DIR}/dontguess-operator"
   success "  dontguess-operator ${DG_VER} → ${INSTALL_DIR}/dontguess-operator"
 
   # --- wrapper script ---
-  cat > "${INSTALL_DIR}/dontguess" <<'ENDWRAPPER'
+  # Also written by rename: `dontguess upgrade` executes THIS FILE, and sh reads a
+  # script incrementally, so truncating it in place can corrupt the very
+  # invocation doing the upgrade. Renaming leaves the running shell reading the
+  # old inode to completion.
+  cat > "${INSTALL_DIR}/dontguess.new" <<'ENDWRAPPER'
 #!/bin/sh
 # dontguess — turnkey wrapper (nostr-first)
 # Version is reported by `dontguess --version`; do not hardcode it here — it rots.
@@ -219,9 +230,33 @@ case "${1:-}" in
     "$DG_OP" version 2>/dev/null || true
     exit 0;;
   upgrade)
+    # Fetch the installer from the first source that answers (dontguess-53a8).
+    # This used to hit https://dontguess.ai/install.sh and nothing else, so an
+    # already-installed agent could not upgrade AT ALL whenever the site was
+    # unreachable — which is exactly what happened: the GitHub Pages custom
+    # domain came detached from the repo and every dontguess.ai URL 404'd, while
+    # the same file kept serving fine from Pages' default host. `upgrade` is a
+    # recovery path; it must not be able to fail because a *website* is down.
+    #
+    # The installer itself only needs GitHub's release API, so any source that
+    # yields the script is equivalent. Order is canonical-first, so the branded
+    # URL is still what is normally used.
     echo "Upgrading dontguess to the latest release..."
-    curl -fsSL https://dontguess.ai/install.sh | sh
-    exit 0;;
+    _dg_installer=""
+    for _dg_src in \
+      "https://dontguess.ai/install.sh" \
+      "https://3dl-dev.github.io/dontguess/install.sh" \
+      "https://raw.githubusercontent.com/3dl-dev/dontguess/main/site/install.sh"
+    do
+      if _dg_installer="$(curl -fsSL "$_dg_src" 2>/dev/null)" && [ -n "$_dg_installer" ]; then
+        [ "$_dg_src" = "https://dontguess.ai/install.sh" ] || echo "  (primary source unreachable; using $_dg_src)"
+        printf '%s\n' "$_dg_installer" | sh
+        exit 0
+      fi
+    done
+    echo "upgrade failed: could not fetch the installer from any known source." >&2
+    echo "Install manually from https://github.com/3dl-dev/dontguess/releases/latest" >&2
+    exit 1;;
   --help|-h|help|"")
     echo "dontguess — token-work exchange for AI agents (nostr-first)"
     echo ""
@@ -475,7 +510,8 @@ else
   exec "$DG_OP" "$@"
 fi
 ENDWRAPPER
-  chmod +x "${INSTALL_DIR}/dontguess"
+  chmod +x "${INSTALL_DIR}/dontguess.new"
+  mv -f "${INSTALL_DIR}/dontguess.new" "${INSTALL_DIR}/dontguess"
   success "  dontguess (wrapper) → ${INSTALL_DIR}/dontguess"
 
   # PATH
