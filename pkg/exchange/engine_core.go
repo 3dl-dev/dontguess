@@ -1770,6 +1770,41 @@ func (e *Engine) handleAssignAccept(msg *Message) error {
 			[]string{scrip.TagScripAssignPay}, []string{msg.ID}); emitErr != nil {
 			e.opts.log("engine: warning: emit scrip-assign-pay: %v", emitErr)
 		}
+
+		// AUTOMATIC REPAYMENT (dontguess-7e21). Labor is the borrower's way OUT of
+		// deliver-on-credit debt: a buyer short of scrip is served on credit
+		// (engine_credit.go), and compression work is what it does to clear the
+		// loan. That only closes if the bounty is actually applied to the debt.
+		//
+		// It was not. Before this, handleAssignAccept paid the full bounty with a
+		// bare AddBudget and never called repaymentAmount/applyRepayment —
+		// withholding was wired at exactly two sites (paySellerForBuyMiss,
+		// performScripSettlement) and assign-pay was neither. A borrower could
+		// claim, compress, be paid in full, and still owe every scrip. Nor was
+		// there an indirect route: createCompressionDerivative credits the
+		// derivative to orig.SellerKey, so residuals on the compressed version
+		// flow to the ORIGINAL seller, never to the compressor.
+		//
+		// This also makes the borrower-facing notification TRUE. deliverGuideFor
+		// (engine_settle.go) already tells every borrower "the bounty is credited
+		// to you and automatically withheld against this balance until it reaches
+		// zero — no separate repayment step". That statement shipped before the
+		// mechanism did; this is the mechanism.
+		//
+		// CONSERVATION: pay the FULL payAmount above, then let applyRepayment
+		// separately debit the claimant for the withheld slice — the invariant
+		// pkg/scrip/relay_store.go's applyLoanRepay documents (crediting a
+		// pre-reduced amount while the fold burns the withheld slice from
+		// totalSupply drifts TotalSupply below sum(balances)). Emitting the
+		// credit (scrip-assign-pay) before the debit (scrip-loan-repay) mirrors
+		// performScripSettlement's ordering. Best-effort/logged-only by design:
+		// a failure leaves the worker holding the full bounty and the debt is
+		// reconciled from the durable log on the next Replay.
+		if withheld := e.repaymentAmount(rec.ClaimantKey, payAmount); withheld > 0 {
+			e.applyRepayment(rec.ClaimantKey, withheld, msg.ID)
+			e.opts.log("engine: assign-accept: repayment withheld=%d of bounty=%d from worker=%s (deliver-on-credit debt)",
+				withheld, payAmount, shortKey(rec.ClaimantKey))
+		}
 	}
 
 	e.opts.log("engine: assign-accept: bounty paid assign_id=%s worker=%s amount=%d",
