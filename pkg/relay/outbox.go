@@ -147,6 +147,32 @@ func WithClimbFence(floor int64) OutboxOption {
 	return func(o *Outbox) { o.climbFence = floor }
 }
 
+// WithEgressFilter installs a CONTENT-INDEXED egress gate (dontguess-294).
+//
+// WithClimbFence alone is POSITION-indexed: it seeds the cursor past the
+// pre-climb corpus, which protects those records and nothing else. It assumed
+// every post-climb record would be a v2-encrypted team put — true in steady
+// state, false across the climb itself, when the operator is relay-attached (so
+// the Outbox is publishing) but has not yet armed encryptedRequired (so plaintext
+// puts still fold). Nine plaintext artifacts reached a production relay through
+// exactly that window on 2026-07-16 and are permanently public.
+//
+// The filter closes it by inspecting the PAYLOAD of every candidate, so a record
+// that inlines cleartext can never be published whatever its index. The watermark
+// remains a backfill optimisation; this is the security boundary.
+//
+// The predicate receives the WHOLE record, not just the payload, because scope
+// matters: an operator settle(deliver) legitimately inlines content — that IS the
+// delivery mechanism, and fencing it breaks the exchange. Only records that PUBLISH
+// INVENTORY (kind 3401 puts) are candidates. Gating on payload shape alone is too
+// broad and silently stops buyers receiving what they paid for.
+//
+// Returning true = fence it (never publish). A nil filter is exactly the prior
+// behaviour, so this is drop-in for callers that do not opt in.
+func WithEgressFilter(fence func(rec store.Record) bool) OutboxOption {
+	return func(o *Outbox) { o.egressFilter = fence }
+}
+
 // WithAliasRegistrar wires the wire→store id alias (dontguess-55c GAP 1,
 // docs/design/settle-wire-id-reconciliation-55c.md). register is invoked with the
 // SIGNED nostr event id (the content-hash WIRE id a relay buyer sees + e-tags) and
@@ -197,6 +223,11 @@ type Outbox struct {
 	// records stay LOCAL-ONLY (ADV-18, §6). See WithClimbFence. Applied once in
 	// NewOutbox; ignored on any restart where the sidecar already exists.
 	climbFence int64
+
+	// egressFilter, if set, is consulted for EVERY publish-candidate record
+	// regardless of its position relative to climbFence. Returning true means
+	// "this record must never leave the machine". See WithEgressFilter.
+	egressFilter func(rec store.Record) bool
 
 	lagAlarm int64 // publish_lag threshold for the loud alarm (0 = disabled)
 
@@ -319,6 +350,20 @@ func (o *Outbox) Tick(ctx context.Context) error {
 		}
 		if localIdx < o.cursor.Value() {
 			// Already published+ACKed in a prior pass (or prior process).
+			localIdx++
+			continue
+		}
+
+		// CONTENT-INDEXED EGRESS GATE (dontguess-294). Checked for every candidate,
+		// independent of the climb watermark. A fenced record is treated as handled:
+		// the cursor advances past it so it is not retried forever, but it is never
+		// signed and never published. Deliberately BEFORE toSignedEvent — a record
+		// that must not leave should not even be converted to a wire event.
+		if o.egressFilter != nil && o.egressFilter(rec) {
+			o.logf("outbox: egress-fence HELD record %s local-only — payload inlines cleartext content (ADV-18, dontguess-294)", rec.ID)
+			if err := o.cursor.Advance(); err != nil {
+				return fmt.Errorf("outbox: advance cursor past fenced record %s: %w", rec.ID, err)
+			}
 			localIdx++
 			continue
 		}

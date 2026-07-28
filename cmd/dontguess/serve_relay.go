@@ -90,10 +90,11 @@ type relayWiring struct {
 type relayWiringOption func(*relayWiringConfig)
 
 type relayWiringConfig struct {
-	intakeCursorPath string
-	climbWatermark   int64
-	rosterFolder     *rosterFolder
-	redeemHandler    *redeemHandler
+	intakeCursorPath     string
+	climbWatermark       int64
+	plaintextEgressFence bool
+	rosterFolder         *rosterFolder
+	redeemHandler        *redeemHandler
 	// legPublisherSink, when set, is invoked by attachRelayTransport with the
 	// leg's demuxPublisher (dontguess-113) so the caller can capture the publish
 	// surface for out-of-band operator events — the roster republish the live
@@ -147,6 +148,17 @@ func WithLegPublisherSink(sink func(*demuxPublisher)) relayWiringOption {
 // whole log, exactly as before.
 func WithClimbWatermark(watermark int64) relayWiringOption {
 	return func(c *relayWiringConfig) { c.climbWatermark = watermark }
+}
+
+// WithPlaintextEgressFence installs the CONTENT-INDEXED egress gate
+// (dontguess-294): a put whose payload inlines cleartext is never published,
+// wherever it sits in the log.
+//
+// Opt-in rather than always-on so the climb-fence tests can still build an
+// un-fenced twin and prove the POSITION fence is load-bearing on its own. The
+// serve path always passes it; nothing else should need to.
+func WithPlaintextEgressFence() relayWiringOption {
+	return func(c *relayWiringConfig) { c.plaintextEgressFence = true }
 }
 
 // WithIntakeCursorPath wires the durable per-relay Intake cursor sidecar
@@ -278,13 +290,24 @@ func buildRelayWiring(
 	// dedups in the concurrent Intake subscriber. WIRE→STORE ALIAS (dontguess-55c
 	// GAP 1) is registered at the SAME pre-publish seam so a team-tier buyer's
 	// settle antecedent (which carries the wire id) resolves to the store id.
-	outbox, err := relay.NewOutbox(ls, signer, pub, cursorPath,
+	outboxOpts := []relay.OutboxOption{
 		relay.WithEmittedSeeder(func(id string) { seq.MarkEmitted(id) }),
 		relay.WithAliasRegistrar(aliasRegistrar),
 		// CLIMB EGRESS FENCE (ADV-18, §6 + §9 Gate A/P4): fence the pre-climb
 		// plaintext corpus local-only. No-op (0) unless WithClimbWatermark was
 		// threaded (serve.go's relay-attach path) AND this leg's cursor is fresh.
-		relay.WithClimbFence(cfg.climbWatermark))
+		relay.WithClimbFence(cfg.climbWatermark),
+	}
+	if cfg.plaintextEgressFence {
+		// CONTENT-INDEXED egress gate (dontguess-294). The climb watermark above is
+		// POSITION-indexed and protects only the pre-climb corpus; this inspects the
+		// payload of every candidate PUT, so inventory inlining cleartext can never
+		// be published whatever its index. Scoped to puts because an operator
+		// settle(deliver) also inlines content — that is how a buyer receives what
+		// it paid for, and fencing it stalls every team-tier settle.
+		outboxOpts = append(outboxOpts, relay.WithEgressFilter(fenceInventoryPlaintextEgress))
+	}
+	outbox, err := relay.NewOutbox(ls, signer, pub, cursorPath, outboxOpts...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("relay wiring: outbox: %w", err)
 	}
@@ -592,6 +615,30 @@ func establishClimbWatermark(path string, ls *dgstore.Store) (int64, error) {
 // decode is treated as content-bearing (fenced), favouring no-leak over backfill —
 // though in a healthy log every operator record is valid JSON (the Outbox re-signs
 // each one to publish), so this branch is not reached in practice.
+// fenceInventoryPlaintextEgress is the live egress gate (dontguess-294): a PUT
+// that inlines cleartext must never leave the machine, wherever it sits in the log.
+//
+// SCOPED TO PUTS DELIBERATELY. An operator settle(deliver) also inlines content —
+// that is how a buyer receives what it paid for — so gating on payload shape alone
+// blocks delivery and breaks the exchange (it did: it stalled every team-tier
+// settle in the suite). Inventory publication is what leaked on 2026-07-16 and is
+// what this fences; a plaintext deliver is a separate concern, enforced upstream by
+// applyPut's encryptedRequired guard which never lets plaintext inventory fold on a
+// relay-attached operator in the first place.
+func fenceInventoryPlaintextEgress(rec dgstore.Record) bool {
+	isPut := false
+	for _, t := range rec.Tags {
+		if t == exchange.TagPut {
+			isPut = true
+			break
+		}
+	}
+	if !isPut {
+		return false
+	}
+	return recordCarriesInlinePlaintextContent(rec.Payload)
+}
+
 func recordCarriesInlinePlaintextContent(payload []byte) bool {
 	var p struct {
 		V       int             `json:"v"`
@@ -1252,6 +1299,11 @@ func attachRelayTransport(
 			wcfg.legPublisherSink(pub)
 		}
 	}
+	// The live serve path ALWAYS installs the content-indexed egress fence
+	// (dontguess-294). Appended here rather than made the default inside
+	// buildRelayWiring so the climb-fence tests can still construct an un-fenced
+	// twin and prove the POSITION fence is load-bearing on its own.
+	opts = append(opts, WithPlaintextEgressFence())
 	wiring, watermark, err := buildRelayWiring(ls, signer, operatorKeyHex, cursorPath, pub, 0, nil, aliasRegistrar, opts...)
 	if err != nil {
 		return nil, err
