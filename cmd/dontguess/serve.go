@@ -55,6 +55,10 @@ var (
 	// re-arm it (e.g. --min-buy-balance 1) when opening to federation/public, where
 	// anonymous keys reappear. The engine no-ops it anyway when <=0 or ScripStore==nil.
 	serveMinBuyBalance int64
+
+	// serveNoOpenAdmission opts OUT of on-demand admission (dontguess-f6d),
+	// restoring the manual `dontguess allowlist add` gate for every new agent.
+	serveNoOpenAdmission bool
 	// serveLocal is a retained no-op alias flag (dontguess-b14): the default
 	// serve path is already campfire-free/local, so --local changes nothing.
 	serveLocal bool
@@ -125,6 +129,7 @@ func init() {
 	serveCmd.Flags().BoolVar(&serveLocal, "local", false, "no-op alias: serve is always campfire-free/local (retained for backward compatibility)")
 	serveCmd.Flags().DurationVar(&serveMediumLoopInterval, "medium-loop-interval", pricing.DefaultMediumLoopInterval, "how often the pricing medium loop scans inventory and posts open compression assigns for high-demand uncompressed entries")
 	serveCmd.Flags().DurationVar(&serveAssignAcceptInterval, "assign-accept-interval", DefaultAssignAcceptInterval, "how often the operator validates and pays (or rejects) completed compression assigns (auto-accept-assign ticker)")
+	serveCmd.Flags().BoolVar(&serveNoOpenAdmission, "no-open-admission", false, "require a manual `dontguess allowlist add` before a new agent may put or settle. Default OFF: at fleet tier every key is the operator's own, so the allowlist refuses your own agents and buys nothing (dontguess-f6d). Open admission never applies at federation, never grants operator authority, and never overrides a reputation floor or a for-cause revocation")
 	serveCmd.Flags().Int64Var(&serveMinBuyBalance, "min-buy-balance", 0, "D1 anonymous-buy signal bound: minimum scrip a buyer must hold before its buy folds into matching/demand/pricing. 0 = OFF (fleet default — allowlist is the primitive; lets cold buys form bounties to warm the cache). Arm it (e.g. 1) for federation/public where anonymous keys reappear")
 	rootCmd.AddCommand(serveCmd)
 }
@@ -652,6 +657,14 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 	// the next hourly tick.
 	mediumLoopReady := make(chan struct{})
 
+	// Open admission needs the allowlistController, which is built below (it needs
+	// the engine). One level of indirection lets the engine hold a stable hook now
+	// and have it become live once the controller exists — the same shape the
+	// controller's own onRevoke/onReadmit hooks use in the other direction.
+	var persistAdmission func(hexKey string) error
+
+	openAdmission := !serveNoOpenAdmission
+
 	eng := exchange.NewEngine(exchange.EngineOptions{
 		CampfireID:        "local",
 		LocalStore:        localStore,
@@ -670,7 +683,20 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 		// never moves. Individual tier (scripStore == nil) leaves it false — and
 		// handleSettleBuyerAcceptScrip never runs there anyway.
 		AutoDeliverOnBuyerAccept: scripStore != nil,
-		OnStarted:                func() { close(mediumLoopReady) },
+		// OPEN ADMISSION (dontguess-f6d): admit an unknown sender on demand rather
+		// than dropping its work `not-allowlisted`. At fleet tier every key is the
+		// operator's own — 47 distinct agent keys had real puts dropped before this.
+		// Fenced in engine_admission.go: never at federation, never for
+		// operator-level operations, never over a reputation floor or a for-cause
+		// revocation.
+		OpenAdmission: openAdmission,
+		AdmitMember: func(hexKey string) error {
+			if persistAdmission == nil {
+				return fmt.Errorf("admission persistence not wired yet")
+			}
+			return persistAdmission(hexKey)
+		},
+		OnStarted: func() { close(mediumLoopReady) },
 		Logger: func(format string, args ...any) {
 			logger.Printf(format, args...)
 		},
@@ -803,6 +829,13 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 		// clears it + re-indexes the retained inventory.
 		onRevoke:  func(sellerHex string) { eng.DeAllowlistSeller(sellerHex) },
 		onReadmit: eng.ReAllowlistSeller,
+	}
+	// Make on-demand admissions durable: same config write + operator-signed roster
+	// republish `dontguess allowlist add` performs, minus the signature check that
+	// authenticates an EXTERNAL caller — this call originates in the operator's own
+	// engine, so there is no counterparty to authenticate (see applyAuthorized).
+	persistAdmission = func(hexKey string) error {
+		return allowCtrl.applyAuthorized(allowlistActionAdd, hexKey)
 	}
 
 	socketCleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger, allowCtrl)

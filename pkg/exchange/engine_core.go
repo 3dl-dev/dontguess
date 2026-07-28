@@ -225,6 +225,19 @@ type EngineOptions struct {
 	// warning is emitted if this is false.
 	FederationGuardEnabled bool
 
+	// OpenAdmission admits an unknown sender on demand instead of refusing it,
+	// for operations that require TrustAllowlisted (never TrustOperator). See
+	// engine_admission.go for the full scope fence and the rationale — in short,
+	// at fleet tier the allowlist refuses the operator's own agents and buys
+	// nothing, which is the same reasoning that made deliver-on-credit serve a
+	// broke buyer rather than turn it away. Ignored when FederationGuardEnabled.
+	OpenAdmission bool
+
+	// AdmitMember durably records an on-demand admission (roster + config), so it
+	// survives a restart. Optional: without it admission is live-only and the
+	// engine logs loudly that it will not persist.
+	AdmitMember func(hexKey string) error
+
 	// MinBuyBalance is the anonymous-buy demand-signal bound (design §8-D1,
 	// dontguess-3879). OperationBuy stays TrustAnonymous (ratified): a buy folds
 	// into the matching / demand / pricing pipeline BEFORE settlement, and the
@@ -530,6 +543,9 @@ type DegradationMetrics struct {
 	// blocked from further sell-side operations independent of allowlist
 	// membership.
 	TrustDenialLowReputation atomic.Int64
+
+	// OpenAdmissionGranted counts senders admitted on demand (dontguess-f6d).
+	OpenAdmissionGranted atomic.Int64
 	// TrustDenialOther counts trust-gate rejections that don't fit the above
 	// buckets (e.g. RequiredLevel returning an unknown-op/unknown-phase error).
 	// Present so a future new rejection class is still counted, never dropped
@@ -645,6 +661,7 @@ type DegradationCounts struct {
 	TrustDenialNotOperator    int64 `json:"trust_denial_not_operator"`
 	TrustDenialLowReputation  int64 `json:"trust_denial_low_reputation"`
 	TrustDenialOther          int64 `json:"trust_denial_other"`
+	OpenAdmissionGranted      int64 `json:"open_admission_granted"`
 	DroppedUnlisted           int64 `json:"dropped_unlisted"`
 	DroppedLowReputation      int64 `json:"dropped_low_reputation"`
 	DroppedDedupPoison        int64 `json:"dropped_dedup_poison"`
@@ -899,6 +916,7 @@ func (e *Engine) DegradationSnapshot() DegradationCounts {
 		TrustDenialNotAllowlisted: e.degradation.TrustDenialNotAllowlisted.Load(),
 		TrustDenialNotOperator:    e.degradation.TrustDenialNotOperator.Load(),
 		TrustDenialLowReputation:  e.degradation.TrustDenialLowReputation.Load(),
+		OpenAdmissionGranted:      e.degradation.OpenAdmissionGranted.Load(),
 		TrustDenialOther:          e.degradation.TrustDenialOther.Load(),
 		DroppedUnlisted:           e.degradation.DroppedUnlisted.Load(),
 		DroppedLowReputation:      e.degradation.DroppedLowReputation.Load(),
@@ -1437,7 +1455,20 @@ func (e *Engine) dispatch(msg *Message) error {
 		}
 		trustOp := tagToTrustOp(op)
 		if trustOp != "" {
-			if err := e.opts.TrustChecker.Check(msg.Sender, trustOp, phase); err != nil {
+			err := e.opts.TrustChecker.Check(msg.Sender, trustOp, phase)
+			if err != nil {
+				// OPEN ADMISSION (dontguess-f6d). At fleet tier an unknown sender is
+				// one of the operator's own agents that has not been hand-added yet,
+				// so admit it and re-check rather than refusing work the operator
+				// wanted done. Every fence (federation, operator-level ops,
+				// reputation, revocation) lives in tryOpenAdmit; the re-check below
+				// is what actually authorizes, so a refused or partial admission
+				// falls straight through to the ordinary rejection path.
+				if outcome := e.tryOpenAdmit(msg.Sender, trustOp, phase, err); outcome == admissionGranted {
+					err = e.opts.TrustChecker.Check(msg.Sender, trustOp, phase)
+				}
+			}
+			if err != nil {
 				reason := e.recordTrustDenial(trustOp, phase, err)
 				e.opts.log("engine: trust rejected msg=%s op=%s sender=%s reason=%s: %v",
 					msg.ID, op, shortKey(msg.Sender), reason, err)

@@ -99,6 +99,31 @@ func (c *allowlistController) apply(action, targetHex string, auth *identity.Eve
 	if err := verifyAllowlistAuth(auth, c.operatorKeyHex, action, targetHex); err != nil {
 		return err
 	}
+	return c.applyAuthorized(action, targetHex)
+}
+
+// applyAuthorized performs the membership mutation AFTER authorization has been
+// established, and is the shared body behind two callers with different ways of
+// being authorized:
+//
+//	apply()             — an external caller over the operator socket, which must
+//	                      prove possession of the operator key for this exact
+//	                      action+target (ADV-16). That proof happens above.
+//	Engine open admission — the operator's OWN engine, in-process (dontguess-f6d).
+//	                      There is no signature to verify because there is no
+//	                      caller to authenticate: this IS the operator.
+//
+// Splitting here keeps the signature check on exactly the path that needs it. It
+// must never be called from a path that has not established authority.
+func (c *allowlistController) applyAuthorized(action, targetHex string) error {
+	action = strings.ToLower(strings.TrimSpace(action))
+	targetHex = strings.ToLower(strings.TrimSpace(targetHex))
+	if targetHex == "" {
+		return fmt.Errorf("allowlist: empty target key")
+	}
+	if action != allowlistActionAdd && action != allowlistActionRemove {
+		return fmt.Errorf("allowlist: unknown action %q (want add|remove)", action)
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

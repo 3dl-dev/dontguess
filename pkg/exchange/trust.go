@@ -462,6 +462,23 @@ func (c *TrustChecker) SetReputationFloor(source func(key string) int, min int) 
 	c.minReputation = min
 }
 
+// AdmitMember adds a key to the live fleet allowlist when the underlying
+// Membership is a mutable *KeySet — the inverse of RemoveMember, and the seam
+// open admission uses (dontguess-f6d). No-op for an immutable Membership and for
+// the operator key (operator authority comes from operatorKey, not membership).
+// A previously-revoked seller is NOT silently un-revoked here: revocation is a
+// for-cause tombstone and clearing it is an explicit operator act (UnrevokeMember).
+// Safe for concurrent use. Persistence is the caller's job, exactly as with
+// RevokeMember.
+func (c *TrustChecker) AdmitMember(key string) {
+	if key == "" || (c.operatorKey != "" && key == c.operatorKey) {
+		return
+	}
+	if ks, ok := c.members.(*KeySet); ok {
+		ks.Add(key)
+	}
+}
+
 // RemoveMember revokes a key from the live fleet allowlist when the underlying
 // Membership is a mutable *KeySet (runtime de-allowlisting, dontguess-d53 Seam
 // C). It is a no-op for an immutable Membership (e.g. *identity.Allowlist) and
