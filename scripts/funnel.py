@@ -15,6 +15,16 @@ Deliberate choices, do not "simplify" these away:
     it in roughly doubles the apparent buy count and makes the hit rate meaningless.
   * "assign completions" reads as 0 because no completion event kind is emitted;
     treat a nonzero here as the signal that compression labor finally moved.
+
+THE TWO NUMBERS THAT DECIDE WHETHER THE FLYWHEEL TURNS, as of 2026-07-28:
+  1. LOANS repay > 0  — borrowers earning their way out of debt. 15 loans are
+     minted and 0 repaid; repayment comes from compression labour.
+  2. compression completions > 0 — the only ORGANIC source of scrip (everything
+     else is operator hand-mints). Still 0 of 44 ever.
+If loans keep minting and neither moves, the next fix is NOT another price change.
+The bounty has now been repriced three times without a single agent ever taking an
+assign — that points at an observation problem (why is it declined?) rather than an
+economics one.
 """
 import argparse
 import base64
@@ -36,6 +46,9 @@ NOISE = re.compile(
 MARKERS = [
     ("2026-07-27 17:19", "v0.9.0 two-unit pricing"),
     ("2026-07-27 18:47", "v0.9.1 credit rail"),
+    ("2026-07-27 19:52", "v0.9.2 corrected net-benefit math"),
+    ("2026-07-27 22:58", "v0.9.3 delegated admission"),
+    ("2026-07-28 00:37", "v0.9.4 egress fence + compression tiers"),
 ]
 
 
@@ -82,7 +95,13 @@ def report(ev, label):
             if has(e, "dontguess:" + t):
                 loans[t] += 1
 
-    conv = 100.0 * len(delivers) / len(accepts) if accepts else 0.0
+    # Conversion must compare like with like. A delivery inside a window can settle
+    # an accept from BEFORE it, which made windowed views report >100% (observed:
+    # 767%). Count only deliveries whose accept also falls in the window.
+    accepted_ids = {e["p"].get("entry_id") for e in accepts if isinstance(e["p"], dict)}
+    matched = [e for e in delivers
+               if isinstance(e["p"], dict) and e["p"].get("entry_id") in accepted_ids]
+    conv = 100.0 * len(matched) / len(accepts) if accepts else 0.0
     reject_reasons = collections.Counter(
         e["p"].get("reason", "?") for e in rejects if isinstance(e["p"], dict)
     )
@@ -93,8 +112,8 @@ def report(ev, label):
     print(f"  buys   real/raw       {len(real_buys)}/{len(buys)}")
     print(f"  buyer-accept          {len(accepts)}")
     print(f"  buyer-accept-reject   {len(rejects)}   {dict(reject_reasons) or ''}")
-    print(f"  deliver               {len(delivers)}")
-    print(f"  ACCEPT->DELIVER       {conv:.0f}%        <- headline conversion")
+    print(f"  deliver               {len(delivers)}  ({len(matched)} settling an accept in this window)")
+    print(f"  ACCEPT->DELIVER       {conv:.0f}%        <- headline conversion (in-window pairs only)")
     print(f"  compression assigns   {len(assigns)} issued")
     print(f"  LOANS mint/repay/vig  {loans['scrip-loan-mint']}/"
           f"{loans['scrip-loan-repay']}/{loans['scrip-loan-vig-accrue']}"
