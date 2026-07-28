@@ -25,7 +25,9 @@ func TestAutoAcceptPut_TriggersCompressionAssign(t *testing.T) {
 	eng := h.newEngine()
 
 	const tokenCost int64 = 20000
-	const wantBounty int64 = tokenCost / 2
+	// Hot pays 300% (dontguess-d5d): the seller already holds the content, so it
+	// pays only to GENERATE — identical labour to warm, hence identical pay.
+	const wantBounty int64 = tokenCost * exchange.HotCompressionBountyPct / 100
 
 	contentHash := "sha256:" + fmt.Sprintf("%064x", 42)
 
@@ -90,7 +92,7 @@ func TestAutoAcceptPut_TriggersCompressionAssign(t *testing.T) {
 
 	// Bounty must be 50% of token_cost.
 	if payload.Reward != wantBounty {
-		t.Errorf("reward = %d, want %d (50%% of token_cost %d)", payload.Reward, wantBounty, tokenCost)
+		t.Errorf("reward = %d, want %d (%d%%%% of token_cost %d)", payload.Reward, wantBounty, exchange.HotCompressionBountyPct, tokenCost)
 	}
 
 	// entry_id must reference the put message.
@@ -134,7 +136,7 @@ func TestAutoAcceptPut_CompressionAssignOddTokenCost(t *testing.T) {
 	eng := h.newEngine()
 
 	const tokenCost int64 = 10001
-	const wantBounty int64 = tokenCost / 2 // integer division: 5000
+	const wantBounty int64 = tokenCost * exchange.HotCompressionBountyPct / 100 // integer division
 
 	putMsg := h.sendMessage(h.seller,
 		putPayload("odd cost entry", "sha256:"+fmt.Sprintf("%064x", 99), "analysis", tokenCost, 4096),
@@ -435,7 +437,7 @@ func TestHotAndWarmCompressionAssign_Coexistence(t *testing.T) {
 
 	// Assert bounty amounts are correct.
 	if hotAssign.reward != wantHotBounty {
-		t.Errorf("hot assign reward = %d, want %d (50%% of token_cost %d)", hotAssign.reward, wantHotBounty, tokenCost)
+		t.Errorf("hot assign reward = %d, want %d (%d%%%% of token_cost %d)", hotAssign.reward, wantHotBounty, exchange.HotCompressionBountyPct, tokenCost)
 	}
 	if warmAssign.reward != wantWarmBounty {
 		t.Errorf("warm assign reward = %d, want %d (30%% of token_cost %d)", warmAssign.reward, wantWarmBounty, tokenCost)

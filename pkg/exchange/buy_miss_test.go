@@ -1205,7 +1205,7 @@ func TestBuyMiss_AutoAcceptEmitsCompressionAssign(t *testing.T) {
 	if ap.ExclusiveSender != h.seller.PublicKeyHex() {
 		t.Errorf("compression assign exclusive_sender = %q, want seller %q", ap.ExclusiveSender, h.seller.PublicKeyHex())
 	}
-	wantBounty := tokenCost / 2
+	wantBounty := tokenCost * exchange.HotCompressionBountyPct / 100
 	if ap.Reward != wantBounty {
 		t.Errorf("compression assign reward = %d, want %d (50%% of token_cost)", ap.Reward, wantBounty)
 	}

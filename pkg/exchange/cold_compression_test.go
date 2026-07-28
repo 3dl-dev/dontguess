@@ -4,7 +4,7 @@ package exchange_test
 //
 // These verify Engine.PostOpenCompressionAssign — the public entry point that
 // the medium loop's PostAssign callback targets. The method posts a non-exclusive
-// compression assign at ColdCompressionBountyPct (20%) bounty.
+// compression assign at ColdCompressionBountyPct (500%) bounty — the dearest tier.
 
 import (
 	"encoding/json"
@@ -16,7 +16,7 @@ import (
 )
 
 // TestPostOpenCompressionAssign_PostsColdAssign verifies that
-// PostOpenCompressionAssign posts a non-exclusive compression assign at 20%
+// PostOpenCompressionAssign posts a non-exclusive compression assign at 500%
 // bounty for an accepted inventory entry with no active assign.
 //
 // dontguess-20e: the entry is seeded WITHOUT a hot assign (put-accept folded
@@ -74,7 +74,7 @@ func TestPostOpenCompressionAssign_PostsColdAssign(t *testing.T) {
 }
 
 // TestPostOpenCompressionAssign_BountyTiers verifies a cold assign carries the
-// ColdCompressionBountyPct (20%) bounty and that cold is the cheapest tier
+// ColdCompressionBountyPct (500%) bounty and that cold is the DEAREST tier
 // (dontguess-29b: warm is no longer the "middle" tier — it is now priced at
 // OUTPUT rates, ~10x hot/cold, because a warm compressor pays zero read cost
 // and compression is OUTPUT-token labor; see WarmCompressionBountyPct's doc
@@ -117,14 +117,27 @@ func TestPostOpenCompressionAssign_BountyTiers(t *testing.T) {
 			ap.Reward, coldBounty, exchange.ColdCompressionBountyPct, tokenCost)
 	}
 
-	// Tier ordering (the rate constants themselves): cold is the floor — both
-	// hot and warm must exceed it. (dontguess-29b: warm > hot now, since warm
-	// is priced at OUTPUT rates; that is not asserted here, only that cold is
-	// cheapest — see TestPostOpenCompressionAssign_BountyTiers doc comment.)
-	if !(exchange.ColdCompressionBountyPct < exchange.HotCompressionBountyPct &&
-		exchange.ColdCompressionBountyPct < exchange.WarmCompressionBountyPct) {
-		t.Errorf("compression bounty tiers not strictly ordered: cold=%d warm=%d hot=%d (want cold < hot and cold < warm)",
+	// TIER ORDERING — INVERTED by dontguess-d5d. Cold is now the DEAREST tier.
+	//
+	// All three are priced on one output-rate basis, and the only thing that
+	// differs is whether the assignee must READ the entry before compressing.
+	// Hot goes to the original seller right after its put, warm to the buyer that
+	// just consumed it — both already hold the content and pay only to GENERATE,
+	// so their labour and pay are identical. Cold goes to any agent, which must
+	// fetch and read the whole entry first; that read is real cost the cached
+	// tiers do not bear.
+	//
+	// The old constants (Hot 50, Warm 300, Cold 20) ordered by URGENCY, which is
+	// not what a compressor pays for, and left hot and cold ~4-8x underwater —
+	// which is why 0 of 44 assigns were ever completed.
+	if exchange.ColdCompressionBountyPct <= exchange.HotCompressionBountyPct ||
+		exchange.ColdCompressionBountyPct <= exchange.WarmCompressionBountyPct {
+		t.Errorf("cold=%d is not the dearest tier (warm=%d hot=%d) — a cold assignee must READ the entry first, so its labour costs strictly more",
 			exchange.ColdCompressionBountyPct, exchange.WarmCompressionBountyPct, exchange.HotCompressionBountyPct)
+	}
+	if exchange.HotCompressionBountyPct != exchange.WarmCompressionBountyPct {
+		t.Errorf("hot=%d != warm=%d — both assignees already hold the content, so their labour is identical and their pay must be too",
+			exchange.HotCompressionBountyPct, exchange.WarmCompressionBountyPct)
 	}
 }
 

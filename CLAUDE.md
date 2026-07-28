@@ -93,8 +93,12 @@ non-zero constants in the same change — never one without the other. A cap can
 **Compression is paid at OUTPUT rates.** `WarmCompressionBountyPct` is 300 (not 30): generating a
 compressed artifact costs output tokens, and at the old scalar rate a compressor was ~4-8x underwater,
 which is why 0 of 44 assigns were ever completed. This lands near 130% of the entry's `token_cost`,
-which is CORRECT under two units — do not "fix" it back down. NOTE Hot (50) and Cold (20) were NOT
-raised and are still on the old basis; that inconsistency is tracked in dontguess-d5d.
+which is CORRECT under two units — do not "fix" it back down. All three tiers now share that basis
+(dontguess-d5d): Hot = Warm = 300 because both assignees ALREADY HOLD the content and pay only to
+GENERATE, and Cold = 500 because a cold assignee is any agent and must FETCH AND READ the entry
+first. That INVERTS the old order (Hot 50 / Cold 20), which ranked tiers by urgency — not what a
+compressor actually pays for, and why hot and cold stayed ~4-8x underwater while 0 of 44 assigns
+completed.
 
 **What upgrading changes, and what it does not.** `computePrice` is evaluated at match and index time, so the moment a new binary runs, EVERY existing entry is quoted at the new, lower delivery price — roughly 4-5x cheaper. That is immediate and is not gated behind anything. What is NOT changed is the entries' *declared* `token_cost` values, which were recorded before this definition existed; reinterpreting those (and emitting the auditable, reversible repricing events for them) is a separate migration tracked in dontguess-b2b.
 

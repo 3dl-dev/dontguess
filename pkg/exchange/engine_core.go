@@ -29,7 +29,26 @@ const ResidualRate = 10
 
 // HotCompressionBountyPct is the percentage of token_cost paid as bounty for
 // hot compression (immediately after put). 50% = 1/2.
-const HotCompressionBountyPct = 50
+// DERIVATION (dontguess-d5d, 2026-07-27). All three tiers are now priced on the
+// SAME output-rate basis, and the per-tier difference reflects the compressor's
+// actual token cost rather than urgency.
+//
+// Compression is OUTPUT-token labour: the compressor GENERATES a compressed
+// artifact, and generated tokens cost ~5x read tokens across every model tier.
+// Warm was derived at 300 in dontguess-29b on exactly that basis (~2x break-even,
+// because labour priced AT cost is labour nobody does — the 0-of-44 completion
+// rate). Hot and Cold were left on the pre-ruling scalar basis and were therefore
+// still ~4-8x underwater.
+//
+// HOT == WARM (300): both assignees ALREADY HOLD the content — hot goes to the
+// original seller right after its put, warm to the buyer that just consumed it —
+// so both pay only to GENERATE. Their labour is identical, so their pay is.
+//
+// COLD > BOTH (500): a cold assignee is any agent, and must FETCH AND READ the
+// whole entry before it can compress anything. That read is real cost the cached
+// tiers do not bear. THIS INVERTS THE OLD ORDER, which paid Hot 50 and Cold 20 on
+// an urgency argument — urgency is not what the compressor pays for.
+const HotCompressionBountyPct = 300
 
 // WarmCompressionBountyPct is the percentage of token_cost paid as bounty for
 // warm compression (buyer-initiated, content in cache). 300% = 3x token_cost
@@ -55,7 +74,7 @@ const WarmCompressionBountyPct = 300
 // Lower than hot/warm because there is no urgency — the entry is aging
 // inventory that the exchange wants compressed proactively, and (unlike warm)
 // the cold poster has no content already in context to discount the labor.
-const ColdCompressionBountyPct = 20
+const ColdCompressionBountyPct = 500
 
 // ReservationExpiryDuration is the time window during which a buyer-accept
 // reservation is valid. After expiry, the scrip hold is released.
