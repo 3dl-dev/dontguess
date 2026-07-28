@@ -77,12 +77,26 @@ func newEd2cFixtureSellerOnlyAllowlist(t *testing.T) *ed2cFixture {
 	return &ed2cFixture{st: st, hub: hub, seller: seller, operator: operator, ls: ls}
 }
 
-// TestEd2C_RunBuy_MintedButNotAllowlistedBuyer_SettleGoesAmbiguous_GuidanceEnumeratesAllowlist
-// is the dontguess-980 ground-source proof. It does NOT mock the trust gate,
-// the engine, or the relay wire — it reproduces the exact silent-drop path
-// that a minted-but-unallowlisted buyer hits in production, then checks the
-// printed guidance names the real fix.
-func TestEd2C_RunBuy_MintedButNotAllowlistedBuyer_SettleGoesAmbiguous_GuidanceEnumeratesAllowlist(t *testing.T) {
+// TestEd2C_RunBuy_MintedButNotAllowlistedBuyer_SettleIsRefused_NotAmbiguous is the
+// dontguess-980 ground-source proof, RE-BASED on dontguess-c0a. It does NOT mock
+// the trust gate, the engine, or the relay wire — it drives the exact path a
+// minted-but-unallowlisted buyer hits in production.
+//
+// SUPERSEDED EXPECTATION, recorded so it is not reintroduced: this test used to
+// require the outcome to be AMBIGUOUS, and asserted only that the timeout's
+// printed guidance mentioned allowlisting. That enshrined the silent drop as the
+// contract. dontguess-980 could not do better at the time — the engine dropped a
+// blocked buyer-accept pre-fold and emitted nothing — so it improved the wording
+// of the timeout instead of removing the timeout.
+//
+// The engine now emits a settle(buyer-accept-reject) with reason=not-allowlisted
+// when the trust gate blocks a buyer-accept, exactly as dontguess-39d already did
+// for a blocked put. So the correct expectation is a RECEIVED refusal, and a
+// timeout here is now a regression. The ambiguous-outcome guidance still names
+// allowlisting and is still asserted below: a genuine timeout can still happen for
+// other reasons (notably an unallowlisted SELLER, whose reject goes to the seller),
+// and that hint remains right for those.
+func TestEd2C_RunBuy_MintedButNotAllowlistedBuyer_SettleIsRefused_NotAmbiguous(t *testing.T) {
 	fx := newEd2cFixtureSellerOnlyAllowlist(t)
 	buyer, _ := newBuyerAgent(t)
 	// Minted (funded) — but never allowlisted. This is the exact gap: minting
@@ -125,33 +139,51 @@ func TestEd2C_RunBuy_MintedButNotAllowlistedBuyer_SettleGoesAmbiguous_GuidanceEn
 		t.Fatalf("Settle returned nil result")
 	}
 	// (2) buyer-accept requires TrustAllowlisted (defaultSettlePhaseLevels,
-	// trust.go) — the dispatch trust gate silently drops it pre-fold
-	// (engine_core.go dispatch: TrustChecker.Check fails -> return nil, no
-	// fold, no settle(buyer-accept-reject) emitted either — this is NOT the
-	// insufficient-scrip path, it never reaches the engine at all). The
-	// client's per-phase await on #e:[buyer-accept] therefore times out.
-	if res.Outcome != relayclient.SettleOutcomeAmbiguous {
-		t.Fatalf("settle outcome = %s, want ambiguous-timeout (buyer-accept should be silently dropped at the trust gate)", res.Outcome)
+	// trust.go). The dispatch trust gate blocks it pre-fold, and now emits a
+	// settle(buyer-accept-reject) carrying reason=not-allowlisted so the client's
+	// per-phase await on #e:[buyer-accept] RECEIVES a refusal instead of running
+	// out the clock (dontguess-c0a).
+	if res.Outcome == relayclient.SettleOutcomeAmbiguous {
+		t.Fatalf("settle outcome = ambiguous-timeout — the blocked buyer-accept was dropped silently again; an unadmitted buyer cannot tell refusal from a slow operator (dontguess-c0a regression)")
+	}
+	if res.Outcome != relayclient.SettleOutcomeNotAdmitted {
+		t.Fatalf("settle outcome = %s, want not-allowlisted-reject", res.Outcome)
+	}
+	// It must NOT be reported as underfunded: the buyer is fully minted, and
+	// sending it to mint more is the wrong remedy.
+	if res.Outcome == relayclient.SettleOutcomeUnderfunded {
+		t.Fatalf("a fully minted, unadmitted buyer was told it is underfunded")
+	}
+	if res.RejectReason != exchange.BuyerAcceptRejectNotAllowlisted {
+		t.Fatalf("reject reason = %q, want %q", res.RejectReason, exchange.BuyerAcceptRejectNotAllowlisted)
 	}
 	// No scrip should have moved — the hold handler in the engine never ran.
 	if got := fx.st.scrip.Balance(buyer.PubKeyHex()); got != wireIDBuyerMint {
 		t.Fatalf("buyer balance after ambiguous settle = %d, want unchanged %d (no fold occurred)", got, wireIDBuyerMint)
 	}
 
-	// (3) settle.go's WriteSettleOutcome (dontguess-980 fix) must enumerate
-	// buyer-allowlist status as a cause of an AMBIGUOUS outcome, mirroring
-	// buy.go's ambiguousResult() enumerated-causes pattern, and must name the
-	// actionable operator command.
+	// (3) The printed block names the refusal for what it is and points at
+	// admission — never at minting.
 	var out bytes.Buffer
 	relayclient.WriteSettleOutcome(&out, buy.BuyID, res)
 	printed := out.String()
-	if !strings.Contains(printed, "AMBIGUOUS") {
-		t.Fatalf("printed settle outcome missing AMBIGUOUS block:\n%s", printed)
-	}
-	if !strings.Contains(printed, "allowlist") {
-		t.Fatalf("printed AMBIGUOUS guidance does not mention allowlisting — a minted-but-unallowlisted buyer gets no actionable hint:\n%s", printed)
+	if !strings.Contains(printed, "NOT ADMITTED") {
+		t.Fatalf("printed settle outcome missing the NOT ADMITTED block:\n%s", printed)
 	}
 	if !strings.Contains(printed, "dontguess allowlist add") {
-		t.Fatalf("printed AMBIGUOUS guidance does not name the actionable operator command `dontguess allowlist add`:\n%s", printed)
+		t.Fatalf("printed guidance does not name the actionable operator command `dontguess allowlist add`:\n%s", printed)
+	}
+	if strings.Contains(printed, "dontguess mint") {
+		t.Fatalf("printed guidance tells an unadmitted buyer to MINT SCRIP — the wrong remedy, and the specific wrong turn dontguess-c0a was chasing:\n%s", printed)
+	}
+
+	// (4) The AMBIGUOUS guidance still enumerates allowlisting (dontguess-980),
+	// which remains correct for a genuine timeout — e.g. an unallowlisted SELLER,
+	// whose put-reject goes to the seller and never reaches this buyer.
+	var amb bytes.Buffer
+	relayclient.WriteSettleOutcome(&amb, buy.BuyID, &relayclient.SettleResult{Outcome: relayclient.SettleOutcomeAmbiguous})
+	ambPrinted := amb.String()
+	if !strings.Contains(ambPrinted, "AMBIGUOUS") || !strings.Contains(ambPrinted, "allowlist") {
+		t.Fatalf("the ambiguous-timeout guidance lost its allowlist hint (dontguess-980 regression):\n%s", ambPrinted)
 	}
 }

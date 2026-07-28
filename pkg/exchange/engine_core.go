@@ -1455,6 +1455,26 @@ func (e *Engine) dispatch(msg *Message) error {
 						}
 					}
 				}
+				// The SAME courtesy for a blocked BUYER-ACCEPT (dontguess-c0a).
+				// dontguess-39d fixed this for put and left settle alone, so an
+				// unadmitted buyer hit the identical trap the comment above
+				// describes — worse, in fact: exchange:buy is TrustAnonymous, so it
+				// MATCHES cleanly, sees a real price and a real entry, and only then
+				// stalls forever at the phase that reserves scrip. All it was ever
+				// told was "ambiguous timeout — matched but content was not
+				// delivered in the bound", which reads as a slow operator, not a
+				// refusal. That single silent drop cost a multi-hour investigation
+				// down the wrong path.
+				//
+				// Scoped to buyer-accept: it is the phase that strands a buy with
+				// nothing delivered. A blocked complete arrives after the content is
+				// already in hand, so it costs a demand signal rather than the
+				// purchase, and needs no buyer-facing event.
+				if op == TagSettle && phase == SettlePhaseBuyerAccept {
+					if rerr := e.emitBuyerAcceptReject(msg.ID, BuyerAcceptRejectNotAllowlisted); rerr != nil {
+						e.opts.log("engine: buyer-accept-reject after dispatch trust block failed msg=%s err=%v", shortKey(msg.ID), rerr)
+					}
+				}
 				// Counted + alarmed above (§2.4a D4); dispatch returns nil (not an
 				// error) so a routine trust rejection isn't treated as a transport
 				// fault.
@@ -1952,18 +1972,18 @@ func (e *Engine) createCompressionDerivative(rec *AssignRecord, acceptMsgID stri
 	copy(domainsCopy, orig.Domains)
 
 	derivative := &InventoryEntry{
-		EntryID:        derivativeID,
-		PutMsgID:       acceptMsgID, // antecedent is the accept message
-		SellerKey:      orig.SellerKey,
-		Description:    orig.Description,
-		ContentHash:    result.ContentHash,
-		ContentType:    orig.ContentType,
-		Domains:        domainsCopy,
-		TokenCost:      orig.TokenCost,
+		EntryID:     derivativeID,
+		PutMsgID:    acceptMsgID, // antecedent is the accept message
+		SellerKey:   orig.SellerKey,
+		Description: orig.Description,
+		ContentHash: result.ContentHash,
+		ContentType: orig.ContentType,
+		Domains:     domainsCopy,
+		TokenCost:   orig.TokenCost,
 		// Content and ContentSize come from the bytes the operator itself decoded
 		// and re-hashed above, never from the worker's self-report (dontguess-7e21).
-		Content:     derivativeContent,
-		ContentSize: int64(len(derivativeContent)),
+		Content:        derivativeContent,
+		ContentSize:    int64(len(derivativeContent)),
 		PutPrice:       orig.PutPrice,
 		PutTimestamp:   orig.PutTimestamp,
 		CompressedFrom: orig.EntryID,

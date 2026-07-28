@@ -204,6 +204,9 @@ func runBuy(cmd *cobra.Command, args []string) error {
 	case relayclient.SettleOutcomeUnderfunded:
 		return fmt.Errorf("buy %s: underfunded — operator rejected buyer-accept (%s); ask the operator to run: dontguess mint <your-npub> <amount>",
 			result.BuyID, settleRes.RejectReason)
+	case relayclient.SettleOutcomeNotAdmitted:
+		return fmt.Errorf("buy %s: NOT ADMITTED — the operator refused your buyer-accept (%s). The match was real; a buy matches anonymously but cannot collect without admission. Get admitted: dontguess join <invite-token>, or ask the operator to run: dontguess allowlist add <your-npub>. Minting scrip will not help",
+			result.BuyID, settleRes.RejectReason)
 	case relayclient.SettleOutcomeBudgetExceeded:
 		return fmt.Errorf("buy %s: match price %d scrip exceeds budget %d — not purchased", result.BuyID, settleRes.Price, budget)
 	default:

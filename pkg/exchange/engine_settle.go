@@ -715,7 +715,7 @@ func (e *Engine) emitBuyerAcceptReject(buyerAcceptMsgID, reason string) error {
 		"phase":    SettlePhaseStrBuyerAcceptReject,
 		"entry_id": buyerAcceptMsgID,
 		"reason":   reason,
-		"guide":    "Your buyer-accept was rejected: insufficient scrip to reserve the price + fee. No content was delivered and no scrip moved. Ask the operator to run: dontguess mint <your-npub> <amount>, then retry the buy.",
+		"guide":    buyerAcceptRejectGuide(reason),
 	})
 	if err != nil {
 		return fmt.Errorf("engine: buyer-accept-reject: marshal payload: %w", err)
@@ -730,6 +730,38 @@ func (e *Engine) emitBuyerAcceptReject(buyerAcceptMsgID, reason string) error {
 		return fmt.Errorf("engine: buyer-accept-reject: send operator message: %w", err)
 	}
 	return nil
+}
+
+// BuyerAcceptRejectNotAllowlisted is the reason a buyer-accept is refused because
+// the buyer's key is not on the fleet allowlist (dontguess-c0a). exchange:buy is
+// TrustAnonymous so an unadmitted key MATCHES fine, but every buyer-authored
+// settle phase is TrustAllowlisted (trust.go defaultSettlePhaseLevels) — so the
+// buy stalls at exactly the step that reserves scrip, and the buyer is told
+// nothing.
+const BuyerAcceptRejectNotAllowlisted = "not-allowlisted"
+
+// buyerAcceptRejectGuide returns the operator's actionable guidance for a
+// buyer-accept rejection, derived FROM the reason so the two can never disagree.
+//
+// This used to be one hardcoded string telling every rejected buyer to get scrip
+// minted. That is correct for insufficient_scrip and actively misleading for
+// anything else: an unadmitted buyer sent to mint more scrip will mint scrip it
+// already has enough of and still not be able to buy. Sending someone down the
+// wrong path is the failure mode this whole item is about — a wrong answer costs
+// more than no answer.
+func buyerAcceptRejectGuide(reason string) string {
+	switch reason {
+	case BuyerAcceptRejectNotAllowlisted:
+		return "Your buyer-accept was rejected: your key is not on this exchange's allowlist. " +
+			"A buy MATCHES anonymously but cannot COLLECT — buyer-accept, deliver and complete all require admission, " +
+			"so the match you just saw can never be delivered to you. No content was delivered and no scrip moved. " +
+			"Get admitted, then retry: redeem an operator invite (dontguess join <token>), " +
+			"or ask the operator to run: dontguess allowlist add <your-npub>. Minting scrip will NOT help."
+	default:
+		return "Your buyer-accept was rejected: insufficient scrip to reserve the price + fee. " +
+			"No content was delivered and no scrip moved. " +
+			"Ask the operator to run: dontguess mint <your-npub> <amount>, then retry the buy."
+	}
 }
 
 // restoreExistingHold re-hydrates an in-memory reservation when a scrip-buy-hold

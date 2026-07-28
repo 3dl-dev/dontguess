@@ -1222,3 +1222,110 @@ func TestE2E_RelayRejectsComplete_BuySurfacesItLoudly_ClientRunE(t *testing.T) {
 		t.Fatalf("PurchaseCount = %d after a rejected complete, want 0", got)
 	}
 }
+
+// TestE2E_UnadmittedBuyer_SurfacesNotAdmitted_ClientRunE is the regression proof
+// for dontguess-c0a's remaining trap: an unadmitted buyer must be TOLD it is
+// unadmitted, not left on a timeout.
+//
+// exchange:buy is TrustAnonymous, so an unadmitted key matches cleanly and sees a
+// real entry at a real price. Every buyer-authored settle phase is TrustAllowlisted
+// (trust.go defaultSettlePhaseLevels), so the buy then stalls at buyer-accept —
+// the step that reserves scrip. The operator dropped it silently and the buyer saw
+// only "ambiguous timeout — matched but content was not delivered in the bound",
+// which reads as a slow operator rather than a refusal. dontguess-39d fixed exactly
+// this for put and left settle alone.
+//
+// Two properties are pinned, and the second matters as much as the first: the
+// failure must be RECEIVED (not a timeout), and it must NOT be reported as
+// underfunded. Telling an unadmitted buyer to mint scrip sends it to fix a problem
+// it does not have — a wrong answer is worse than no answer, and that specific
+// wrong answer is what cost hours here.
+func TestE2E_UnadmittedBuyer_SurfacesNotAdmitted_ClientRunE(t *testing.T) {
+	t.Chdir(t.TempDir())
+	hushRelayLogs(t)
+	dir := t.TempDir()
+	ls, err := dgstore.Open(dir + "/events.jsonl")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = ls.Close() })
+
+	operator, _ := identity.Generate()
+	seller, sellerHome := newAgentIdentity(t)
+	buyer, buyerHome := newAgentIdentity(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// ONLY the seller is allowlisted — the buyer is deliberately not admitted.
+	st := newE2EStack(t, ctx, ls, operator, dir+"/events.jsonl.pubcursor",
+		e2eLongPublishInterval, seller.PubKeyHex())
+	t.Cleanup(func() { cancel(); st.stop() })
+	hub := newE2EHub(t, st.conn)
+
+	putCmd := newPutCmd()
+	var putOut, putErr bytes.Buffer
+	putCmd.SetOut(&putOut)
+	putCmd.SetErr(&putErr)
+	setPutFlags(t, putCmd, map[string]string{
+		"agent-home":    sellerHome,
+		"description":   ed2cPutDesc,
+		"content":       base64.StdEncoding.EncodeToString(ed2cContent),
+		"token_cost":    "8000",
+		"content_type":  "exchange:content-type:code",
+		"domains":       "go",
+		"relay":         hub.wsURL(),
+		"timeout":       "3s",
+		"operator-npub": operator.Npub(),
+	})
+	if err := runPut(putCmd, nil); err != nil {
+		t.Fatalf("runPut: %v\nstderr:\n%s", err, putErr.String())
+	}
+	waitFor(t, 8*time.Second, "put auto-accepts into matchable inventory", func() bool {
+		return len(st.eng.State().Inventory()) == 1
+	})
+
+	// Fund the buyer generously: scrip must be provably irrelevant to this failure.
+	st.mint(t, buyer.PubKeyHex(), wireIDBuyerMint)
+
+	buyCmd := newBuyCmd()
+	var buyOut, buyErr bytes.Buffer
+	buyCmd.SetOut(&buyOut)
+	buyCmd.SetErr(&buyErr)
+	setBuyFlags(t, buyCmd, map[string]string{
+		"agent-home": buyerHome,
+		"task":       ed2cBuyTask,
+		"budget":     "1000000",
+		"relay":      hub.wsURL(),
+		"timeout":    "20s",
+	})
+	err = runBuy(buyCmd, nil)
+	if err == nil {
+		t.Fatalf("runBuy succeeded for an unadmitted buyer:\nstderr:\n%s", buyErr.String())
+	}
+
+	stderr := buyErr.String()
+	// (a) RECEIVED, not a timeout.
+	if strings.Contains(stderr, "ambiguous") || strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("unadmitted buyer got an ambiguous TIMEOUT instead of a received refusal — the silent-drop trap is back.\nerr: %v\nstderr:\n%s", err, stderr)
+	}
+	// (b) named for what it is, and NOT as an underfunding problem.
+	if !strings.Contains(stderr, "NOT ADMITTED") {
+		t.Fatalf("stderr does not surface NOT ADMITTED:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "UNDERFUNDED") {
+		t.Fatalf("an unadmitted buyer was told it is UNDERFUNDED — the wrong remedy:\n%s", stderr)
+	}
+	// (c) the guidance points at admission, not at minting.
+	if !strings.Contains(stderr, "allowlist add") {
+		t.Fatalf("stderr does not tell the buyer how to get admitted:\n%s", stderr)
+	}
+	if !strings.Contains(err.Error(), "NOT ADMITTED") {
+		t.Fatalf("returned error does not identify the refusal: %v", err)
+	}
+	// (d) nothing moved.
+	if got := st.scrip.Balance(buyer.PubKeyHex()); got != wireIDBuyerMint {
+		t.Fatalf("buyer balance = %d, want untouched %d — a refused buy must not move scrip", got, wireIDBuyerMint)
+	}
+	if buyOut.Len() != 0 {
+		t.Fatalf("content was written to stdout for a refused buy (%d bytes)", buyOut.Len())
+	}
+}

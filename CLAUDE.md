@@ -287,7 +287,22 @@ dontguess agent-init my-agent --fleet-member \
 # ("REJECTED: not-allowlisted") until it is admitted. Get admitted one of two ways:
 #   • redeem an operator invite (auto-admits):  dontguess join <token>
 #   • or have the operator run:                 dontguess allowlist add <your-npub>
-# `buy` works anonymously (no admission needed); only `put` requires the allowlist.
+# YOU MUST BE ADMITTED TO BUY ANYTHING, not just to put. An earlier version of this
+# file said "`buy` works anonymously (no admission needed); only `put` requires the
+# allowlist" — that is FALSE and it cost a full investigation (dontguess-c0a), so
+# here is the precise rule:
+#   exchange:buy (kind 3402) is genuinely anonymous — an unadmitted key MATCHES fine.
+#   exchange:settle (kind 3404) is a SEPARATE kind, not "a kind of put", and it
+#   carries the settlement state machine for BOTH flows with per-phase trust
+#   (pkg/exchange/trust.go defaultSettlePhaseLevels):
+#     put-accept / put-reject / deliver / preview  → operator-authored
+#     buyer-accept / buyer-reject / complete / dispute / preview-request → ALLOWLISTED
+# A buy is worthless without its settle chain: buyer-accept is what reserves scrip
+# and complete is what records the purchase. So an unadmitted agent gets a MATCH and
+# then nothing — content is never delivered. Until dontguess-c0a's remaining UX fix
+# lands it does not even learn why: the settle is trust-rejected operator-side and
+# the buyer sees only "ambiguous timeout — matched but content was not delivered".
+# If you see that after a clean match, suspect admission FIRST.
 # Once admitted, from anywhere in the tree, with no env var and no flag:
 dontguess buy  --task "..."                 # signs as my-agent, reaches the exchange
 dontguess put  --description "..." --token_cost N --content_type ... --content <b64>

@@ -79,6 +79,12 @@ const (
 	// This is the H3 proof the subscription topology is right: it is RECEIVED, not a
 	// bare timeout. No content, no scrip moved.
 	SettleOutcomeUnderfunded
+	// SettleOutcomeNotAdmitted: the operator returned a settle(buyer-accept-reject)
+	// with reason=not-allowlisted (dontguess-c0a). Distinct from Underfunded
+	// because the REMEDY is opposite: no amount of scrip fixes it, and telling an
+	// unadmitted buyer to mint is what sent this failure down the wrong path for
+	// hours. A buy matches anonymously but cannot collect.
+	SettleOutcomeNotAdmitted
 	// SettleOutcomeBudgetExceeded: the match price exceeds the caller's budget, so
 	// the client did NOT publish buyer-accept (spend nothing you did not budget).
 	SettleOutcomeBudgetExceeded
@@ -94,6 +100,8 @@ func (o SettleOutcome) String() string {
 		return "settled"
 	case SettleOutcomeUnderfunded:
 		return "underfunded-reject"
+	case SettleOutcomeNotAdmitted:
+		return "not-allowlisted-reject"
 	case SettleOutcomeBudgetExceeded:
 		return "budget-exceeded"
 	case SettleOutcomeAmbiguous:
@@ -280,6 +288,9 @@ func Settle(ctx context.Context, conn *relay.Conn, signer identity.Signer, buy *
 	case exchange.SettlePhaseStrBuyerAcceptReject:
 		reason, guide := parseRejectPayload(ev)
 		res.Outcome = SettleOutcomeUnderfunded
+		if reason == exchange.BuyerAcceptRejectNotAllowlisted {
+			res.Outcome = SettleOutcomeNotAdmitted
+		}
 		res.RejectReason = reason
 		res.RejectGuide = guide
 		return res, nil
@@ -899,6 +910,14 @@ func WriteSettleOutcome(w io.Writer, buyID string, r *SettleResult) {
 		}
 		fmt.Fprintln(w, "  No content was delivered and no scrip moved.")
 		fmt.Fprintln(w, "  ask the operator to run: dontguess mint <your-npub> <amount>")
+	case SettleOutcomeNotAdmitted:
+		fmt.Fprintf(w, "buy %s: NOT ADMITTED — the operator REFUSED your buyer-accept: %s\n", shortID(buyID), r.RejectReason)
+		if r.RejectGuide != "" {
+			fmt.Fprintf(w, "  operator: %s\n", r.RejectGuide)
+		}
+		fmt.Fprintln(w, "  The match was real, but a buy cannot COLLECT without admission — no content, no scrip moved.")
+		fmt.Fprintln(w, "  get admitted:  dontguess join <invite-token>")
+		fmt.Fprintln(w, "  or ask the operator to run:  dontguess allowlist add <your-npub>")
 	case SettleOutcomeBudgetExceeded:
 		fmt.Fprintf(w, "buy %s: PRICE EXCEEDS BUDGET — match price %d scrip is above your budget; NOT accepting (no scrip spent).\n", shortID(buyID), r.Price)
 		fmt.Fprintln(w, "  Re-run with a higher --budget to purchase, or preview first with --preview.")
