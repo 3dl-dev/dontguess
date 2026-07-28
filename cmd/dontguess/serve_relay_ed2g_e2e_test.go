@@ -316,7 +316,11 @@ type e2eHub struct {
 	srv       *httptest.Server
 	opConn    *fakeRelayConn
 	dropOnBuy int32 // atomic one-shot: close the client ws after the next buy EVENT
-	connCount int32 // atomic: websocket connections served (>=2 proves a re-dial)
+	// rejectComplete makes the hub NACK a settle(complete) instead of ACKing it,
+	// modelling a relay that refuses the event (dontguess-c0a). A client that
+	// fire-and-forgets the publish cannot tell this from success.
+	rejectComplete int32
+	connCount      int32 // atomic: websocket connections served (>=2 proves a re-dial)
 
 	// storedMu/storedPuts model the relay's PERSISTENCE of client-published put
 	// events (kind 3401): a real NIP-01 relay stores every event and serves it to
@@ -353,6 +357,7 @@ func (h *e2eHub) storePut(ev *identity.Event) {
 
 func (h *e2eHub) wsURL() string          { return wsURL(h.srv.URL) }
 func (h *e2eHub) armDropOnNextBuy()      { atomic.StoreInt32(&h.dropOnBuy, 1) }
+func (h *e2eHub) armRejectComplete()     { atomic.StoreInt32(&h.rejectComplete, 1) }
 func (h *e2eHub) connectionsServed() int { return int(atomic.LoadInt32(&h.connCount)) }
 
 // serveWS handles one client websocket: it injects client EVENTs into the
@@ -398,6 +403,11 @@ func (h *e2eHub) serveWS(w http.ResponseWriter, r *http.Request) {
 				h.storedMu.Lock()
 				h.storedPuts = append(h.storedPuts, f.Event)
 				h.storedMu.Unlock()
+			}
+			if atomic.LoadInt32(&h.rejectComplete) == 1 && isSettleCompleteEvent(f.Event) {
+				nack, _ := relay.EncodeOK(f.Event.ID, false, "blocked: test-armed complete rejection")
+				c.write(nack)
+				continue
 			}
 			ok, _ := relay.EncodeOK(f.Event.ID, true, "")
 			c.write(ok)
@@ -599,6 +609,24 @@ func TestE2E_TeamRoundTrip_PutBuyMatchSettle_ClientRunE_NotifyDriven(t *testing.
 	if got := st.scrip.Balance(buyer.PubKeyHex()); got >= wireIDBuyerMint {
 		t.Fatalf("buyer not debited: balance=%d, want < %d", got, wireIDBuyerMint)
 	}
+
+	// (b2) THE PURCHASE ACTUALLY COUNTS (dontguess-c0a). State.PurchaseCount is
+	// EntryDemandCount — distinct buyers who completed a purchase — and it is fed
+	// by folded settle(complete) events and nothing else. Measured on the live
+	// exchange 2026-07-28: 0 completes had EVER folded, against 40 buyer-accepts
+	// and 39 delivers, so every entry sat at a permanent count of 0. That single
+	// dead counter starves the fast/medium pricing loops of their demand input and
+	// holds the cold-compression gate (medium_loop.go's PurchaseCount >= threshold)
+	// permanently shut.
+	//
+	// Every prior test of the complete phase hand-crafted the event and published
+	// it itself (serve_relay_consume_test.go, serve_relay_wireid_test.go), so none
+	// of them ever exercised the CLIENT's publish — which is where it was being
+	// lost. This assertion rides the real `dontguess buy` RunE above.
+	entryID := st.eng.State().Inventory()[0].EntryID
+	waitFor(t, 8*time.Second, "the buy increments the entry's demand count (settle(complete) folded)", func() bool {
+		return st.eng.State().PurchaseCount(entryID) >= 1
+	})
 
 	// (c) d52: the settle(complete)→consume record PUBLISHES (KindConsume) via the
 	// 30s-tick-immune Notify path, and the Outbox did NOT go FATAL.
@@ -1083,4 +1111,114 @@ func TestE2E_PreviewFlag_SettlesContentByteExact_ClientRunE(t *testing.T) {
 	waitFor(t, 8*time.Second, "seller credited the residual via --preview", func() bool {
 		return st.scrip.Balance(seller.PubKeyHex()) > 0
 	})
+}
+
+// isSettleCompleteEvent reports whether ev is a settle carrying the complete
+// phase tag, as the nostr adapter renders it (["phase","complete"]).
+func isSettleCompleteEvent(ev *identity.Event) bool {
+	if ev == nil || ev.Kind != nostr.KindSettle {
+		return false
+	}
+	for _, tag := range ev.Tags {
+		if len(tag) >= 2 && tag[0] == "phase" && tag[1] == exchange.SettlePhaseStrComplete {
+			return true
+		}
+	}
+	return false
+}
+
+// TestE2E_RelayRejectsComplete_BuySurfacesItLoudly_ClientRunE is the regression
+// proof for dontguess-c0a: the client must not report a settled purchase it has
+// no evidence the relay accepted.
+//
+// settle(complete) was published fire-and-forget — Send() and return, with no
+// wait for the relay's OK. It is the LAST thing a buy does, so `Settle` returned,
+// `buy` returned, and the deferred conn.Close() tore the socket down immediately
+// after. The event went on the floor while the client printed "complete <id>",
+// having proved only that a local write returned. Live result: 0 settle(complete)
+// ever folded, against 40 buyer-accepts and 39 delivers — the two settle phases
+// that happen to be followed by an awaitSettle, which holds the connection open
+// long enough for the relay to read the earlier frame.
+//
+// A dropped frame is not directly reproducible (it is a race), so this pins the
+// property that makes the race impossible: the client AWAITS the relay's verdict
+// on the complete. With the hub armed to NACK it, a client that waits fails loud;
+// a client that fires and forgets cannot tell this from success and still prints
+// SETTLED. Mutation: restore the fire-and-forget publish and this test fails.
+func TestE2E_RelayRejectsComplete_BuySurfacesItLoudly_ClientRunE(t *testing.T) {
+	t.Chdir(t.TempDir())
+	hushRelayLogs(t)
+	dir := t.TempDir()
+	ls, err := dgstore.Open(dir + "/events.jsonl")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = ls.Close() })
+
+	operator, _ := identity.Generate()
+	seller, sellerHome := newAgentIdentity(t)
+	buyer, buyerHome := newAgentIdentity(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	st := newE2EStack(t, ctx, ls, operator, dir+"/events.jsonl.pubcursor",
+		e2eLongPublishInterval, seller.PubKeyHex(), buyer.PubKeyHex())
+	t.Cleanup(func() { cancel(); st.stop() })
+	hub := newE2EHub(t, st.conn)
+
+	putCmd := newPutCmd()
+	var putOut, putErr bytes.Buffer
+	putCmd.SetOut(&putOut)
+	putCmd.SetErr(&putErr)
+	setPutFlags(t, putCmd, map[string]string{
+		"agent-home":    sellerHome,
+		"description":   ed2cPutDesc,
+		"content":       base64.StdEncoding.EncodeToString(ed2cContent),
+		"token_cost":    "8000",
+		"content_type":  "exchange:content-type:code",
+		"domains":       "go",
+		"relay":         hub.wsURL(),
+		"timeout":       "3s",
+		"operator-npub": operator.Npub(),
+	})
+	if err := runPut(putCmd, nil); err != nil {
+		t.Fatalf("runPut: %v\nstderr:\n%s", err, putErr.String())
+	}
+	waitFor(t, 8*time.Second, "put auto-accepts into matchable inventory", func() bool {
+		return len(st.eng.State().Inventory()) == 1
+	})
+	st.mint(t, buyer.PubKeyHex(), wireIDBuyerMint)
+
+	// The relay will refuse the complete. Everything before it succeeds.
+	hub.armRejectComplete()
+
+	buyCmd := newBuyCmd()
+	var buyOut, buyErr bytes.Buffer
+	buyCmd.SetOut(&buyOut)
+	buyCmd.SetErr(&buyErr)
+	setBuyFlags(t, buyCmd, map[string]string{
+		"agent-home": buyerHome,
+		"task":       ed2cBuyTask,
+		"budget":     "1000000",
+		"relay":      hub.wsURL(),
+		"timeout":    "20s",
+	})
+	err = runBuy(buyCmd, nil)
+
+	if err == nil {
+		t.Fatalf("runBuy returned nil after the relay REFUSED settle(complete) — the client reported a purchase it has no evidence landed.\nstderr:\n%s", buyErr.String())
+	}
+	if strings.Contains(buyErr.String(), "SETTLED") {
+		t.Fatalf("stderr claims SETTLED despite the relay rejecting the complete:\n%s", buyErr.String())
+	}
+	// The failure must name what actually broke, not just "publish failed": the
+	// content WAS delivered and verified, and only the purchase signal was lost.
+	if !strings.Contains(err.Error(), "settle(complete)") {
+		t.Fatalf("error does not identify the rejected complete: %v", err)
+	}
+
+	// And the operator's demand count must NOT move — an unrecorded purchase is
+	// exactly the state this whole item is about.
+	if got := st.eng.State().PurchaseCount(st.eng.State().Inventory()[0].EntryID); got != 0 {
+		t.Fatalf("PurchaseCount = %d after a rejected complete, want 0", got)
+	}
 }

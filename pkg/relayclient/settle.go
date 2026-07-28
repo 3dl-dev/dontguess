@@ -308,8 +308,40 @@ func Settle(ctx context.Context, conn *relay.Conn, signer identity.Signer, buy *
 		if err != nil {
 			return nil, fmt.Errorf("relayclient: settle: build complete: %w", err)
 		}
-		if err := publishEvent(ctx, conn, completeEv); err != nil {
+		// AWAIT THE RELAY OK (dontguess-c0a). This publish must be CONFIRMED, not
+		// fired and forgotten, because settle(complete) is the last thing the buy
+		// does: nothing follows it, so `Settle` returns, `buy` returns, and the
+		// deferred conn.Close() tears the socket down immediately — before the relay
+		// has necessarily read the frame. The event is lost on the floor while the
+		// client cheerfully prints "complete <id>", having only ever proved that a
+		// local Send() returned.
+		//
+		// That is exactly what the live exchange showed: 0 settle(complete) folded
+		// over its entire life, against 40 buyer-accepts and 39 delivers. Those two
+		// are published by the same fire-and-forget helper — but each is followed by
+		// an awaitSettle that holds the connection open long enough for the relay to
+		// process the earlier frame. complete was the ONLY settle event with nothing
+		// after it, and the only one that never arrived.
+		//
+		// The cost of losing it is not cosmetic. settle(complete) is the buyer's
+		// consume signal: State.PurchaseCount (EntryDemandCount) counts distinct
+		// buyers who completed a purchase, so with none ever folded every entry's
+		// purchase count sat at 0 permanently — starving the fast/medium pricing
+		// loops of demand input and holding the cold-compression gate
+		// (medium_loop.go's PurchaseCount >= threshold) permanently shut.
+		//
+		// PublishEvent waits for the relay's OK frame, so a rejection or a dropped
+		// connection is now reported instead of being indistinguishable from success.
+		accepted, okMsg, err := PublishEvent(ctx, conn, completeEv)
+		if err != nil {
 			return nil, fmt.Errorf("relayclient: settle: publish complete: %w", err)
+		}
+		if !accepted {
+			// The content IS in hand and verified — the purchase itself succeeded.
+			// Only the consume signal failed to land, so this is reported loudly
+			// rather than discarding a completed delivery.
+			return nil, fmt.Errorf("relayclient: settle: relay rejected settle(complete) %s: %s — content was delivered and verified, but the purchase signal did not record; the entry's demand count will not reflect this buy",
+				shortID(completeEv.ID), okMsg)
 		}
 		res.CompleteMsgID = completeEv.ID
 		res.Outcome = SettleOutcomeSettled
