@@ -347,6 +347,10 @@ func (e *Engine) ensureCreditForShortfall(buyerKey string, holdAmount int64, buy
 		applier.ApplyMessage(msg)
 	}
 
+	// The operator-side log is diagnostics; the BUYER learns about this debt from
+	// the deliver guide (deliverGuideFor, engine_settle.go), which names the amount
+	// and tells the agent exactly how to work it off. A loan the borrower never
+	// hears about is a loan nobody repays — measured 2026-07-28: 15 minted, 0 repaid.
 	e.opts.log("engine: deliver-on-credit: minted loan=%s principal=%d for buyer=%s (shortfall on hold=%d, balance was %d)",
 		shortKey(loanID), shortfall, shortKey(buyerKey), holdAmount, bal)
 	return nil

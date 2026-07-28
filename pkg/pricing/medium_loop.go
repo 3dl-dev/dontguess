@@ -617,13 +617,67 @@ func (l *MediumLoop) applyReputationFloor(
 //  2. !HasCompressedVersion(entryID)
 //  3. len(ActiveAssigns(entryID)) == 0
 //
+
+// entryHasLiveClaimedAssign reports whether an entry has an assign someone is
+// actually working — i.e. an active assign that is NOT an unclaimed exclusive.
+//
+// An unclaimed exclusive is deliberately NOT counted (dontguess-817): its target
+// may never come back, and treating it as live locks the work permanently and
+// starves the open pool that is the only thing any other agent may claim.
+func (l *MediumLoop) entryHasLiveClaimedAssign(entryID string) bool {
+	for _, r := range l.opts.State.ActiveAssigns(entryID) {
+		if r == nil {
+			continue
+		}
+		if r.ExclusiveSender != "" && r.Status == exchange.AssignOpen {
+			continue // addressed to one agent, never claimed — does not block
+		}
+		return true
+	}
+	return false
+}
+
+// busiestPurchaseCount returns the highest purchase count across the candidate
+// inventory, or 0 if nothing has sold yet. Used to let the compression gate track
+// actual market depth instead of a fixed constant (dontguess-cba).
+func (l *MediumLoop) busiestPurchaseCount(inventory []*exchange.InventoryEntry) int {
+	best := 0
+	for _, entry := range inventory {
+		if entry == nil || entry.CompressedFrom != "" || entry.LegacyPlaintext {
+			continue
+		}
+		if n := l.opts.State.PurchaseCount(entry.EntryID); n > best {
+			best = n
+		}
+	}
+	return best
+}
+
 // Returns the number of assigns posted.
 func (l *MediumLoop) postCompressionAssigns(inventory []*exchange.InventoryEntry) int {
 	if l.opts.PostAssign == nil {
 		return 0
 	}
 
+	// COLD-START ADAPTATION (dontguess-cba). A fixed 3-purchase gate is a sensible
+	// STEADY-STATE heuristic — do not spend compression effort on inventory nobody
+	// wants — but it is unreachable in a market that has never had steady state.
+	// Measured 2026-07-28: 17 entries had >=1 purchase, 5 had >=2, only 3 had >=3,
+	// and the medium loop had therefore posted ZERO open assigns for the exchange's
+	// entire life. Open assigns are the ONLY tier any agent may claim, so the one
+	// claimable pool was permanently empty.
+	//
+	// So the gate follows the market: it is the configured threshold, but never
+	// higher than the busiest entry currently on offer. Once ANYTHING has sold, the
+	// most-wanted inventory is eligible. In a mature market the busiest entry
+	// exceeds the threshold and this is a no-op — the steady-state behaviour is
+	// unchanged, which is why this is not simply "lower the constant".
 	threshold := l.opts.compressionPurchaseThreshold()
+	if busiest := l.busiestPurchaseCount(inventory); busiest > 0 && busiest < threshold {
+		l.opts.log("medium loop: cold-start compression gate — busiest entry has %d purchase(s), below threshold %d; using %d so the open-assign pool is not permanently empty",
+			busiest, threshold, busiest)
+		threshold = busiest
+	}
 	posted := 0
 
 	for _, entry := range inventory {
@@ -657,7 +711,21 @@ func (l *MediumLoop) postCompressionAssigns(inventory []*exchange.InventoryEntry
 		}
 
 		// Skip if there is already an active compression assign.
-		if len(l.opts.State.ActiveAssigns(entry.EntryID)) > 0 {
+		// EXCLUSIVE-ASSIGN FALLBACK (dontguess-817). An entry whose only live assign
+		// is an UNCLAIMED EXCLUSIVE one is not actually spoken for: hot goes only to
+		// the original seller and warm only to the buyer that just consumed it, and
+		// both are ephemeral per-project .dg/ keys that routinely vanish after one
+		// put. Measured 2026-07-28: all 44 assigns were exclusive, all 44 targets
+		// dead, and NONE was ever claimed — every work order addressed to an agent
+		// that no longer existed, with nobody else permitted to take it.
+		//
+		// Treating those as "already assigned" locked the work forever AND blocked
+		// this loop from ever posting a claimable open one. So an unclaimed exclusive
+		// does not block: we post an OPEN assign alongside it, priced at the COLD
+		// tier because whoever picks it up does NOT hold the content and must fetch
+		// and read it first (that is exactly what the dontguess-d5d tier basis
+		// distinguishes). A CLAIMED assign still blocks — someone is working it.
+		if l.entryHasLiveClaimedAssign(entry.EntryID) {
 			continue
 		}
 

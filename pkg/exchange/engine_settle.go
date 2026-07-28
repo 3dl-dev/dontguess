@@ -1075,6 +1075,31 @@ func (e *Engine) handleSettleDeliverContent(msg *Message) error {
 // the operator's deliver TRIGGER is already the deliver-of-record, so the content
 // message is folded only when it echoes back off the relay (deduped there). A nil
 // message with nil error means the deliver was declined (no content / oversize /
+// deliverGuideFor builds the buyer-facing guide for a successful deliver.
+//
+// WHY THIS IS NOT A CONSTANT STRING (dontguess-817): a buyer served ON CREDIT has
+// no idea it now owes anything, that the debt can be worked off, where to look for
+// the work, or what completing it pays. Measured 2026-07-28: 15 loans minted, 0
+// repaid, and 0 of 44 compression assigns ever claimed. The bounty had been
+// repriced three times while the offer itself was never communicated to anyone.
+//
+// So when a debt exists, the guide says so and tells the agent exactly what to run.
+func (e *Engine) deliverGuideFor(buyerKey string) string {
+	base := "Content delivered. Verify integrity: SHA-256 hash the decoded content and compare to content_hash. To confirm receipt, send settle(complete) with the content_hash."
+
+	// A compression assign may be posted to you for THIS entry: you still hold the
+	// content, so you are the cheapest possible compressor and are paid accordingly.
+	base += fmt.Sprintf(" A compression task may be posted for you — you already hold this content, so you pay only to GENERATE the compressed form and are paid the cached-tier rate (%d%% of token_cost). Run `dontguess assigns` to see it.", WarmCompressionBountyPct)
+
+	outstanding, ok := e.borrowerOutstandingPrincipal(buyerKey)
+	if !ok || outstanding <= 0 {
+		return base
+	}
+	return base + fmt.Sprintf(
+		" YOU ARE HOLDING %d SCRIP OF CREDIT. You were served without sufficient scrip rather than being turned away, and that shortfall is an outstanding loan. To clear it, do compression work: run `dontguess assigns` to list every task you may claim (tasks addressed to you, plus any open to anyone), claim one, and complete it. The bounty is credited to you and automatically withheld against this balance until it reaches zero — no separate repayment step, and no interest accrues. Ignoring it does not cost you scrip today, but you stay in debt and the exchange stays short of the compressed inventory it needs.",
+		outstanding)
+}
+
 // missing hash) — a no-op, not an error, unchanged from before.
 func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, buyerKey string) (*Message, error) {
 	// Team-tier v2 confidential entry (dontguess-9e8, content-confidentiality
@@ -1128,7 +1153,7 @@ func (e *Engine) emitDeliverContent(msg *Message, entry *InventoryEntry, buyerKe
 		"content":      base64.StdEncoding.EncodeToString(content),
 		"content_hash": contentHash,
 		"buyer":        buyerKey,
-		"guide":        fmt.Sprintf("Content delivered. Verify integrity: SHA-256 hash the decoded content and compare to content_hash. To confirm receipt, send settle(complete) with the content_hash. A compression task may be posted for you — completing it earns %d%% of token_cost in scrip (you have the content cached, making you the ideal compressor; token_cost is OUTPUT tokens and compression is OUTPUT-token labor, so it is paid at OUTPUT rates, not a fraction of the read price you just paid).", WarmCompressionBountyPct),
+		"guide":        e.deliverGuideFor(buyerKey),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("engine: settle-deliver: marshal content payload for entry=%s: %w", shortKey(entry.EntryID), err)

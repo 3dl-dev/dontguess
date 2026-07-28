@@ -935,24 +935,40 @@ func TestMediumLoop_PurchaseCountBoundary(t *testing.T) {
 			st := newMediumStubState()
 			st.inventory = []*exchange.InventoryEntry{
 				{EntryID: "entry-boundary", SellerKey: "seller-1", TokenCost: 6000},
+				// Anchor the market DEEP so this table exercises the fixed
+				// threshold, not the cold-start adaptation (dontguess-cba). Without
+				// an anchor, entry-boundary is the busiest entry by definition and
+				// becomes eligible at any count — correct behaviour, but not what
+				// this table is testing. The anchor is excluded from the assertions
+				// below by counting only entry-boundary posts.
+				{EntryID: "entry-anchor", SellerKey: "seller-2", TokenCost: 6000},
 			}
 			st.purchaseCount["entry-boundary"] = tc.purchaseCount
+			st.purchaseCount["entry-anchor"] = 50
 
 			var postCalls int
 			loop := pricing.NewMediumLoop(pricing.MediumLoopOptions{
 				State: st,
 				Now:   func() time.Time { return now },
 				PostAssign: func(spec pricing.AssignSpec) error {
-					postCalls++
+					// Count only the SUBJECT entry; the anchor is expected to be
+					// worked every time and is not what this table asserts.
+					if spec.EntryID == "entry-boundary" {
+						postCalls++
+					}
 					return nil
 				},
 			})
 
 			result := loop.Tick(context.Background())
 
-			if result.CompressionAssigns != tc.wantAssigns {
-				t.Errorf("purchaseCount=%d: expected CompressionAssigns=%d, got %d",
-					tc.purchaseCount, tc.wantAssigns, result.CompressionAssigns)
+			// result.CompressionAssigns counts the whole tick, which includes the
+			// deep-market anchor. This table is about entry-boundary specifically,
+			// so assert the anchor is always worked and then judge the subject
+			// entry via the filtered postCalls below.
+			if result.CompressionAssigns < 1 {
+				t.Errorf("purchaseCount=%d: the deep-market anchor (50 purchases) was not worked at all (CompressionAssigns=%d)",
+					tc.purchaseCount, result.CompressionAssigns)
 			}
 			if postCalls != tc.wantAssigns {
 				t.Errorf("purchaseCount=%d: expected %d PostAssign calls, got %d",
@@ -1044,29 +1060,42 @@ func TestMediumLoop_CompressionAssign_SkippedWhenBelowThreshold(t *testing.T) {
 
 	st.inventory = []*exchange.InventoryEntry{
 		{EntryID: "entry-cold", SellerKey: "seller-1", TokenCost: 6000},
+		// A DEEP market: something well past the threshold exists, so the
+		// cold-start adaptation (dontguess-cba) does not lower the gate. Without
+		// this the busiest entry IS entry-cold and it correctly becomes eligible —
+		// the whole point of that change. The intent under test here is the
+		// steady-state one: do not spend compression effort on thin inventory when
+		// there is popular inventory to work on instead.
+		{EntryID: "entry-popular", SellerKey: "seller-2", TokenCost: 6000},
 	}
 	// Only 2 purchases — below the default threshold of 3.
 	st.purchaseCount["entry-cold"] = 2
+	st.purchaseCount["entry-popular"] = 25
 	// No compressed derivative.
 	st.compressedVersions["entry-cold"] = false
 
-	var postCalls int
+	var postedFor []string
 	loop := pricing.NewMediumLoop(pricing.MediumLoopOptions{
 		State: st,
 		Now:   func() time.Time { return now },
 		PostAssign: func(spec pricing.AssignSpec) error {
-			postCalls++
+			postedFor = append(postedFor, spec.EntryID)
 			return nil
 		},
 	})
 
-	result := loop.Tick(context.Background())
+	loop.Tick(context.Background())
 
-	if result.CompressionAssigns != 0 {
-		t.Errorf("expected 0 compression assigns when below threshold, got %d", result.CompressionAssigns)
+	// Assert on the ENTRY, not on a global count: entry-popular is legitimately
+	// eligible here and posting for it is correct. What must not happen is the
+	// thin entry being worked while popular inventory is available.
+	for _, id := range postedFor {
+		if id == "entry-cold" {
+			t.Errorf("posted a compression assign for entry-cold (2 purchases) while entry-popular has 25 — below-threshold inventory must still be skipped in a deep market")
+		}
 	}
-	if postCalls != 0 {
-		t.Errorf("expected 0 PostAssign calls when below threshold, got %d", postCalls)
+	if len(postedFor) == 0 {
+		t.Error("posted nothing at all — entry-popular (25 purchases) is well past the threshold and should have been worked")
 	}
 }
 
