@@ -58,7 +58,12 @@ func TestAgentInit_FleetMemberPrintsAdmissionNotice(t *testing.T) {
 		t.Fatalf("resolve m1: %v", err)
 	}
 	notice := fleetErr.String()
-	if !strings.Contains(notice, "NOT admitted") {
+	// The notice no longer says "NOT admitted": with open admission on (the
+	// default, dontguess-f6d) this key admits itself on first use, and claiming
+	// otherwise sends an agent to hunt down an operator it does not need. What
+	// must survive is the --no-open-admission path — the two concrete ways to get
+	// admitted when the operator has closed it — which is what this test now pins.
+	if !strings.Contains(notice, "allowlist") {
 		t.Errorf("fleet-member notice missing the not-admitted warning; got:\n%s", notice)
 	}
 	if !strings.Contains(notice, "allowlist add "+m1.Npub()) {

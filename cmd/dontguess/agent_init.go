@@ -149,7 +149,15 @@ func runAgentInit(cmd *cobra.Command, args []string) error {
 		}
 		if !admitted {
 			if signer, rerr := identity.Resolve(filepath.Join(dgDir, "agents", name)); rerr == nil {
-				fmt.Fprintf(w, "\nNOT admitted yet: this key is not on the operator's allowlist, so `dontguess put` is rejected until it is (buy works anonymously). Either:\n")
+				// This notice carried two claims that are no longer true. It said
+				// put is rejected until an operator hand-admits you — an exchange
+				// running with open admission (the default, dontguess-f6d) admits
+				// this key on its first put. And it said "buy works anonymously",
+				// which was never true of a buy that COLLECTS: buyer-accept and
+				// complete are both TrustAllowlisted (dontguess-c0a), so an
+				// unadmitted buyer matched and then stalled with nothing delivered.
+				fmt.Fprintf(w, "\nNot on the allowlist yet. On an exchange with open admission (the default) this key is admitted automatically on its first put or buy — just use it.\n")
+				fmt.Fprintf(w, "If the operator runs with --no-open-admission, get admitted first, or your work is dropped and a buy will match but never deliver:\n")
 				fmt.Fprintf(w, "  redeem an operator invite:   dontguess join <token>\n")
 				fmt.Fprintf(w, "  or ask the operator to run:  dontguess allowlist add %s\n", signer.Npub())
 			}
