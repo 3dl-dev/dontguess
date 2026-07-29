@@ -543,9 +543,32 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 			return fmt.Errorf("startup: %w", aerr)
 		}
 
-		allow, aerr := identity.NewAllowlist(fleet...)
-		if aerr != nil {
-			return fmt.Errorf("fleet allowlist: %w", aerr)
+		// dontguess-31b: QUARANTINE unusable entries instead of refusing to boot.
+		// A single allowlist entry that is not a valid secp256k1 pubkey used to
+		// abort startup here, and open admission could write exactly such an entry
+		// on its own — so the exchange bricked itself and stayed down until the
+		// config was hand-edited (`allowlist remove` could not clear it either,
+		// because it validated the very key it was being asked to delete).
+		//
+		// Dropping an unusable entry admits nobody who was not already admitted:
+		// event pubkeys are signature-verified curve points, so an entry that is
+		// not one can never match. See identity.NewAllowlistPartition.
+		allow, unusable := identity.NewAllowlistPartition(fleet...)
+		if len(unusable) > 0 {
+			logger.Printf("  fleet allowlist: QUARANTINED %d unusable entr%s (not valid secp256k1 pubkeys); serving on the remaining %d",
+				len(unusable), plural(len(unusable), "y", "ies"), allow.Len())
+			for _, u := range unusable {
+				logger.Printf("    quarantined: %s", u)
+			}
+			// Self-heal the durable config so the same entries are not re-quarantined
+			// on every boot and cannot wedge a later roster republish. Best-effort:
+			// a failed rewrite is loud but never fatal — the in-memory allowlist is
+			// already correct and the operator must come up regardless.
+			if healed, herr := pruneUnusableAllowlistEntries(dgHome, unusable); herr != nil {
+				logger.Printf("    WARN: could not prune quarantined entries from config (%v) — they will be re-quarantined next boot", herr)
+			} else if healed {
+				logger.Printf("    pruned %d quarantined entr%s from %s", len(unusable), plural(len(unusable), "y", "ies"), exchange.ConfigPath(dgHome))
+			}
 		}
 		ks := exchange.NewKeySet(allow.HexKeys()...)
 		tc, terr := exchange.NewTrustChecker(engineOperatorKey, ks)
@@ -824,6 +847,7 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 		dgHome:         dgHome,
 		publishRoster:  publishRoster,
 		nowUnix:        func() int64 { return time.Now().Unix() },
+		logger:         logger.Printf,
 		// Retention side of live de-admit / re-admit (dontguess-23c): revoke records
 		// the durable tombstone + withholds the seller's inventory now; re-admit
 		// clears it + re-indexes the retained inventory.

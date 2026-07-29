@@ -200,11 +200,25 @@ func mutateAllowlistConfig(cfg *exchange.Config, action, targetHex string) (chan
 	return changed
 }
 
-// dropHexEntry returns list without any entry whose normalized hex equals targetHex.
+// dropHexEntry returns list without any entry whose normalized hex equals
+// targetHex.
+//
+// dontguess-31b: the raw-string fallback is load-bearing, not defensive tidying.
+// normalizeToHex FAILS on an entry that is not a valid pubkey, and the original
+// `err == nil` guard treated that failure as "not a match" — so a malformed
+// entry was the one thing this function could never delete. Combined with
+// runAllowlistRemove rejecting a malformed argument up front, a poisoned config
+// was self-sealing: the operator could neither remove the entry nor boot with
+// it. Compare raw lowercased strings too, so a stored entry can always be
+// removed by naming it exactly as it appears on disk.
 func dropHexEntry(list []string, targetHex string) []string {
+	target := strings.ToLower(strings.TrimSpace(targetHex))
 	var kept []string
 	for _, e := range list {
-		if h, err := normalizeToHex(e); err == nil && h == targetHex {
+		if h, err := normalizeToHex(e); err == nil && h == target {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(e)) == target {
 			continue
 		}
 		kept = append(kept, e)
@@ -214,12 +228,33 @@ func dropHexEntry(list []string, targetHex string) []string {
 
 // npub or hex. Removing an absent entry is a no-op, not an error.
 func runAllowlistRemove(dgHome, npub string, out io.Writer) error {
-	if _, err := identity.NewAllowlist(npub); err != nil {
-		return fmt.Errorf("allowlist remove: %w", err)
+	// dontguess-31b: do NOT validate the key being removed. Removal is
+	// monotonically safe — it can only ever shrink the allowlist — and refusing
+	// to remove an invalid key is precisely what made a poisoned config
+	// unrecoverable: the entry blocked every operator boot, and the one command
+	// that could have cleared it rejected the entry for being the thing it was
+	// being asked to delete. An operator must always be able to take a key OUT.
+	//
+	// An empty target is still a loud error: there is nothing to match, and
+	// reporting success for a typo is worse than refusing.
+	raw := strings.TrimSpace(npub)
+	if raw == "" {
+		return fmt.Errorf("allowlist remove: empty key")
 	}
-	hexKey, err := normalizeToHex(npub)
+
+	// Prefer the canonical hex when the argument is a real pubkey (so npub- and
+	// hex-stored forms of the same key still reconcile); otherwise fall through
+	// with the raw argument and let dropHexEntry match it literally against the
+	// stored entry.
+	//
+	// Validate via identity.NormalizeAllowlistEntry, NOT normalizeToHex —
+	// normalizeToHex lowercases any non-npub string and returns nil error, so it
+	// cannot distinguish a real key from junk and would make the literal-removal
+	// branch unreachable.
+	hexKey, err := identity.NormalizeAllowlistEntry(raw)
 	if err != nil {
-		return fmt.Errorf("allowlist remove: %w", err)
+		hexKey = strings.ToLower(raw)
+		fmt.Fprintf(out, "note: %q is not a valid pubkey — removing it literally as stored\n", hexKey)
 	}
 
 	// dontguess-113: live de-admission when the operator is running (KeySet.Remove +

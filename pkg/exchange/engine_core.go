@@ -546,6 +546,13 @@ type DegradationMetrics struct {
 
 	// OpenAdmissionGranted counts senders admitted on demand (dontguess-f6d).
 	OpenAdmissionGranted atomic.Int64
+	// OpenAdmissionMalformedKey counts admission attempts refused because the
+	// sender key is not a valid secp256k1 pubkey (dontguess-31b). These are the
+	// exchange's dead campfire-era Ed25519 identities replaying off the relay.
+	// Counted rather than merely logged because admitting one used to brick the
+	// next operator boot, so a rising number here is the early warning that the
+	// legacy-sender backlog is still being re-ingested.
+	OpenAdmissionMalformedKey atomic.Int64
 	// TrustDenialOther counts trust-gate rejections that don't fit the above
 	// buckets (e.g. RequiredLevel returning an unknown-op/unknown-phase error).
 	// Present so a future new rejection class is still counted, never dropped
@@ -662,6 +669,7 @@ type DegradationCounts struct {
 	TrustDenialLowReputation  int64 `json:"trust_denial_low_reputation"`
 	TrustDenialOther          int64 `json:"trust_denial_other"`
 	OpenAdmissionGranted      int64 `json:"open_admission_granted"`
+	OpenAdmissionMalformedKey int64 `json:"open_admission_malformed_key"`
 	DroppedUnlisted           int64 `json:"dropped_unlisted"`
 	DroppedLowReputation      int64 `json:"dropped_low_reputation"`
 	DroppedDedupPoison        int64 `json:"dropped_dedup_poison"`
@@ -917,6 +925,7 @@ func (e *Engine) DegradationSnapshot() DegradationCounts {
 		TrustDenialNotOperator:    e.degradation.TrustDenialNotOperator.Load(),
 		TrustDenialLowReputation:  e.degradation.TrustDenialLowReputation.Load(),
 		OpenAdmissionGranted:      e.degradation.OpenAdmissionGranted.Load(),
+		OpenAdmissionMalformedKey: e.degradation.OpenAdmissionMalformedKey.Load(),
 		TrustDenialOther:          e.degradation.TrustDenialOther.Load(),
 		DroppedUnlisted:           e.degradation.DroppedUnlisted.Load(),
 		DroppedLowReputation:      e.degradation.DroppedLowReputation.Load(),

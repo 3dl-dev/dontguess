@@ -1,6 +1,10 @@
 package exchange
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/3dl-dev/dontguess/pkg/identity"
+)
 
 // engine_admission.go — OPEN ADMISSION at fleet tier (dontguess-f6d).
 //
@@ -59,6 +63,7 @@ const (
 	admissionRefusedOperatorLevel                         // the op needs TrustOperator; never grantable on demand
 	admissionRefusedReputation                            // ErrLowReputation: a behavioural judgment, not an admission gap
 	admissionRefusedRevoked                               // de-allowlisted for cause; only the operator may clear it
+	admissionRefusedMalformedKey                          // sender is not a valid pubkey; admitting it would poison durable state
 	admissionGranted                                      // admitted; the caller should retry the check
 )
 
@@ -72,6 +77,8 @@ func (o admissionOutcome) String() string {
 		return "refused: sender is below the reputation floor"
 	case admissionRefusedRevoked:
 		return "refused: sender was de-allowlisted for cause"
+	case admissionRefusedMalformedKey:
+		return "refused: sender is not a valid secp256k1 pubkey"
 	case admissionGranted:
 		return "granted"
 	default:
@@ -109,6 +116,24 @@ func (e *Engine) tryOpenAdmit(senderKey string, op Operation, phase SettlePhase,
 	}
 	if e.opts.TrustChecker.IsRevoked(senderKey) {
 		return admissionRefusedRevoked
+	}
+	// THE DURABLE-STATE FENCE (dontguess-31b). Admission WRITES the sender key
+	// into Config.FleetAllowlist, which the next boot loads through
+	// identity.NewAllowlist — a strictly stricter parser than anything on this
+	// path used to be. A sender key that is not a valid secp256k1 point (45% of
+	// this exchange's historical senders are dead campfire-era Ed25519 keys)
+	// therefore admitted fine here and then refused to load at startup, taking
+	// the whole operator down with it. Validate to the SAME standard the loader
+	// uses, before touching live or durable state.
+	//
+	// Refusing costs the sender nothing it had before: a key that cannot be a
+	// nostr pubkey cannot have signed the event that got here, so it can never
+	// legitimately transact anyway. It falls through to the ordinary rejection.
+	if _, kerr := identity.NormalizeAllowlistEntry(senderKey); kerr != nil {
+		e.degradation.OpenAdmissionMalformedKey.Add(1)
+		e.opts.log("engine: open admission: REFUSED %s — not a valid secp256k1 pubkey (%v); almost certainly a legacy pre-nostr identity. Not admitted, not persisted",
+			shortKey(senderKey), kerr)
+		return admissionRefusedMalformedKey
 	}
 
 	e.opts.TrustChecker.AdmitMember(senderKey)

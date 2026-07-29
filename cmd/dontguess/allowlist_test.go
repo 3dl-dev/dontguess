@@ -122,17 +122,61 @@ func TestAllowlist_AddRejectsMalformedNpub(t *testing.T) {
 	}
 }
 
-// TestAllowlist_RemoveRejectsMalformedNpub proves remove validates the same
-// way as add — a malformed npub is rejected before any config I/O.
-func TestAllowlist_RemoveRejectsMalformedNpub(t *testing.T) {
+// TestAllowlist_RemoveAcceptsAMalformedKeyLiterally pins a DELIBERATE CONTRACT
+// CHANGE (dontguess-31b), replacing the former
+// TestAllowlist_RemoveRejectsMalformedNpub.
+//
+// The old contract was "remove validates the same way as add". That symmetry
+// looked principled and was the third lock on a self-sealing failure: open
+// admission persisted an off-curve key, boot refused to load it, and the one
+// command that could have cleared it rejected the entry for being invalid — the
+// exact property being asserted here before. A live exchange stayed down until
+// its config was hand-edited.
+//
+// Add and remove are not symmetric operations. Add GRANTS authority and must
+// validate. Remove only ever REVOKES: it can be applied to any string and the
+// worst case is that nothing matches. Gating recovery on the validity of the
+// thing being recovered from is how an operator gets locked out of its own
+// exchange, so remove now accepts anything non-empty and matches it literally.
+func TestAllowlist_RemoveAcceptsAMalformedKeyLiterally(t *testing.T) {
 	t.Parallel()
 
 	dgHome := bootstrapAllowlistHome(t)
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+
+	// Seed a config holding a good key alongside a malformed one, exactly as the
+	// live operator's config looked when it could not boot.
+	cfg, err := exchange.LoadConfig(dgHome)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	cfg.FleetAllowlist = []string{id.PubKeyHex(), "not-an-npub-or-hex-key"}
+	if err := exchange.WriteConfig(exchange.ConfigPath(dgHome), cfg); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
 
 	var out bytes.Buffer
-	err := runAllowlistRemove(dgHome, "not-an-npub-or-hex-key", &out)
-	if err == nil {
-		t.Fatal("runAllowlistRemove with malformed npub returned nil error, want a loud rejection")
+	if err := runAllowlistRemove(dgHome, "not-an-npub-or-hex-key", &out); err != nil {
+		t.Fatalf("runAllowlistRemove refused a malformed key: %v — recovery must never be gated on the validity of the entry being removed", err)
+	}
+
+	after := readAllowlistConfig(t, dgHome)
+	if len(after.FleetAllowlist) != 1 || after.FleetAllowlist[0] != id.PubKeyHex() {
+		t.Fatalf("after remove fleet_allowlist = %v, want [%s] — removal must be surgical", after.FleetAllowlist, id.PubKeyHex())
+	}
+	// The operator is told what happened rather than it being silently coerced.
+	if !strings.Contains(out.String(), "not a valid pubkey") {
+		t.Errorf("removal of a malformed key was silent; output = %q", out.String())
+	}
+
+	// Empty input is still a loud error — there is nothing to match, and
+	// accepting it would make a typo look like a successful removal.
+	var emptyOut bytes.Buffer
+	if err := runAllowlistRemove(dgHome, "   ", &emptyOut); err == nil {
+		t.Error("runAllowlistRemove accepted an empty key, want a loud rejection")
 	}
 }
 

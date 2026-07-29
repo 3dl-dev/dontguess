@@ -76,6 +76,19 @@ type allowlistController struct {
 	mu         sync.Mutex
 	lastRoster int64
 	nowUnix    func() int64 // clock seam (defaults to time.Now().Unix())
+
+	// logger reports non-fatal roster anomalies (e.g. quarantined allowlist
+	// entries, dontguess-31b). nil in unit tests — use logf, never this directly.
+	logger func(format string, args ...any)
+}
+
+// logf reports a non-fatal controller anomaly, tolerating a nil logger so the
+// config-only unit tests can construct a controller without wiring one.
+func (c *allowlistController) logf(format string, args ...any) {
+	if c == nil || c.logger == nil {
+		return
+	}
+	c.logger(format, args...)
 }
 
 // apply is the OpAllowlist handler entry point. action is add|remove; targetHex is
@@ -252,9 +265,13 @@ func (c *allowlistController) rosterFromConfig() (*identity.Event, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	allow, err := identity.NewAllowlist(cfg.FleetAllowlist...)
-	if err != nil {
-		return nil, 0, err
+	// Partition, not hard-error (dontguess-31b): one unusable entry must not be
+	// able to stop the operator republishing its roster. A hard error here meant
+	// a poisoned config also silently froze the relay's view of fleet membership
+	// at whatever stale roster was last published.
+	allow, unusable := identity.NewAllowlistPartition(cfg.FleetAllowlist...)
+	if len(unusable) > 0 {
+		c.logf("roster: skipping %d unusable allowlist entr%s (not valid secp256k1 pubkeys)", len(unusable), plural(len(unusable), "y", "ies"))
 	}
 	members := allow.HexKeys()
 	c.mu.Lock()
@@ -292,6 +309,53 @@ func (c *allowlistController) buildRoster(members []string) (*identity.Event, er
 	return ev, nil
 }
 
+// plural picks the singular or plural suffix for n, so log lines read correctly
+// without a second format string.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// pruneUnusableAllowlistEntries removes entries that can never be a nostr pubkey
+// from the persisted Config.FleetAllowlist (dontguess-31b self-heal). Reports
+// whether the config actually changed.
+//
+// This is what stops a single poisoned entry from being a permanent condition.
+// Quarantining at load keeps the operator serving, but leaving the entry on disk
+// means every boot re-quarantines it and every roster republish still has to
+// route around it. Removal is monotonically safe — these entries authorize
+// nobody — so it needs no operator confirmation.
+func pruneUnusableAllowlistEntries(dgHome string, unusable []string) (bool, error) {
+	if len(unusable) == 0 {
+		return false, nil
+	}
+	drop := make(map[string]struct{}, len(unusable))
+	for _, u := range unusable {
+		drop[strings.ToLower(strings.TrimSpace(u))] = struct{}{}
+	}
+	cfg, err := exchange.LoadConfig(dgHome)
+	if err != nil {
+		return false, err
+	}
+	kept := make([]string, 0, len(cfg.FleetAllowlist))
+	for _, e := range cfg.FleetAllowlist {
+		if _, bad := drop[strings.ToLower(strings.TrimSpace(e))]; bad {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if len(kept) == len(cfg.FleetAllowlist) {
+		return false, nil
+	}
+	cfg.FleetAllowlist = kept
+	if err := exchange.WriteConfig(exchange.ConfigPath(dgHome), cfg); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // persistFleetAllowlistChange applies an add|remove to the on-disk
 // Config.FleetAllowlist and writes it back. Membership is compared by normalized
 // hex (normalizeToHex) so an entry stored earlier as an npub and a hex target for
@@ -309,6 +373,17 @@ func persistFleetAllowlistChange(dgHome, action, targetHex string) ([]string, er
 	}
 	if action != allowlistActionAdd && action != allowlistActionRemove {
 		return nil, fmt.Errorf("allowlist: unknown action %q", action)
+	}
+	// dontguess-31b: never WRITE a key that the boot loader would refuse to READ.
+	// This is the last chokepoint before durable state for every server-side
+	// admission path (IPC `allowlist add`, invite redeem, open admission), so
+	// validating here means no future admission caller can reintroduce the
+	// boot-blocking poison by forgetting its own check. Removal is exempt —
+	// see runAllowlistRemove.
+	if action == allowlistActionAdd {
+		if _, kerr := identity.NormalizeAllowlistEntry(targetHex); kerr != nil {
+			return nil, fmt.Errorf("allowlist add: refusing to persist an unusable key: %w", kerr)
+		}
 	}
 	// Mutate FleetAllowlist AND the RevokedSellers tombstone coherently
 	// (dontguess-23c): remove records a tombstone, add clears it.

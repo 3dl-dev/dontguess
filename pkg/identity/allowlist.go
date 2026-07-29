@@ -58,24 +58,74 @@ func NewAllowlist(entries ...string) (*Allowlist, error) {
 
 // Add admits a single entry (npub or hex) to the allowlist.
 func (a *Allowlist) Add(entry string) error {
+	hexKey, err := NormalizeAllowlistEntry(entry)
+	if err != nil {
+		return err
+	}
+	a.members[hexKey] = strings.TrimSpace(entry)
+	return nil
+}
+
+// NormalizeAllowlistEntry validates one allowlist entry (npub or 64-char hex)
+// and returns its canonical lowercase-hex pubkey form. It is the single place
+// that decides whether a string can ever be a nostr pubkey, so every path that
+// admits a key — operator `allowlist add`, invite redeem, and open admission —
+// enforces exactly the same rule as the one that loads the allowlist at boot.
+//
+// dontguess-31b: open admission did NOT run this check, so it persisted a
+// sender key that is not a point on the secp256k1 curve. The boot-time loader
+// DID run it, so the operator then refused to start — a live exchange bricked
+// by an entry that admission itself created. An admission path that is laxer
+// than the load path can always poison durable state.
+func NormalizeAllowlistEntry(entry string) (string, error) {
 	entry = strings.TrimSpace(entry)
-	var hexKey string
-	switch {
-	case strings.HasPrefix(entry, npubHRP+"1"):
+	if strings.HasPrefix(entry, npubHRP+"1") {
 		h, err := DecodeNpubToHex(entry)
 		if err != nil {
-			return fmt.Errorf("allowlist: invalid npub %q: %w", entry, err)
+			return "", fmt.Errorf("allowlist: invalid npub %q: %w", entry, err)
 		}
-		hexKey = h
-	default:
-		// Treat as hex; validate it is a well-formed 32-byte x-only pubkey.
-		if _, err := parsePubKeyHex(entry); err != nil {
-			return fmt.Errorf("allowlist: entry %q is neither a valid npub nor a valid hex pubkey: %w", entry, err)
-		}
-		hexKey = strings.ToLower(entry)
+		return h, nil
 	}
-	a.members[hexKey] = entry
-	return nil
+	// Treat as hex; validate it is a well-formed 32-byte x-only pubkey.
+	if _, err := parsePubKeyHex(entry); err != nil {
+		return "", fmt.Errorf("allowlist: entry %q is neither a valid npub nor a valid hex pubkey: %w", entry, err)
+	}
+	return strings.ToLower(entry), nil
+}
+
+// NewAllowlistPartition builds an allowlist from the usable entries and returns
+// the unusable ones instead of failing. It never errors.
+//
+// Use this wherever a malformed entry must not be able to take the exchange
+// down — loading persisted config at boot, and rebuilding the roster to
+// republish. Use NewAllowlist (hard error) for an explicit operator act like
+// `dontguess allowlist add`, where the operator typed the entry and must be
+// told it is wrong rather than have it silently swallowed.
+//
+// WHY DROPPING IS FAIL-CLOSED HERE, not the security hole NewAllowlist's doc
+// warns about: Allowed() is only ever asked about pubkeys taken off signature-
+// verified nostr events, which are by construction valid curve points. An entry
+// that is NOT a valid pubkey therefore cannot match any caller — it admits
+// nobody whether it is kept or dropped. Dropping it is strictly no more
+// permissive than keeping it, while refusing to build the allowlist at all
+// takes down every admission decision the operator needs to make. That
+// asymmetry is the whole lesson of dontguess-31b: fail closed on the ENTRY,
+// not on the SERVICE.
+func NewAllowlistPartition(entries ...string) (*Allowlist, []string) {
+	a := &Allowlist{members: make(map[string]string)}
+	var unusable []string
+	for _, e := range entries {
+		if strings.TrimSpace(e) == "" {
+			continue
+		}
+		hexKey, err := NormalizeAllowlistEntry(e)
+		if err != nil {
+			unusable = append(unusable, strings.TrimSpace(e))
+			continue
+		}
+		a.members[hexKey] = strings.TrimSpace(e)
+	}
+	return a, unusable
 }
 
 // Allowed reports whether the given hex pubkey (as it appears on a nostr event)
