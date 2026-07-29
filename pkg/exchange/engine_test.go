@@ -2,7 +2,6 @@ package exchange_test
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 	store "github.com/3dl-dev/dontguess/pkg/store"
 )
 
@@ -27,15 +27,22 @@ type testAgent struct {
 // PublicKeyHex returns the hex-encoded public key for this test agent.
 func (a *testAgent) PublicKeyHex() string { return a.pubKeyHex }
 
-// newTestAgent generates a fresh ed25519 keypair and returns a testAgent.
-// Uses only the standard library — no internal cf imports required.
+// newTestAgent generates a fresh secp256k1 keypair and returns a testAgent.
+//
+// It MUST be secp256k1, not ed25519 (dontguess-31b). A nostr sender key is an
+// x-only secp256k1 pubkey, and only about half of all random 32-byte values are
+// valid points on that curve — so an ed25519-keyed test agent modelled a sender
+// the real exchange can never see, and did so nondeterministically. That hid the
+// production defect twice over: the admission path had no curve check to catch,
+// and any test that would have caught one passed or failed on a coin flip. Mint
+// keys of the same type production requires and both problems go away.
 func newTestAgent(t *testing.T) *testAgent {
 	t.Helper()
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	id, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("generating test agent key: %v", err)
 	}
-	return &testAgent{pubKeyHex: hex.EncodeToString(pub)}
+	return &testAgent{pubKeyHex: id.PubKeyHex()}
 }
 
 // testHarness sets up a minimal, campfire-free exchange for engine tests
