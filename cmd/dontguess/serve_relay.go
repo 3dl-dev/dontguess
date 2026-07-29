@@ -100,6 +100,15 @@ type relayWiringConfig struct {
 	// surface for out-of-band operator events — the roster republish the live
 	// allowlist hot-reload emits. nil (every pre-existing call site) is a no-op.
 	legPublisherSink func(*demuxPublisher)
+	// publishRegistry, when set, receives this leg's Outbox so `dontguess status`
+	// can report egress health (dontguess-b4b). nil is a no-op.
+	publishRegistry *publishRegistry
+}
+
+// WithPublishRegistry registers this relay leg's Outbox with reg so the operator
+// IPC/status path can read publish lag and quarantine counts across every leg.
+func WithPublishRegistry(reg *publishRegistry) relayWiringOption {
+	return func(c *relayWiringConfig) { c.publishRegistry = reg }
 }
 
 // WithRosterFolder wires the operator-signed fleet-roster fold (design §2/P5) into
@@ -210,6 +219,77 @@ func (a *appendNotifier) fire() {
 	}
 }
 
+// defaultPublishLagAlarm is the publish_lag at and above which every outbox tick
+// loud-logs. Steady state is 0: the engine folds an operator record and the leg
+// publishes it within one tick, so a lag that persists across ticks means events
+// are sitting at RF=1 and something is wrong.
+const defaultPublishLagAlarm = 8
+
+// publishMetrics is the aggregate egress health of every attached relay leg
+// (dontguess-b4b).
+type publishMetrics struct {
+	// Lag is the WORST lag across legs: operator-authored records folded locally
+	// but not yet published+ACKed anywhere. Non-zero means those events currently
+	// live at RF=1.
+	Lag int64 `json:"publish_lag"`
+	// Quarantined is the total count of records the relay permanently rejected and
+	// the outbox advanced past. These will never reach the relay without operator
+	// action.
+	Quarantined int64 `json:"publish_quarantined"`
+	// Retried is the total failed-and-retried publish attempts across legs.
+	Retried int64 `json:"publish_retry"`
+	// Legs is how many relay legs reported, so a zero Lag can be distinguished
+	// from "no leg is attached and nothing is publishing at all".
+	Legs int `json:"publish_legs"`
+}
+
+// publishRegistry fans a metrics read across every attached leg's Outbox, the
+// same shape (and for the same reason) as appendNotifier: the engine and the IPC
+// socket are built before any leg exists, and a serve process may attach N legs.
+//
+// WHY THIS EXISTS (dontguess-b4b). The Outbox has always computed PublishLag, and
+// nothing ever read it. When a malformed e-tag wedged the outbox (dontguess-6d2),
+// 36 operator messages — matches, settlements, buy-miss answers owed to real
+// buyers — sat unpublished for THIRTEEN HOURS while `dontguess status` reported
+// the exchange healthy the entire time. The measurement existed; only the wiring
+// was missing. A health signal that cannot tell "shipping" from "silently not
+// shipping" is worse than no signal, because it is trusted.
+type publishRegistry struct {
+	mu   sync.Mutex
+	legs []*relay.Outbox
+}
+
+// add registers one attached leg's Outbox.
+func (r *publishRegistry) add(ob *relay.Outbox) {
+	if ob == nil {
+		return
+	}
+	r.mu.Lock()
+	r.legs = append(r.legs, ob)
+	r.mu.Unlock()
+}
+
+// snapshot aggregates egress health across legs. Lag is the WORST leg rather than
+// a sum: each leg publishes the same local records independently, so a sum would
+// multiply one stall by the leg count and read as N times worse than it is, while
+// the max answers the question actually being asked — is anything not shipping?
+func (r *publishRegistry) snapshot() publishMetrics {
+	r.mu.Lock()
+	legs := r.legs
+	r.mu.Unlock()
+
+	var m publishMetrics
+	m.Legs = len(legs)
+	for _, ob := range legs {
+		if lag := ob.PublishLag(); lag > m.Lag {
+			m.Lag = lag
+		}
+		m.Quarantined += ob.PublishQuarantined()
+		m.Retried += ob.PublishRetry()
+	}
+	return m
+}
+
 // frameReceiver is the subscription read surface the single reader loop drives:
 // one blocking read of the next wire frame. *relay.Conn satisfies it (Recv
 // transparently reconnects on drop); tests inject an in-process fake relay.
@@ -297,6 +377,13 @@ func buildRelayWiring(
 		// plaintext corpus local-only. No-op (0) unless WithClimbWatermark was
 		// threaded (serve.go's relay-attach path) AND this leg's cursor is fresh.
 		relay.WithClimbFence(cfg.climbWatermark),
+		// LAG ALARM (dontguess-b4b). Without this, a wedged outbox is silent: the
+		// Outbox computed publish_lag from the first commit and nothing ever read
+		// it, so 36 stranded operator events went unnoticed for thirteen hours
+		// (dontguess-6d2). The threshold is deliberately low — steady state is 0,
+		// and a handful of records behind is already worth a line in the log,
+		// because the interesting failure is a lag that never returns to 0.
+		relay.WithLagAlarmThreshold(defaultPublishLagAlarm),
 	}
 	if cfg.plaintextEgressFence {
 		// CONTENT-INDEXED egress gate (dontguess-294). The climb watermark above is
@@ -1286,6 +1373,7 @@ func attachRelayTransport(
 	opts ...relayWiringOption,
 ) (stop func(), err error) {
 	pub := newDemuxPublisher(send)
+	var publishReg *publishRegistry
 	// Hand this leg's publish surface to a WithLegPublisherSink caller (dontguess-113)
 	// so the serve process can republish the operator roster over the leg on a live
 	// allowlist hot-reload. Apply the opts to a local config to read the sink; the
@@ -1298,6 +1386,7 @@ func attachRelayTransport(
 		if wcfg.legPublisherSink != nil {
 			wcfg.legPublisherSink(pub)
 		}
+		publishReg = wcfg.publishRegistry
 	}
 	// The live serve path ALWAYS installs the content-indexed egress fence
 	// (dontguess-294). Appended here rather than made the default inside
@@ -1317,6 +1406,8 @@ func attachRelayTransport(
 	if notifier != nil {
 		notifier.add(wiring.outbox.Notify)
 	}
+	// Register this leg's Outbox for egress-health reporting (dontguess-b4b).
+	publishReg.addLeg(wiring.outbox)
 
 	// LOW: warn if enabling the relay would re-attribute campfire-era operator
 	// records under the new nostr operator key (non-fatal, LOUD).
@@ -1467,6 +1558,7 @@ func attachRelayLegsAsync(
 	roster *rosterFolder,
 	redeem *redeemHandler,
 	onLegUp func(pub *demuxPublisher),
+	publishReg *publishRegistry,
 ) {
 	for _, relayURL := range relayURLs {
 		relayURL := relayURL
@@ -1495,7 +1587,9 @@ func attachRelayLegsAsync(
 					WithRedeemHandler(redeem),
 					// Capture the leg's publish surface so the live allowlist hot-reload
 					// can republish the operator roster over this relay (dontguess-113).
-					WithLegPublisherSink(func(p *demuxPublisher) { legPub = p }))
+					WithLegPublisherSink(func(p *demuxPublisher) { legPub = p }),
+					// Egress health for `dontguess status` (dontguess-b4b).
+					WithPublishRegistry(publishReg))
 				if aerr != nil {
 					_ = conn.Close()
 					if ctx.Err() != nil {
@@ -1526,4 +1620,13 @@ func attachRelayLegsAsync(
 			}
 		}()
 	}
+}
+
+// addLeg registers ob, tolerating a nil registry so every existing call site
+// (and every test that does not care about egress metrics) is unaffected.
+func (r *publishRegistry) addLeg(ob *relay.Outbox) {
+	if r == nil {
+		return
+	}
+	r.add(ob)
 }

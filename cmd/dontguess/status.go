@@ -92,6 +92,12 @@ type StatusSnapshot struct {
 	Operator        OperatorHealth              `json:"operator"`
 	Degradation     *exchange.DegradationCounts `json:"degradation"`
 	DegradationNote string                      `json:"degradation_note,omitempty"`
+	// Publish is relay egress health (dontguess-b4b): is the exchange actually
+	// SHIPPING what it accepted? Every other field above can read healthy while
+	// nothing reaches the relay — that is exactly what happened for thirteen
+	// hours in dontguess-6d2.
+	Publish     *publishMetrics `json:"publish,omitempty"`
+	PublishNote string          `json:"publish_note,omitempty"`
 }
 
 // --------------------------------------------------------------------------
@@ -437,14 +443,21 @@ func readDegradationMetrics(dgHome string) (*exchange.DegradationCounts, string)
 
 	var resp struct {
 		Degradation exchange.DegradationCounts `json:"degradation"`
+		Publish     *publishMetrics            `json:"publish"`
 	}
 	dec := json.NewDecoder(conn)
 	if err := dec.Decode(&resp); err != nil {
 		return nil, "operator not reachable"
 	}
 
+	lastPublishMetrics = resp.Publish
 	return &resp.Degradation, ""
 }
+
+// lastPublishMetrics carries the publish block out of readDegradationMetrics,
+// which shares the single OpMetrics round-trip. Set on every successful read and
+// nil when the operator is unreachable or is running on the individual tier.
+var lastPublishMetrics *publishMetrics
 
 // --------------------------------------------------------------------------
 // collectStatus
@@ -472,7 +485,16 @@ func collectStatus(dgHome string, since time.Duration) (*StatusSnapshot, error) 
 
 	op := readOperatorHealth(dgHome, cutoff, lastActivityNano)
 
+	lastPublishMetrics = nil
 	degradation, degradationNote := readDegradationMetrics(dgHome)
+	publish, publishNote := lastPublishMetrics, ""
+	if publish == nil {
+		if degradationNote != "" {
+			publishNote = degradationNote
+		} else {
+			publishNote = "no relay leg attached (individual tier) — nothing is published"
+		}
+	}
 
 	snap := &StatusSnapshot{
 		SchemaVersion:   1,
@@ -482,6 +504,8 @@ func collectStatus(dgHome string, since time.Duration) (*StatusSnapshot, error) 
 		Operator:        op,
 		Degradation:     degradation,
 		DegradationNote: degradationNote,
+		Publish:         publish,
+		PublishNote:     publishNote,
 	}
 	return snap, nil
 }
@@ -539,6 +563,34 @@ func printStatus(snap *StatusSnapshot, asJSON bool) {
 		fmt.Printf("  credit unverifiable:%d\n", snap.Degradation.CreditCapUnverifiable)
 	} else {
 		fmt.Printf("  n/a (%s)\n", snap.DegradationNote)
+	}
+	fmt.Println()
+
+	// Relay egress (dontguess-b4b). Deliberately its own block and deliberately
+	// phrased as a VERDICT rather than three raw numbers: the counters above all
+	// answer "is the exchange accepting work?", and every one of them read healthy
+	// through thirteen hours in which the exchange published nothing at all.
+	fmt.Printf("Relay egress (is the operator actually shipping what it accepted?)\n")
+	switch {
+	case snap.Publish == nil:
+		fmt.Printf("  n/a (%s)\n", snap.PublishNote)
+	case snap.Publish.Legs == 0:
+		fmt.Printf("  WEDGED: no relay leg attached — nothing is being published\n")
+	default:
+		verdict := "OK — all operator events published"
+		if snap.Publish.Lag > 0 {
+			verdict = fmt.Sprintf("BEHIND — %d operator event(s) folded locally but NOT on the relay (RF=1)", snap.Publish.Lag)
+		}
+		fmt.Printf("  %s\n", verdict)
+		fmt.Printf("  publish lag:   %d\n", snap.Publish.Lag)
+		fmt.Printf("  quarantined:   %d\n", snap.Publish.Quarantined)
+		fmt.Printf("  retries:       %d\n", snap.Publish.Retried)
+		fmt.Printf("  relay legs:    %d\n", snap.Publish.Legs)
+		if snap.Publish.Quarantined > 0 {
+			fmt.Printf("  WARNING: %d record(s) were permanently rejected by the relay and skipped.\n", snap.Publish.Quarantined)
+			fmt.Printf("           They exist ONLY in the local log and will never reach the relay\n")
+			fmt.Printf("           without operator action. See 'QUARANTINED' in the operator log.\n")
+		}
 	}
 	fmt.Println()
 

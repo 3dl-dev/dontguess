@@ -660,9 +660,14 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 	// individual tier (no relays) OnLocalAppend stays nil — byte-for-byte unchanged.
 	var appendNotify *appendNotifier
 	var onLocalAppend func()
+	// publishReg aggregates every attached leg's Outbox so `dontguess status` can
+	// report egress health (dontguess-b4b). nil on the individual tier, where there
+	// is no relay and therefore nothing to publish.
+	var publishReg *publishRegistry
 	if len(relayURLs) > 0 {
 		appendNotify = &appendNotifier{}
 		onLocalAppend = appendNotify.fire
+		publishReg = &publishRegistry{}
 	}
 
 	// No ReadClient, no WriteClient — neither requires a campfire. ScripStore and
@@ -862,7 +867,7 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 		return allowCtrl.applyAuthorized(allowlistActionAdd, hexKey)
 	}
 
-	socketCleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger, allowCtrl)
+	socketCleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger, []*publishRegistry{publishReg}, allowCtrl)
 	if err != nil {
 		return fmt.Errorf("operator socket: %w", err)
 	}
@@ -931,7 +936,7 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 			logger.Printf("  roster: asserted %d-member fleet roster from config on leg attach (supersedes any stale roster)", n)
 		}
 		attachRelayLegsAsync(ctx, &relayWG, &legsMu, &legs, relayURLs, localStore, relaySigner,
-			localStorePath, appendNotify, eng, logger, climbWatermark, rosterFold, redeemH, onLegUp)
+			localStorePath, appendNotify, eng, logger, climbWatermark, rosterFold, redeemH, onLegUp, publishReg)
 		// Combined shutdown in the dontguess-e35 order: cancel the context FIRST
 		// (unblocks every reader/outbox and every in-flight dial/attach retry),
 		// THEN wait for the attach goroutines to exit, THEN close each attached
@@ -1123,7 +1128,7 @@ func recordOperatorSocketPath(dgHome, sockPath string) error {
 // config on success so CLI clients can find it. Returns a cleanup func that
 // closes the listener and removes the socket file, and a non-nil error if the
 // socket could not be bound or the resolved path could not be persisted.
-func bindOperatorSocket(ctx context.Context, dgHome string, eng *exchange.Engine, logger *log.Logger, allowCtrl ...*allowlistController) (func(), error) {
+func bindOperatorSocket(ctx context.Context, dgHome string, eng *exchange.Engine, logger *log.Logger, publishReg []*publishRegistry, allowCtrl ...*allowlistController) (func(), error) {
 	sockPath := resolveOperatorSocketPath(dgHome)
 	ln, err := listenOperatorSocket(sockPath)
 	if err != nil {
@@ -1135,7 +1140,7 @@ func bindOperatorSocket(ctx context.Context, dgHome string, eng *exchange.Engine
 		return nil, fmt.Errorf("record operator socket path: %w", rerr)
 	}
 	logger.Printf("  operator socket: %s", sockPath)
-	go serveOperatorSocket(ctx, ln, eng, allowCtrl...)
+	go serveOperatorSocket(ctx, ln, eng, publishReg, allowCtrl...)
 	return func() {
 		ln.Close()
 		os.Remove(sockPath)
@@ -1368,7 +1373,7 @@ type operatorRequest struct {
 // so a hung client cannot block subsequent operator commands (dontguess-481a).
 // A WaitGroup allows clean shutdown — the function returns only after all
 // in-flight handlers finish.
-func serveOperatorSocket(ctx context.Context, ln net.Listener, eng *exchange.Engine, allowCtrl ...*allowlistController) {
+func serveOperatorSocket(ctx context.Context, ln net.Listener, eng *exchange.Engine, publishReg []*publishRegistry, allowCtrl ...*allowlistController) {
 	ctrl := firstAllowlistController(allowCtrl)
 	// Close the listener when the context is done so Accept unblocks.
 	go func() {
@@ -1392,7 +1397,7 @@ func serveOperatorSocket(ctx context.Context, ln net.Listener, eng *exchange.Eng
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			handleOperatorConn(conn, eng, ctrl)
+			handleOperatorConn(conn, eng, publishReg, ctrl)
 		}()
 	}
 }
@@ -1408,7 +1413,7 @@ func serveOperatorSocket(ctx context.Context, ln net.Listener, eng *exchange.Eng
 //	    being passed to json.NewDecoder, bounding memory allocation from
 //	    oversized payloads. All legitimate requests are small JSON objects
 //	    well under this ceiling.
-func handleOperatorConn(conn net.Conn, eng *exchange.Engine, allowCtrl ...*allowlistController) {
+func handleOperatorConn(conn net.Conn, eng *exchange.Engine, publishReg []*publishRegistry, allowCtrl ...*allowlistController) {
 	defer conn.Close()
 	ctrl := firstAllowlistController(allowCtrl)
 
@@ -1508,7 +1513,17 @@ func handleOperatorConn(conn net.Conn, eng *exchange.Engine, allowCtrl ...*allow
 		// Degradation counters (docs/design/relay-transport.md §2.4a D4 + §3):
 		// dispatch trust-gate rejections, counted and alarmed rather than
 		// silently dropped (dontguess-388). Read-only, no engine mutation.
-		enc.Encode(map[string]any{"degradation": eng.DegradationSnapshot()}) //nolint:errcheck
+		//
+		// Publish/egress health rides the SAME op (dontguess-b4b) so one status
+		// call answers both "is the exchange rejecting work?" and "is the exchange
+		// actually shipping what it accepted?". The second question had no answer
+		// at all until a wedged outbox stranded 36 operator messages for thirteen
+		// hours while every other counter here read healthy.
+		resp := map[string]any{"degradation": eng.DegradationSnapshot()}
+		if reg := firstPublishRegistry(publishReg); reg != nil {
+			resp["publish"] = reg.snapshot()
+		}
+		enc.Encode(resp) //nolint:errcheck
 
 	case OpMint:
 		// Operator genesis-funding god-button (design §4). Reaching this socket
@@ -1661,4 +1676,17 @@ func buildLogDest(dgHome string) (io.Writer, error) {
 		Compress:   true,
 	}
 	return io.MultiWriter(os.Stderr, roller), nil
+}
+
+// firstPublishRegistry returns the first non-nil registry from a slice, or nil.
+// It mirrors firstAllowlistController so the operator socket can take egress
+// metrics as an OPTIONAL dependency: every existing call site (and every test)
+// passes none and simply reports no publish block.
+func firstPublishRegistry(regs []*publishRegistry) *publishRegistry {
+	for _, r := range regs {
+		if r != nil {
+			return r
+		}
+	}
+	return nil
 }

@@ -89,7 +89,7 @@ func newAllowlistTestServer(t *testing.T) *allowlistTestServer {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serveOperatorSocket(ctx, ln, eng, ctrl)
+		serveOperatorSocket(ctx, ln, eng, nil, ctrl)
 	}()
 	t.Cleanup(func() {
 		cancel()

@@ -185,7 +185,7 @@ func startSocketServer(t *testing.T, eng *exchange.Engine) (string, context.Canc
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serveOperatorSocket(ctx, ln, eng)
+		serveOperatorSocket(ctx, ln, eng, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -769,7 +769,7 @@ func TestOperatorSocket_DGHomeOverride(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		serveOperatorSocket(ctx, ln, eng)
+		serveOperatorSocket(ctx, ln, eng, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -926,7 +926,7 @@ func TestOperatorSocket_AcceptPutDeadlineReset(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleOperatorConn(tracker, eng)
+		handleOperatorConn(tracker, eng, nil)
 	}()
 
 	// Send accept-put from the client side.

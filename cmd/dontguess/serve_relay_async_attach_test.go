@@ -110,7 +110,7 @@ func TestServeStartup_OperatorSocketRespondsUnder1s_WithDeadRelayLeg(t *testing.
 	// 1) Bind the operator socket FIRST — exactly the order runServeLocal now
 	// uses (dontguess-347 fix). bindOperatorSocket now returns a hard error on
 	// bind failure (dontguess-7b2) instead of a nil-cleanup WARN.
-	socketCleanup, bindErr := bindOperatorSocket(ctx, dgHome, eng, logger)
+	socketCleanup, bindErr := bindOperatorSocket(ctx, dgHome, eng, logger, nil)
 	if bindErr != nil {
 		t.Fatalf("bindOperatorSocket: %v", bindErr)
 	}
@@ -123,7 +123,7 @@ func TestServeStartup_OperatorSocketRespondsUnder1s_WithDeadRelayLeg(t *testing.
 	var legsMu sync.Mutex
 	var legs []relayLeg
 	attachRelayLegsAsync(ctx, &wg, &legsMu, &legs, []string{relayURL},
-		localStore, operatorIdentity, localStorePath, nil, eng, logger, 0, nil, nil, nil)
+		localStore, operatorIdentity, localStorePath, nil, eng, logger, 0, nil, nil, nil, nil)
 	// attachRelayLegsAsync itself must return immediately (it only spawns
 	// goroutines); if it were the old synchronous per-URL loop this call
 	// would already be blocked inside Conn.dialAndAuth against the black

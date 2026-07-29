@@ -109,7 +109,7 @@ func TestBindOperatorSocket_LongDGHome_RelocatesUnderXDGRuntimeDir(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger)
+	cleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger, nil)
 	if err != nil {
 		t.Fatalf("bindOperatorSocket with long DG_HOME: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestBindOperatorSocket_BindFailure_IsHardError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger)
+	cleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger, nil)
 	if err == nil {
 		t.Fatalf("bindOperatorSocket returned nil error against a pre-occupied socket path — bind failure was silently swallowed (the exact dontguess-7b2 regression)")
 	}
@@ -283,7 +283,7 @@ func TestBindOperatorSocket_UnsetXDGRuntimeDir_DoesNotTouchTempDirPerms(t *testi
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger)
+	cleanup, err := bindOperatorSocket(ctx, dgHome, eng, logger, nil)
 	if err != nil {
 		t.Fatalf("bindOperatorSocket with unset XDG_RUNTIME_DIR: %v", err)
 	}

@@ -158,7 +158,7 @@ func TestAdmitRoundTrip_BothGatesLive_NoRestart_c10(t *testing.T) {
 		t.Fatalf("listenOperatorSocket: %v", err)
 	}
 	srvDone := make(chan struct{})
-	go func() { defer close(srvDone); serveOperatorSocket(ctx, ln, eng, ctrl) }()
+	go func() { defer close(srvDone); serveOperatorSocket(ctx, ln, eng, nil, ctrl) }()
 	t.Cleanup(func() { cancel(); <-srvDone })
 
 	// Wait for the reader's initial subscribe REQ, then snapshot the REQ count. The

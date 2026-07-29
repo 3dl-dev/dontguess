@@ -251,7 +251,7 @@ func TestGateB_OneActionAdmit_ReflectedInBothGates_UnDesyncable_fa19(t *testing.
 		t.Fatalf("listenOperatorSocket: %v", err)
 	}
 	sockDone := make(chan struct{})
-	go func() { defer close(sockDone); serveOperatorSocket(ctx, ln, eng, allowCtrl) }()
+	go func() { defer close(sockDone); serveOperatorSocket(ctx, ln, eng, nil, allowCtrl) }()
 	t.Cleanup(func() { cancel(); <-sockDone })
 
 	member, err := identity.Generate()
