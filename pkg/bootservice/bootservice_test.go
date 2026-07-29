@@ -1,6 +1,7 @@
 package bootservice
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
@@ -162,6 +163,26 @@ func TestRenderUnitOmitsRelayEnvWhenEmpty(t *testing.T) {
 	}
 }
 
+// testUnitName returns a unit filename unique to the calling test, so a
+// ground-source install exercises real systemctl without ever naming — and
+// therefore without ever enabling, disabling, or deleting — the production
+// "dontguess.service" a live operator may depend on (dontguess-8600).
+//
+// Scoped by test name AND pid so parallel packages or a re-run mid-flight
+// cannot collide with each other either.
+func testUnitName(t *testing.T) string {
+	t.Helper()
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, t.Name())
+	return fmt.Sprintf("dontguess-test-%s-%d.service", safe, os.Getpid())
+}
+
 // TestInstallGroundSource is the MANDATORY ground-source test
 // (dontguess-748): on a systemd --user capable runner it actually installs
 // the unit and enables linger, then asserts via the real `loginctl
@@ -182,12 +203,22 @@ func TestInstallGroundSource(t *testing.T) {
 	// <name>` (it only resolves unit NAMES against the standard search
 	// path, not an arbitrary directory), which would defeat the point of
 	// a ground-source assertion. Clean up afterward.
+	//
+	// The unit NAME, however, MUST be test-scoped (dontguess-8600). `enable`
+	// and `disable` act on the real user manager no matter what UnitDir says,
+	// so installing under the production name made this test enable and then
+	// delete the live operator's own boot service — a `go test ./...` run
+	// silently unsupervised the running exchange. A scoped name keeps every
+	// assertion below genuinely ground-source while making it impossible for
+	// this test to touch production's unit.
+	unitName := testUnitName(t)
 	serveBinary := filepath.Join(t.TempDir(), "dontguess")
 	dgHome := filepath.Join(t.TempDir(), ".dontguess")
 
 	opts := Options{
-		ServeBinary: serveBinary,
-		DGHome:      dgHome,
+		ServeBinary:  serveBinary,
+		DGHome:       dgHome,
+		UnitFileName: unitName,
 	}
 
 	result, err := Install(opts)
@@ -195,7 +226,7 @@ func TestInstallGroundSource(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = exec.Command("systemctl", "--user", "disable", UnitName).Run()
+		_ = exec.Command("systemctl", "--user", "disable", unitName).Run()
 		_ = os.Remove(result.UnitPath)
 		_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
 	})
@@ -219,7 +250,7 @@ func TestInstallGroundSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultUnitDir: %v", err)
 	}
-	writtenPath := filepath.Join(wantUnitDir, UnitName)
+	writtenPath := filepath.Join(wantUnitDir, unitName)
 	if result.UnitPath != writtenPath {
 		t.Errorf("UnitPath = %q, want %q", result.UnitPath, writtenPath)
 	}
@@ -238,9 +269,9 @@ func TestInstallGroundSource(t *testing.T) {
 	}
 
 	// GROUND-SOURCE: real systemctl --user is-enabled — not a mock.
-	enabledOut, err := exec.Command("systemctl", "--user", "is-enabled", UnitName).CombinedOutput()
+	enabledOut, err := exec.Command("systemctl", "--user", "is-enabled", unitName).CombinedOutput()
 	if err != nil {
-		t.Fatalf("systemctl --user is-enabled %s: %v: %s", UnitName, err, enabledOut)
+		t.Fatalf("systemctl --user is-enabled %s: %v: %s", unitName, err, enabledOut)
 	}
 	if got := strings.TrimSpace(string(enabledOut)); got != "enabled" {
 		t.Errorf("systemctl --user is-enabled = %q, want %q", got, "enabled")

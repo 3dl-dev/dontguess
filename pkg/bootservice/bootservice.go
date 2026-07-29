@@ -55,6 +55,27 @@ type Options struct {
 	// Tests set this to a scratch dir; production leaves it empty and
 	// DefaultUnitDir() is used.
 	UnitDir string
+	// UnitFileName overrides the installed unit filename. Production leaves it
+	// empty and UnitName ("dontguess.service") is used.
+	//
+	// This exists because `systemctl --user enable` is NOT scoped by UnitDir —
+	// it symlinks into the real ~/.config/systemd/user/default.target.wants/
+	// regardless — so a ground-source test that installs under the production
+	// name operates on the OPERATOR'S OWN boot service. dontguess-8600: a plain
+	// `go test ./...` therefore enabled and then, in cleanup, DISABLED the live
+	// operator's unit, leaving the exchange running with no supervision. When it
+	// later crashed, nothing restarted it. Tests must set a scoped name so real
+	// systemctl behaviour is still exercised end-to-end (never mocked, never
+	// skipped) against a unit that is unmistakably not production's.
+	UnitFileName string
+}
+
+// unitFileName returns the unit filename to install for opts.
+func (o Options) unitFileName() string {
+	if n := strings.TrimSpace(o.UnitFileName); n != "" {
+		return n
+	}
+	return UnitName
 }
 
 // Result reports what Install did, for callers (up, tests) to inspect or
@@ -236,7 +257,7 @@ func installSystemd(opts Options) (*Result, error) {
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create unit dir %s: %w", unitDir, err)
 	}
-	unitPath := filepath.Join(unitDir, UnitName)
+	unitPath := filepath.Join(unitDir, opts.unitFileName())
 	if err := os.WriteFile(unitPath, []byte(content), 0o644); err != nil {
 		return nil, fmt.Errorf("write unit file %s: %w", unitPath, err)
 	}

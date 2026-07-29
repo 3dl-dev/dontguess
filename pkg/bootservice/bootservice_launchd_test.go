@@ -254,10 +254,25 @@ func TestInstallLaunchAgentGroundSource(t *testing.T) {
 // requires instead of callers hand-rolling a GOOS switch themselves.
 func TestInstallDispatchesByPlatform(t *testing.T) {
 	unitDir := t.TempDir()
+	// Test-scoped unit name (dontguess-8600). `systemctl --user enable` symlinks
+	// into the REAL default.target.wants/ regardless of UnitDir, so under the
+	// production name this test collided with — and its cleanup deleted — a live
+	// operator's own boot service. That is exactly how it failed: after a real
+	// `dontguess up` installed the production unit, enable here died with "File
+	// ~/.config/systemd/user/dontguess.service already exists", making this test
+	// pass or fail purely on host state.
+	unitName := testUnitName(t)
+	wantName := unitName
 	opts := Options{
-		ServeBinary: filepath.Join(t.TempDir(), "dontguess"),
-		DGHome:      filepath.Join(t.TempDir(), ".dontguess"),
-		UnitDir:     unitDir,
+		ServeBinary:  filepath.Join(t.TempDir(), "dontguess"),
+		DGHome:       filepath.Join(t.TempDir(), ".dontguess"),
+		UnitDir:      unitDir,
+		UnitFileName: unitName,
+	}
+	if runtime.GOOS == "darwin" {
+		// The launchd backend names the plist itself; UnitFileName is the
+		// systemd-side override only.
+		wantName = PlistName
 	}
 	result, err := Install(opts)
 	if err != nil {
@@ -269,17 +284,11 @@ func TestInstallDispatchesByPlatform(t *testing.T) {
 		// symlink it created, same as TestInstallGroundSource, so this test
 		// doesn't leave state that collides with other runs.
 		t.Cleanup(func() {
-			_ = exec.Command("systemctl", "--user", "disable", UnitName).Run()
+			_ = exec.Command("systemctl", "--user", "disable", unitName).Run()
 			_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
 		})
 	}
-	if runtime.GOOS == "darwin" {
-		if filepath.Base(result.UnitPath) != PlistName {
-			t.Errorf("Install on darwin wrote %q, want a %s file", result.UnitPath, PlistName)
-		}
-	} else {
-		if filepath.Base(result.UnitPath) != UnitName {
-			t.Errorf("Install on %s wrote %q, want a %s file", runtime.GOOS, result.UnitPath, UnitName)
-		}
+	if filepath.Base(result.UnitPath) != wantName {
+		t.Errorf("Install on %s wrote %q, want a %s file", runtime.GOOS, result.UnitPath, wantName)
 	}
 }
