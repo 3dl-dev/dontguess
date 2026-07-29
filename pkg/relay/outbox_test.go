@@ -26,6 +26,9 @@ type fakePublisher struct {
 	attempts  map[string]int
 	// reject[id] = true means the relay returns OK=false for that id forever.
 	reject map[string]bool
+	// rejectMsg[id] is the NIP-01 reason string returned with that rejection.
+	// Absent falls back to a generic reason, which classifies as transient.
+	rejectMsg map[string]string
 }
 
 func newFakePublisher() *fakePublisher {
@@ -33,6 +36,7 @@ func newFakePublisher() *fakePublisher {
 		failUntil: map[string]int{},
 		attempts:  map[string]int{},
 		reject:    map[string]bool{},
+		rejectMsg: map[string]string{},
 	}
 }
 
@@ -42,6 +46,9 @@ func (p *fakePublisher) PublishEvent(_ context.Context, ev *identity.Event) (boo
 	p.attempts[ev.ID]++
 	p.published = append(p.published, ev.ID)
 	if p.reject[ev.ID] {
+		if m, ok := p.rejectMsg[ev.ID]; ok {
+			return false, m, nil
+		}
 		return false, "rejected by fake", nil
 	}
 	if n := p.failUntil[ev.ID]; n > 0 && p.attempts[ev.ID] <= n {

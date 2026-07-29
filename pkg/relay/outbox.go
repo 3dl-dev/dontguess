@@ -31,6 +31,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -233,6 +234,11 @@ type Outbox struct {
 
 	publishRetry int64 // atomic: total publish attempts that failed and were retried
 	publishLag   int64 // atomic: local-log-length − cursor, refreshed each tick
+	// publishQuarantined counts records the relay permanently rejected and the
+	// outbox advanced past. Non-zero means some operator events exist only
+	// locally (RF=1) — a real, if narrow, data-availability gap that an operator
+	// must be able to see, which is why it is a counter and not just a log line.
+	publishQuarantined int64
 
 	signal chan struct{} // buffered(1) new-local-append wakeup for Run
 }
@@ -299,6 +305,13 @@ func (o *Outbox) PublishLag() int64 { return atomic.LoadInt64(&o.publishLag) }
 // PublishRetry returns the exported publish_retry counter: the total number of
 // failed publish attempts that were retried.
 func (o *Outbox) PublishRetry() int64 { return atomic.LoadInt64(&o.publishRetry) }
+
+// PublishQuarantined returns the number of records the relay permanently
+// rejected and the Outbox advanced past. Non-zero means those events exist only
+// in the local log (RF=1) and will never reach the relay without operator
+// action — narrower than a stalled stream, but still a real gap, so it is
+// exported rather than only logged.
+func (o *Outbox) PublishQuarantined() int64 { return atomic.LoadInt64(&o.publishQuarantined) }
 
 // Notify wakes a running Outbox to publish immediately rather than waiting for
 // the next tick. It is the target of the engine's post-append hook (§2.1
@@ -403,6 +416,24 @@ func (o *Outbox) Tick(ctx context.Context) error {
 		}
 
 		if err := o.publishWithRetry(ctx, ev); err != nil {
+			var perm *permanentRejectionError
+			if errors.As(err, &perm) {
+				// QUARANTINE (dontguess-6d2). The record can never be published as
+				// it stands, so blocking on it strands every LATER operator message
+				// — matches, settlements, buy-miss answers — behind one bad event.
+				// Advance past it, loudly and countably, exactly as the egress fence
+				// does. Losing one unpublishable event is strictly better than
+				// losing every event that follows it.
+				atomic.AddInt64(&o.publishQuarantined, 1)
+				o.logf("outbox: QUARANTINED record %s (event %s) — relay permanently rejected it: %s. Advancing so later events are not stranded behind it; this event stays local-only at RF=1",
+					rec.ID, perm.eventID, perm.message)
+				if aerr := o.cursor.Advance(); aerr != nil {
+					return fmt.Errorf("outbox: advance cursor past quarantined record %s: %w", rec.ID, aerr)
+				}
+				o.refreshLag(totalLocal)
+				localIdx++
+				continue
+			}
 			return err
 		}
 
@@ -454,6 +485,41 @@ func (o *Outbox) toSignedEvent(rec store.Record) (*identity.Event, error) {
 // alarming, which is the correct signal for operator investigation rather than a
 // silent drop. Returns nil once the relay ACKs, or an error if the context is
 // cancelled or the backoff's MaxAttempts is exhausted.
+// permanentRejectionError reports a relay rejection that retrying cannot fix.
+// Tick quarantines the record and advances past it rather than stalling the
+// whole egress stream behind it.
+type permanentRejectionError struct {
+	eventID string
+	message string
+}
+
+func (e *permanentRejectionError) Error() string {
+	return fmt.Sprintf("outbox: publish %s permanently rejected by relay: %s", e.eventID, e.message)
+}
+
+// isPermanentRejection classifies a NIP-01 OK=false message as unfixable by
+// retry. NIP-01 defines machine-readable prefixes; "invalid" (malformed event),
+// "blocked" (relay policy) and "pow" (insufficient proof-of-work, which this
+// client cannot raise) can never succeed for a byte-identical event, and the
+// event IS byte-identical on every retry because its id is a content hash.
+//
+// "error" and "rate-limited" are deliberately NOT here: those are transient and
+// must keep retrying, or a relay hiccup would silently drop operator events.
+// An unrecognised message is also treated as transient — retrying costs a stalled
+// stream we can see and alarm on, whereas wrongly quarantining loses an event.
+func isPermanentRejection(message string) bool {
+	m := strings.ToLower(strings.TrimSpace(message))
+	return strings.HasPrefix(m, "invalid:") ||
+		strings.HasPrefix(m, "blocked:") ||
+		strings.HasPrefix(m, "pow:")
+}
+
+// isDuplicateRejection reports an OK=false whose reason is that the relay already
+// stores the event. That is an ACK in everything but name.
+func isDuplicateRejection(message string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(message)), "duplicate:")
+}
+
 func (o *Outbox) publishWithRetry(ctx context.Context, ev *identity.Event) error {
 	delay := o.backoff.Initial
 	if delay <= 0 {
@@ -466,6 +532,22 @@ func (o *Outbox) publishWithRetry(ctx context.Context, ev *identity.Event) error
 		accepted, message, err := o.pub.PublishEvent(ctx, ev)
 		if err == nil && accepted {
 			return nil
+		}
+		// A relay that says "duplicate" already HAS the event — that is success,
+		// not a failure to retry. Treating it as a failure would spin forever on
+		// an event the relay will never re-accept.
+		if err == nil && isDuplicateRejection(message) {
+			o.logf("outbox: publish %s already present on relay (%s) — treating as ACKed", ev.ID, message)
+			return nil
+		}
+		// A PERMANENT rejection can never succeed on retry: the relay is telling
+		// us the event itself is unacceptable, and the event is immutable (its id
+		// is a content hash). Retrying it forever is what wedged the live exchange
+		// — one malformed e-tag stopped ALL operator egress for 13 hours while the
+		// operator reported itself healthy. Surface it as permanent so Tick can
+		// quarantine the record and keep the stream moving.
+		if err == nil && isPermanentRejection(message) {
+			return &permanentRejectionError{eventID: ev.ID, message: message}
 		}
 		atomic.AddInt64(&o.publishRetry, 1)
 		if err != nil {
