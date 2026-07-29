@@ -21,6 +21,12 @@ const nanosPerSecond = int64(1_000_000_000)
 // isPubKeyHex reports whether s is a well-formed 32-byte x-only pubkey: exactly
 // 64 lowercase-or-uppercase hex characters. NIP-01 fixed-size tags (p, e) require
 // this; a value of any other length is rejected by compliant relays.
+// isEventIDHex reports whether s is a well-formed 32-byte (64-hex) nostr event
+// id — the only value that may legally ride in a fixed-size "e" tag. Same rule
+// and same shape as isPubKeyHex; kept separate so each call site reads as the
+// constraint it is enforcing.
+func isEventIDHex(s string) bool { return isPubKeyHex(s) }
+
 func isPubKeyHex(s string) bool {
 	if len(s) != 64 {
 		return false
@@ -90,12 +96,44 @@ func ToNostrEvent(msg *proto.Message) (*Event, error) {
 	tags := make([][]string, 0, len(msg.Tags)+len(msg.Antecedents)+4)
 
 	// Antecedents -> e-tags (index 0 gets the NIP-01 reply marker).
-	for i, ante := range msg.Antecedents {
-		if i == 0 {
+	// Antecedents -> e-tags, but ONLY those that are well-formed 32-byte (64-hex)
+	// event ids. This is the SAME fixed-size rule the p-tag guard below enforces,
+	// and it was missed there (dontguess-7d5 fixed "p"; "e" has the identical
+	// defect and the identical consequence).
+	//
+	// Campfire-era records carry 16-byte antecedent ids. Emitting ["e", <16-byte>]
+	// produces a malformed fixed-size tag that every NIP-01 relay rejects with
+	// "invalid: unexpected size for fixed-size tag: e". Because a rejected event
+	// can never become valid, that one record sat at the head of the outbox and
+	// stranded EVERY later operator message behind it — matches, settlements and
+	// buy-miss answers all stopped reaching the relay while the operator looked
+	// healthy. Measured on the live exchange: egress stopped at 04:30:52 and 29
+	// operator messages never left the box, so buyers saw only "ambiguous timeout".
+	//
+	// Lossless: any non-conforming antecedent is preserved, in order, in the
+	// dg_ant tag, which has no fixed-size rule. FromNostrEvent prefers dg_ant when
+	// present so the round-trip reproduces Antecedents exactly.
+	anteAllHex := true
+	for _, ante := range msg.Antecedents {
+		if !isEventIDHex(ante) {
+			anteAllHex = false
+			break
+		}
+	}
+	emitted := 0
+	for _, ante := range msg.Antecedents {
+		if !isEventIDHex(ante) {
+			continue
+		}
+		if emitted == 0 {
 			tags = append(tags, []string{tagE, ante, "", replyMarker})
 		} else {
 			tags = append(tags, []string{tagE, ante})
 		}
+		emitted++
+	}
+	if !anteAllHex && len(msg.Antecedents) > 0 {
+		tags = append(tags, []string{tagDGAntecedents, strings.Join(msg.Antecedents, ",")})
 	}
 
 	// Author -> p-tag, but ONLY when Sender is a well-formed 32-byte (64-hex)
@@ -196,6 +234,7 @@ func FromNostrEvent(ev *Event) (*proto.Message, error) {
 	}
 
 	opFound := false
+	var dgAnte []string
 	for _, t := range ev.Tags {
 		if len(t) == 0 {
 			continue
@@ -204,6 +243,14 @@ func FromNostrEvent(ev *Event) (*proto.Message, error) {
 		case tagE:
 			if len(t) >= 2 {
 				msg.Antecedents = append(msg.Antecedents, t[1])
+			}
+		case tagDGAntecedents:
+			// Authoritative when present: the writer emitted it precisely because
+			// at least one antecedent could not ride in a fixed-size e-tag, so the
+			// e-tags alone are an incomplete, reordered view. Recorded here and
+			// applied after the loop so it wins regardless of tag order.
+			if len(t) >= 2 {
+				dgAnte = strings.Split(t[1], ",")
 			}
 		case tagP:
 			// Author reference; Sender is authoritative from PubKey. Ignore.
@@ -257,6 +304,12 @@ func FromNostrEvent(ev *Event) (*proto.Message, error) {
 				msg.Instance = t[1]
 			}
 		}
+	}
+
+	// dg_ant, when present, is the complete ordered antecedent list and supersedes
+	// whatever subset survived as e-tags (see the ToNostrEvent guard).
+	if len(dgAnte) > 0 {
+		msg.Antecedents = dgAnte
 	}
 
 	if sharedKind && !opFound {

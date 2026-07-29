@@ -90,6 +90,12 @@ const (
 	tagDGTimestamp = "dg_ts"       // exact Message.Timestamp (nanoseconds)
 	tagDGCampfire  = "dg_cf"       // Message.CampfireID
 	tagDGInstance  = "dg_instance" // Message.Instance (tainted self-asserted role)
+	// tagDGAntecedents carries the FULL ordered antecedent list, comma-joined, and
+	// is emitted only when at least one antecedent is not a 32-byte hex id (i.e. a
+	// campfire-era 16-byte message id). Such an id cannot legally ride in an "e"
+	// tag — see the guard in ToNostrEvent — but dropping it would lose the causal
+	// chain, so it is preserved here in a tag with no fixed-size rule.
+	tagDGAntecedents = "dg_ant"
 
 	replyMarker = "reply"
 )
