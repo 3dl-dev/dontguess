@@ -56,20 +56,22 @@ type LoanFingerprint struct {
 
 // StateCensus is the complete comparable fingerprint of a store's derived state.
 type StateCensus struct {
-	Records       int `json:"records"`
-	AgentsScanned int `json:"agents_scanned"`
-	Inventory    []InventoryFingerprint `json:"inventory"`
-	Balances     map[string]int64       `json:"balances"`
-	Loans        []LoanFingerprint      `json:"loans"`
-	Reputation   map[string]int         `json:"reputation"`
-	TotalSupply  int64                  `json:"total_supply"`
-	TotalBurned    int64 `json:"total_burned"`
-	LoanPrincipal  int64 `json:"loan_principal"`
-	OutstandingVig int64 `json:"outstanding_vig"`
-	SumBalances  int64                  `json:"sum_balances"`
-	Conserves    bool                   `json:"conserves"`
-	PendingPuts  int                    `json:"pending_puts"`
-	ActiveOrders int                    `json:"active_orders"`
+	Records          int                    `json:"records"`
+	AgentsScanned    int                    `json:"agents_scanned"`
+	Inventory        []InventoryFingerprint `json:"inventory"`
+	Balances         map[string]int64       `json:"balances"`
+	Loans            []LoanFingerprint      `json:"loans"`
+	Reputation       map[string]int         `json:"reputation"`
+	TotalSupply      int64                  `json:"total_supply"`
+	TotalBurned      int64                  `json:"total_burned"`
+	LoanPrincipal    int64                  `json:"loan_principal"`
+	OutstandingHolds int64                  `json:"outstanding_holds"`
+	RoundingDust     int64                  `json:"rounding_dust"`
+	OutstandingVig   int64                  `json:"outstanding_vig"`
+	SumBalances      int64                  `json:"sum_balances"`
+	Conserves        bool                   `json:"conserves"`
+	PendingPuts      int                    `json:"pending_puts"`
+	ActiveOrders     int                    `json:"active_orders"`
 }
 
 // takeCensus replays storePath and reduces derived state to a fingerprint.
@@ -153,12 +155,34 @@ func takeCensus(t *testing.T, storePath, operatorKey string) *StateCensus {
 
 	c.TotalSupply = ss.TotalSupply()
 	c.TotalBurned = ss.TotalBurned()
+	c.OutstandingHolds, c.RoundingDust = holdsAndDust(recs)
 	c.LoanPrincipal = ss.TotalLoanPrincipal()
 	c.OutstandingVig = ss.TotalOutstandingVig()
 	for _, v := range c.Balances {
 		c.SumBalances += v
 	}
-	c.Conserves = c.TotalSupply == c.SumBalances
+	// THE CONSERVATION INVARIANT (dontguess-7f0), established by independently
+	// re-deriving the ledger from the scrip message stream:
+	//
+	//	totalSupply - totalBurned - outstandingHolds - roundingDust == sum(balances)
+	//
+	// Getting this equation wrong is what produced a false ~633K "shortfall" and
+	// nearly had a live money ledger reported as broken. Two terms are easy to
+	// miss and both are load-bearing:
+	//
+	//   - OUTSTANDING HOLDS. applyBuyHold DEBITS the buyer immediately; the seller
+	//     and operator are only credited at settle. Between the two, that scrip is
+	//     in neither party's balance. 632,809 of it was outstanding when this was
+	//     measured — 55% of everything ever held — because most matches never
+	//     complete.
+	//   - ROUNDING DUST. Each settle splits the held amount three ways (residual +
+	//     exchange_revenue + fee_burned) with integer division, losing exactly 1
+	//     scrip per settle. 17 settles, 17 scrip, unassigned to anyone.
+	//
+	// totalBurned is NOT subtracted from any balance by applyBurn — burn destroys
+	// scrip already removed from a balance via a hold, so it only ever increments
+	// the counter.
+	c.Conserves = c.TotalSupply-c.TotalBurned-c.OutstandingHolds-c.RoundingDust == c.SumBalances
 	c.PendingPuts = len(state.PendingPuts())
 	c.ActiveOrders = len(state.ActiveOrders())
 
@@ -237,4 +261,58 @@ func TestStateCensus_IsDeterministic(t *testing.T) {
 		t.Fatal("census is NOT deterministic over the same store — it cannot be used to validate a migration")
 	}
 	fmt.Fprintf(os.Stderr, "census deterministic over %d records\n", a.Records)
+}
+
+// holdsAndDust re-derives the two ledger terms LocalScripStore does not expose:
+// the value of buy-holds that never settled, and the scrip lost to integer
+// truncation when a settle splits a held amount three ways.
+//
+// Both come straight off the scrip message stream. They exist as free functions
+// rather than store accessors because the store deliberately models only what it
+// needs to answer Balance(); these are audit quantities.
+func holdsAndDust(recs []dgstore.Record) (outstanding, dust int64) {
+	type held struct{ amount int64 }
+	holds := map[string]held{}
+	settled := map[string]struct{}{}
+	var settles []map[string]any
+
+	for i := range recs {
+		var p map[string]any
+		if json.Unmarshal(recs[i].Payload, &p) != nil {
+			continue
+		}
+		for _, t := range recs[i].Tags {
+			switch t {
+			case "dontguess:scrip-buy-hold":
+				if rid, ok := p["reservation_id"].(string); ok {
+					holds[rid] = held{amount: int64(asF(p["amount"]))}
+				}
+			case "dontguess:scrip-settle":
+				if rid, ok := p["reservation_id"].(string); ok {
+					settled[rid] = struct{}{}
+				}
+				settles = append(settles, p)
+			}
+		}
+	}
+	for rid, h := range holds {
+		if _, done := settled[rid]; !done {
+			outstanding += h.amount
+		}
+	}
+	for _, p := range settles {
+		rid, _ := p["reservation_id"].(string)
+		h, ok := holds[rid]
+		if !ok {
+			continue
+		}
+		parts := int64(asF(p["residual"])) + int64(asF(p["exchange_revenue"])) + int64(asF(p["fee_burned"]))
+		dust += h.amount - parts
+	}
+	return outstanding, dust
+}
+
+func asF(v any) float64 {
+	f, _ := v.(float64)
+	return f
 }
