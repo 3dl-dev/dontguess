@@ -18,8 +18,10 @@ package main
 //
 // OpPut/OpBuy are INDIVIDUAL-TIER-ONLY: ScripStore==nil, no mint path, no scrip
 // movement anywhere in this file. Zero identity ceremony — every call gets a
-// fresh random per-call sender key (no persisted agent identity), matching the
-// "byte-for-byte individual tier" acceptance gate.
+// fresh per-call sender key (no persisted agent identity), matching the
+// "byte-for-byte individual tier" acceptance gate. That key is a REAL secp256k1
+// pubkey (randomLocalSenderKey): it was previously 32 raw random bytes, which is
+// a valid nostr pubkey only about half the time (dontguess-ab6).
 
 import (
 	"crypto/rand"
@@ -31,6 +33,7 @@ import (
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
@@ -89,16 +92,48 @@ type opBuyResponse struct {
 	Content     string `json:"content,omitempty"`
 }
 
-// randomLocalKey returns a fresh 32-byte random hex identifier. Used as the
-// per-call sender key and record ID for individual-tier OpPut/OpBuy (design
-// §3.3: "zero identity ceremony" — no persisted agent identity, a fresh random
-// key every call).
-func randomLocalKey() (string, error) {
+// randomLocalID returns a fresh 32-byte random hex identifier, used as the
+// per-call record ID for individual-tier OpPut/OpBuy. A record ID is an opaque
+// identifier with no cryptographic structure, so raw randomness is correct here.
+//
+// It is NOT correct for a sender key — see randomLocalSenderKey.
+func randomLocalID() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generating random local key: %w", err)
+		return "", fmt.Errorf("generating random local id: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// randomLocalSenderKey returns a fresh throwaway SENDER KEY for individual-tier
+// OpPut/OpBuy (design §3.3 "zero identity ceremony" — no persisted agent
+// identity, a fresh key every call). The ceremony-free design is intact; only
+// the key generation changes.
+//
+// THE BUG THIS FIXES (dontguess-ab6). This used to return 32 raw random bytes.
+// A nostr sender key is an x-only secp256k1 pubkey, and only about HALF of all
+// 32-byte values are points on that curve — so roughly every other individual-
+// tier put or buy was authored by a key that cannot exist. Measured on the live
+// exchange: 74 of 145 such records (51%, exactly the coin flip) carried
+// unusable senders, each a distinct key because a fresh one is minted per call.
+//
+// The damage was not theoretical. Those senders can never be admitted by any
+// admission mechanism, so real work — browser CEK security reviews put by the
+// ready project — was rejected `not-allowlisted` and lost, and the agent
+// retried, minting another invalid key. Before the dontguess-31b fence existed,
+// such a key could instead be admitted and PERSISTED to the fleet allowlist,
+// which is what bricked the operator's boot for eighty minutes.
+//
+// These records were repeatedly mistaken for campfire-era residue because they
+// look exactly like the dead ed25519 corpus: 64 hex characters, off-curve,
+// unadmittable. They are not. They were minted by this function, on this
+// binary, as recently as today.
+func randomLocalSenderKey() (string, error) {
+	id, err := identity.Generate()
+	if err != nil {
+		return "", fmt.Errorf("generating local sender key: %w", err)
+	}
+	return id.PubKeyHex(), nil
 }
 
 // hasTag reports whether tags contains want.
@@ -140,11 +175,11 @@ func handleOpPut(eng *exchange.Engine, req operatorRequest) opPutResponse {
 		return opPutResponse{OK: false, Error: "put: no local store configured"}
 	}
 
-	sellerKey, err := randomLocalKey()
+	sellerKey, err := randomLocalSenderKey()
 	if err != nil {
 		return opPutResponse{OK: false, Error: err.Error()}
 	}
-	putID, err := randomLocalKey()
+	putID, err := randomLocalID()
 	if err != nil {
 		return opPutResponse{OK: false, Error: err.Error()}
 	}
@@ -205,11 +240,11 @@ func handleOpBuy(eng *exchange.Engine, conn net.Conn, req operatorRequest) opBuy
 		return opBuyResponse{OK: false, Error: "buy: no local store configured"}
 	}
 
-	buyerKey, err := randomLocalKey()
+	buyerKey, err := randomLocalSenderKey()
 	if err != nil {
 		return opBuyResponse{OK: false, Error: err.Error()}
 	}
-	buyID, err := randomLocalKey()
+	buyID, err := randomLocalID()
 	if err != nil {
 		return opBuyResponse{OK: false, Error: err.Error()}
 	}
