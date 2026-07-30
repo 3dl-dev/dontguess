@@ -1,354 +1,117 @@
 # CLAUDE.md — DontGuess Project Instructions
 
+<!-- Target: under 200 lines (Anthropic guidance — longer files reduce adherence).
+     Cut what Claude can derive from the codebase (directory layouts, package lists,
+     command transcripts); keep pitfalls, operator rulings, and conventions that differ
+     from what the code appears to say. Long-form lives in docs/design/. -->
+
 ## Project
 
-**DontGuess**: Token-work exchange — a marketplace where agents buy and sell cached inference results. An operator buys inference results from sellers at a discount (scrip), dynamically prices them, sells them to buyers (scrip), and pays residuals to original authors. Agents earn scrip by selling work or performing assigned tasks (context compression, validation, freshness checks). Anyone can operate an exchange; exchanges may federate for global liquidity with trust semantics.
+**DontGuess**: a token-work exchange — agents buy and sell cached inference results. An operator buys results from sellers at a discount (scrip), prices them dynamically, sells them to buyers, and pays residuals to the original authors. Agents earn scrip by selling work or performing assigned tasks (compression, validation, freshness checks). Anyone can operate an exchange; exchanges may federate.
 
-Previously a tool discovery engine (see `docs/heritage/`). The thesis survived the pivot: reduce agent token waste through better discovery. Old: discover the right tool. New: discover pre-computed work someone already paid for.
+**It is a publisher, not a broker** — the exchange *owns* what it buys, and the author earns residuals as copies sell. That is why it runs a deficit on any single sale and recovers across resales.
 
-**Domain:** dontguess.ai. "Don't guess — look it up."
+Domain: dontguess.ai. Previously a tool-discovery engine (`docs/heritage/`); the thesis survived the pivot — old: discover the right tool, new: discover pre-computed work someone already paid for. Heritage principles that carry: the 4-layer value stack, the three feedback loops, semantic matching, cross-agent convergence as the ungameable trust signal, and the observational boundary (you never see downstream task success, only completion / retry / return-rate proxies).
 
 ## Architecture
 
-**DontGuess is nostr-first (as of v0.7.0).** `serve` is campfire-free. Exchange operations are
-nostr events (kinds `3401` put, `3402` buy, `3403` match, `3404` settle, etc.), signed by
-secp256k1 operator/agent keys, relayed through a strfry-compatible relay for team/fleet tiers or
-kept entirely local (no relay) at solo tier. State is derived from the event log. Campfire is
-retired from this project's runtime path — do not point new agents at `cf join`/`cf init` for
-exchange participation; see the "Install / join" section below for the current onboarding flow.
+**Nostr-first since v0.7.0. Campfire is retired from the runtime path** — `serve` is campfire-free. Exchange operations are signed nostr events (`3401` put, `3402` buy, `3403` match, `3404` settle, `3410` invite-redeem) relayed through a strfry-compatible relay, or kept entirely local at solo tier. State derives from the event log. **Never point a new agent at `cf join` / `cf init`** for exchange participation.
 
-**Scaling ladder:** SOLO (one machine, local, no relay, no scrip) → FLEET (one operator, `--relay`,
-team-tier envelope encryption, live-admit allowlist) → FEDERATION (multiple operators, bilateral
-trust, ROUTER-mode default confidentiality — **OPEN**, gated on design item P9, do not implement
-`dontguess federate` against undesigned wire mechanics). Full design:
-`docs/design/onboarding-tiered-scaling-federation.md`. Federation trust/confidentiality model:
-`docs/design/federation.md`. Deployment tiers (nostr-rewritten): `docs/design/federation-modes.md`.
+**Scaling ladder:** SOLO (one machine, local, no relay, no scrip) → FLEET (one operator, `--relay`, team-tier envelope encryption, live-admit allowlist) → FEDERATION (multiple operators, bilateral trust, ROUTER-mode default confidentiality).
 
-### Three Systems
+**FEDERATION is OPEN and gated on design item P9. Do not implement or invoke `dontguess federate` against undesigned wire mechanics** — it is deliberately not one-command-trusting, because it is the most consequential trust decision on the ladder. Design: `docs/design/onboarding-tiered-scaling-federation.md`, `docs/design/federation.md`, `docs/design/federation-modes.md`.
 
-1. **Convention** — Defines exchange operations (put, buy, match, settle, dispute, assign) as nostr event kinds. Historical convention-on-campfire spec lives in `docs/convention/` (heritage reference; the nostr event schemas are the current wire format — see `pkg/convention/`).
-2. **Matching engine** — Semantic similarity search over cached inference. Matches buyer task descriptions to seller inventory. Uses vector embeddings (all-MiniLM-L6-v2, 384-dim).
-3. **Pricing engine** — Dynamic pricing via three feedback loops (fast/medium/slow). Behavioral signals drive price, not preferences.
+Three systems: a **convention** (exchange operations as nostr event kinds), a **matching engine** (semantic similarity over cached inference; all-MiniLM-L6-v2, 384-dim), and a **pricing engine** (three feedback loops). Packages are self-describing — read `pkg/`.
 
-### Integration Points
+**Forge** is the metering backbone (scrip balances, spend limits, token-cost attribution).
 
-- **Nostr relay** (strfry or compatible) — all team/fleet-tier exchange state lives on the relay as signed events. Puts, buys, matches, settlements are nostr events. Solo tier has no relay — state is local-only.
-- **Forge** — metering backbone. Tracks scrip balances, spending limits, token-cost attribution. Scrip is denominated in inference token cost.
-- **x402** — external USDC on-ramp for buying scrip *into* an exchange (see §Scrip). **NOT used for federation settlement:** cross-operator settlement is cash-free — local-mint scrip cleared through a token-cost mutual-credit ledger, where a leeching peer accrues durable scrip debt (operator ruling 2026-07-16; source of truth `docs/design/federation-infra-p9-router-decision.md` §8). A cash rail returns to federation only behind an explicit, unanimous multi-operator buy-in. (federation.md/federation-modes.md still describe the old x402 model — re-base tracked in dontguess-bdd.)
+**x402 is an external USDC on-ramp for buying scrip INTO an exchange — it is NOT federation settlement.** Cross-operator settlement is cash-free: local-mint scrip cleared through a token-cost mutual-credit ledger, where a leeching peer accrues durable scrip debt (operator ruling 2026-07-16; source of truth `docs/design/federation-infra-p9-router-decision.md` §8). A cash rail returns only behind an explicit, unanimous multi-operator buy-in. `federation.md` / `federation-modes.md` still describe the old x402 model — re-base tracked in dontguess-bdd.
 
-### The Publisher Model
-
-DontGuess is a publisher, not a broker:
-
-1. Agent does inference, sells result to the exchange for scrip (upfront, discounted % of token cost)
-2. Exchange owns the result, prices it dynamically based on demand signals
-3. Original author earns residuals in scrip as copies sell
-4. Buyers spend scrip earned from selling their own work or doing assigned tasks
-5. Assigned tasks (context compression, validation, freshness checks) are exchange maintenance paid in scrip
-6. Every transaction is a signed nostr event
-
-### §8.9 Informed consent (mandatory disclosure — §541)
-
-Read this before putting or federating anything:
-
-> **Your home operator can read your plaintext content.** Team-tier content is envelope-encrypted,
-> but the home operator holds the CEK to service matches (§541).
->
-> **Federating for resale (custodial mode) extends that trust to the remote peer.** Router mode
-> (the default) never does — a router peer sees only metadata and ciphertext hashes, never the CEK.
-> Custodial resale is an explicit per-entry seller opt-in, never a side effect of discovery.
->
-> **There is no forward secrecy.** One operator-key leak decrypts that operator's entire historical
-> corpus offline from data already scraped off the relay and Blossom (§541 A4/P5).
->
-> **There is no content revocation once public.** Ciphertext, once published, is append-only.
->
-> Full language and rationale: `docs/design/federation.md` §8.9.
-
-### Scrip
-
-Scrip is denominated in token cost. It is not redeemable for cash. It is only exchangeable for other cached inference on the marketplace. New scrip enters the system via x402 purchase or labor (assigned work). Matching fees burn scrip (deflationary pressure).
-
-**`token_cost` definition (operator ruling dontguess-96e, AMENDED 2026-07-27): `token_cost` IS THE SELLER'S WHOLE DERIVATION SPEND** — the exploration that found the answer plus the tokens of the answer itself, not merely the tokens present in the result. Rationale: what a buyer avoids is the *whole derivation*. An artifact that took 400k tokens of searching to produce 30k of text is worth far more than one that took 30k to produce 30k; an output-only definition declares them identical and throws away exactly the signal that matters. There is no separate wire field for an input/output split and none is planned — this is a semantic definition, not a convention-spec (wire format) change, so it does not trigger the architecture-change cascade.
-
-> **Superseded reading, recorded so it is not reintroduced:** an earlier pass defined `token_cost` as OUTPUT TOKENS ONLY and claimed the `pkg/exchange/state_put.go` plausibility check enforced it. Both were wrong. The check (`token_cost <= content_size * MaxTokensPerByte`, at 1000 tokens/byte) is orders of magnitude looser than any honest declaration — a 28 KB artifact permits ~28 M — so it cannot distinguish the two readings and never enforced anything. Declaring total derivation cost is CORRECT, not seller inflation.
-
-**What the buyer is charged is a separate question** from what `token_cost` measures, and conflating them is what produced the superseded reading above. `token_cost` is the *value basis* (what was spent, hence what is avoided); the delivery price is computed from it by `computePrice` and is far smaller. There is deliberately NO multiplier applied to `token_cost` in the buyer-facing net-benefit figure — `token_cost` already IS the avoided figure, and scaling it by the output:input ratio double-counted (the exploration tokens are both already inside `token_cost` and cheap input tokens), overstating avoided value ~5x.
-
-**Two-unit pricing model.** The exchange ACQUIRES a whole derivation (`token_cost` — everything the seller spent finding the answer, dominated by expensive output-token generation and by exploration that a buyer never has to repeat) and DELIVERS a copy (cheap — the buyer's cost is reading it, derived from `ContentSize`, never from `token_cost`). The asymmetry is the point: producing knowledge costs far more than reading it, and output tokens run ~5x input across every model tier (Fable 10/50, Opus 5/25, Sonnet 3/15, Haiku 1/5). The exchange therefore runs a deficit on any single sale and recovers it only across resales of the same entry — the publisher model this CLAUDE.md already documented ("Original author earns residuals in scrip as copies sell"), now implemented in `pkg/exchange/engine_pricing.go`'s `computePrice` via a flat `resaleAmortizationN=4` assumed resale count (no cold-start reuse estimator; the fast/medium loops adjust from observed demand). Buyer-facing price is the acquisition-scale figure (seller's accept price) divided by `resaleAmortizationN` — never the acquisition figure passed through 1:1. The divisor is residual-aware — `resaleAmortizationN * (1-residualFraction) / (1-standardResidualFraction)` — because high-reuse entries pay double residual (20% vs 10%) and a flat `N` applied to them under-recovers (a live `token_cost=8000` high-reuse entry lost 272 scrip across 4 resales under a flat divisor).
-
-**Deliver-on-credit (dontguess-29b, v0.9.1).** A buyer short of scrip at buy-accept is SERVED, not
-rejected: `ensureCreditForShortfall` mints exactly the shortfall as a tracked loan
-(`pkg/scrip/loan.go`, wired at `pkg/exchange/engine_credit.go`). Tier-gated to fleet via
-`FederationGuardEnabled` — NOT via `BrokeredMatchMode`, which is a matching-routing flag and was the
-original bug. Bounded by a conservative per-buyer cap on outstanding credit, and repaid automatically
-by withholding a fraction of the borrower's later put credits and sale residuals. Default/collection semantics and vig
-are deliberately NOT implemented (operator ruling dontguess-4c1, 2026-07-27): nothing accrues vig and
-nothing transitions a loan to `LoanDefaulted`, so the minted loan records `VigRateBPS: 0` and no due
-date rather than terms the exchange cannot enforce — a ledger stating uncollected interest and
-unfired defaults lies to whoever audits it. At fleet tier a "default" is the operator's own agent not
-repaying the operator. Both return at FEDERATION (dontguess-5a3), and must be wired TOGETHER with
-non-zero constants in the same change — never one without the other. A cap can only be loosened later, so shipping conservative was safe without that ruling.
-
-**Compression is paid at OUTPUT rates.** `WarmCompressionBountyPct` is 300 (not 30): generating a
-compressed artifact costs output tokens, and at the old scalar rate a compressor was ~4-8x underwater,
-which is why 0 of 44 assigns were ever completed. This lands near 130% of the entry's `token_cost`,
-which is CORRECT under two units — do not "fix" it back down. All three tiers now share that basis
-(dontguess-d5d): Hot = Warm = 300 because both assignees ALREADY HOLD the content and pay only to
-GENERATE, and Cold = 500 because a cold assignee is any agent and must FETCH AND READ the entry
-first. That INVERTS the old order (Hot 50 / Cold 20), which ranked tiers by urgency — not what a
-compressor actually pays for, and why hot and cold stayed ~4-8x underwater while 0 of 44 assigns
-completed.
-
-**What upgrading changes, and what it does not.** `computePrice` is evaluated at match and index time, so the moment a new binary runs, EVERY existing entry is quoted at the new, lower delivery price — roughly 4-5x cheaper. That is immediate and is not gated behind anything. What is NOT changed is the entries' *declared* `token_cost` values, which were recorded before this definition existed; reinterpreting those (and emitting the auditable, reversible repricing events for them) is a separate migration tracked in dontguess-b2b.
-
-### The Three Loops (Heritage from toolrank)
+### The three loops
 
 | Loop | Cadence | Reads | Writes | Purpose |
 |------|---------|-------|--------|---------|
-| **Fast** | 5 min | Purchase events, cache hit/miss | Price adjustments | Demand velocity, price elasticity |
-| **Medium** | 1 hr | Accumulated adjustments, disputes | Residual settlements, reputation updates | Market correction, seller trust |
-| **Slow** | 4 hr | Historical price/volume, buyer satisfaction | Market parameters, commission structure | Structural optimization |
+| Fast | 5 min | purchase events, cache hit/miss | price adjustments | demand velocity, elasticity |
+| Medium | 1 hr | accumulated adjustments, disputes | residual settlements, reputation | market correction, seller trust |
+| Slow | 4 hr | historical price/volume, satisfaction | market parameters, commission | structural optimization |
 
-### The 4-Layer Value Stack (Heritage from toolrank)
+### The 4-layer value stack
 
-Each layer gates the ones above it. Layer 0 rejects any change that regresses correctness.
+Each layer gates the ones above it; Layer 0 rejects any change that regresses correctness.
 
 ```
-Layer 0  CORRECTNESS GATE    task_completion_rate       No loop owns this — validation only
-Layer 1  TRANSACTION EFFICIENCY  tokens_saved / price    Fast loop target
-Layer 2  VALUE COMPOSITE     completion + efficiency + recency + diversity   Medium loop gate
-Layer 3  MARKET NOVELTY      buyer_count / competing_entries * discovery    Slow loop target
-Layer 4  META                oscillation_frequency     Adapts slow loop step size
+Layer 0  CORRECTNESS GATE       task_completion_rate                          no loop owns it — validation only
+Layer 1  TRANSACTION EFFICIENCY tokens_saved / price                          fast-loop target
+Layer 2  VALUE COMPOSITE        completion + efficiency + recency + diversity  medium-loop gate
+Layer 3  MARKET NOVELTY         buyer_count / competing_entries * discovery    slow-loop target
+Layer 4  META                   oscillation_frequency                          adapts slow-loop step size
 ```
 
 **Behavioral signals over preference signals.** Don't trust ratings. Measure: did the cached inference actually complete the buyer's task? Did they search again? Did they come back to the same seller?
 
-## Source of Truth Hierarchy
+## Scrip and pricing — the rulings
 
-1. **Convention spec** (`docs/convention/`) — what exchange operations mean
-2. **This CLAUDE.md** — project instructions
-3. **Heritage docs** (`docs/heritage/`) — design principles from toolrank that survive the pivot
-4. **Source code** — implementation
+Scrip is denominated in token cost, is not redeemable for cash, and is exchangeable only for other cached inference. New scrip enters via x402 purchase or labor. Matching fees burn scrip (deflationary).
 
-## Repo Structure
+**`token_cost` IS THE SELLER'S WHOLE DERIVATION SPEND** — the exploration that found the answer plus the tokens of the answer itself, not merely the tokens present in the result (operator ruling dontguess-96e, amended 2026-07-27). What a buyer avoids is the whole derivation: an artifact that took 400k tokens of searching to produce 30k of text is worth far more than one that took 30k to produce 30k, and an output-only definition declares them identical, discarding exactly the signal that matters. There is no wire field for an input/output split and none is planned — this is a semantic definition, not a convention-spec change, so it does not trigger the architecture-change cascade.
 
-```
-dontguess/
-  CLAUDE.md                    # This file
-  docs/
-    convention/                # Exchange convention spec (the authority)
-    design/                    # Active design docs
-    heritage/                  # Transferred design principles from toolrank
-  cmd/                         # CLI entry points (Go)
-  pkg/                         # Go packages
-    matching/                  # Semantic matching engine
-    pricing/                   # Dynamic pricing (fast/medium/slow loops)
-    convention/                # Exchange convention declarations
-    scrip/                     # Scrip ledger integration with Forge
-  test/                        # Integration and E2E tests
-```
+> **Superseded reading, recorded so it is not reintroduced:** an earlier pass defined `token_cost` as OUTPUT TOKENS ONLY and claimed the `pkg/exchange/state_put.go` plausibility check enforced it. Both were wrong. The check (`token_cost <= content_size * MaxTokensPerByte`, at 1000 tokens/byte) is orders of magnitude looser than any honest declaration — a 28 KB artifact permits ~28 M — so it cannot distinguish the two readings and never enforced anything. Declaring total derivation cost is CORRECT, not seller inflation.
 
-## Heritage
+**What the buyer is charged is a separate question from what `token_cost` measures**, and conflating them produced the superseded reading above. `token_cost` is the value basis (what was spent, hence what is avoided); the delivery price is computed from it by `computePrice` and is far smaller. There is deliberately **no multiplier** applied to `token_cost` in the buyer-facing net-benefit figure — it already *is* the avoided figure, and scaling it by the output:input ratio double-counted and overstated avoided value ~5x.
 
-DontGuess was previously a tool discovery engine (17K LOC Python, ~/projects/toolrank). The codebase is not reused, but key design principles transfer:
+**Two-unit model.** The exchange ACQUIRES a whole derivation and DELIVERS a cheap copy (the buyer's read cost derives from `ContentSize`, never from `token_cost`). Producing knowledge costs far more than reading it, and output tokens run ~5x input at every tier. Buyer-facing price is the seller's accept price divided by `resaleAmortizationN` (flat 4; no cold-start reuse estimator — the fast/medium loops adjust from observed demand) in `pkg/exchange/engine_pricing.go`. The divisor is **residual-aware** — `resaleAmortizationN * (1-residualFraction) / (1-standardResidualFraction)` — because high-reuse entries pay double residual (20% vs 10%) and a flat `N` under-recovers on them (a live `token_cost=8000` high-reuse entry lost 272 scrip across 4 resales under a flat divisor).
 
-- **4-layer value stack** — correctness gates everything, behavioral signals over preferences
-- **Three feedback loops** — fast (demand), medium (correction), slow (structural optimization)
-- **Semantic matching** — vector embeddings for similarity search
-- **Cross-agent convergence** — the ungameable trust signal (3+ agents succeed with same cache entry)
-- **Observational boundary** — you can't see downstream task success, only proxies (completion, retry, return rate)
-- **Escape velocity** — the point where dynamic pricing outperforms static baseline without manual intervention
+**Compression is paid at OUTPUT rates. `WarmCompressionBountyPct` is 300, not 30 — do not "fix" it back down.** Generating a compressed artifact costs output tokens; at the old scalar rate a compressor was ~4-8x underwater, which is why **0 of 44 assigns were ever completed**. 300 lands near 130% of the entry's `token_cost`, which is correct under two units. All three tiers share that basis (dontguess-d5d): Hot = Warm = 300 because both assignees already hold the content and pay only to GENERATE; Cold = 500 because a cold assignee must FETCH AND READ first. That **inverts** the old Hot 50 / Cold 20 order, which ranked by urgency rather than by what a compressor actually pays for.
 
-See `docs/heritage/` for the original design docs that informed this architecture.
+**Deliver-on-credit (dontguess-29b, v0.9.1).** A buyer short of scrip at buy-accept is SERVED, not rejected: `ensureCreditForShortfall` mints exactly the shortfall as a tracked loan (`pkg/scrip/loan.go`, wired at `pkg/exchange/engine_credit.go`). Tier-gated to fleet via `FederationGuardEnabled` — **not** via `BrokeredMatchMode`, which is a matching-routing flag and was the original bug. Bounded by a per-buyer cap, repaid by withholding a fraction of later put credits and sale residuals. Default/collection semantics and vig are deliberately **not** implemented (operator ruling dontguess-4c1, 2026-07-27): the minted loan records `VigRateBPS: 0` and no due date, because a ledger stating uncollected interest and unfired defaults lies to whoever audits it. At fleet tier a "default" is the operator's own agent not repaying the operator. Both return at FEDERATION (dontguess-5a3) and **must be wired together, with non-zero constants, in the same change** — never one without the other.
 
-## DontGuess — cached inference exchange
+**Upgrading reprices immediately; it does not rewrite history.** `computePrice` runs at match and index time, so a new binary quotes every existing entry at the new, lower delivery price (~4-5x cheaper) with nothing gating it. What is *not* changed is entries' declared `token_cost` values, recorded before this definition existed; reinterpreting those with auditable, reversible repricing events is a separate migration (dontguess-b2b).
 
-`dontguess` is a shared cache of pre-computed inference results across Third Division Labs projects. When you're about to spend tokens deriving domain knowledge, check the exchange first — another agent in another project may have already computed it. When you finish computing something reusable, sell it so others don't re-derive it.
+## Informed consent — read before putting or federating (permanent: §541 / §7.3 / ADV-10)
 
-`dontguess` is a nostr-native CLI (v0.7.0+) — every command signs and relays nostr events itself; there is no campfire dependency. Scrip is the internal currency (1 scrip = 1 token at list price). You earn scrip by selling cached work and spend it buying others'.
-
-### Install (run once)
-curl -fsSL https://dontguess.ai/install.sh | sh
-
-### Upgrade (v0.5.0+)
-dontguess upgrade
-# Or: curl -fsSL https://dontguess.ai/install.sh | sh
-
-### The scaling ladder — self-onboard at any rung
-
-An agent can stand up its OWN exchange, not just buy/put on one someone else runs. Three rungs,
-each ~one command (full transcripts + design rationale: `docs/design/onboarding-tiered-scaling-federation.md` §0/§1):
-
-```bash
-# SOLO — one machine, individual tier, local store, no relay, no scrip
-dontguess up
-# auto-detects the rung from config/env; idempotent, re-runnable.
-
-# FLEET — promotes the SAME operator identity to team tier (one shared encrypted operator over relays)
-dontguess up --relay ws://<host>:7777[,ws://<host2>:7777]   # operator machine
-#   ✓ same secp256k1 identity as solo — no fork, no re-sign (§6)
-#   ✓ team tier armed: envelope encryption required, self-admitted to fleet allowlist + relay roster
-#   ✓ refuses to mint a competing operator if one already exists on the relay (ADV-4 fail-closed)
-
-# Operator invites a member (mints a one-paste, single-use, TTL'd, operator-signed token):
-dontguess invite alice --scrip 50000 --ttl 72h
-#   → dgi1_<token>   (carries relay URLs, operator npub, one-time grant id, optional genesis scrip)
-
-# Member redeems it (one paste, self-provisions, admits to the fleet, kind-3410 redeem event):
-dontguess join dgi1_<token>
-#   ✓ verifies operator signature, not expired, not already redeemed
-#   ✓ self-provisions member identity (agent-init --fleet-member internally, fail-closed — no default mint)
-#   ✓ admitted to fleet allowlist + relay roster; genesis grant credited
-#   → buy/put/settle now, signed by the member's own key
-
-# Operator: live admit/revoke without a restart (signed IPC, hot-reloads the roster + relay writePolicy):
-dontguess allowlist add <npub>
-dontguess allowlist remove <npub>
-
-# Operator: back up / move the operator identity (1Password/HSM custody — §7.3 rotation runbook):
-dontguess operator export
-dontguess operator import
-```
-
-A relay-owner MAY additionally deploy a custom strfry `writePolicy` pinned to the operator pubkey
-for relay-edge write hardening (roster-aware admission). This is **optional edge-hardening, not a
-required onboarding step** — team tier works against ANY nostr relay because the operator performs
-100% of the real verification (`applyPut`/`TrustChecker`) itself; the relay is not a trust boundary.
-
-`dontguess federate <peer-beacon>` (cross-operator FEDERATION — many independent operators trading
-liquidity) is **OPEN, paper-first, not one-command-trusting by design** (§0/§5/ADV-19). Do not depend
-on it or invoke it until the P9 wire-protocol design item closes — it is deliberately NOT brain-dead-simple
-because it is the single most consequential trust decision on the ladder (see informed-consent block below).
-
-### Before expensive inference, check the exchange
-result=$(dontguess buy --task "describe what you need" --budget 5000)
-# If a match comes back, the content is delivered to you automatically.
-# No match? Do the work yourself, then sell it:
-
-### After computing something, sell it
-
-**Solo tier (no relay, no operator) — plaintext, local only:**
-```bash
-dontguess put --description "what you computed" \
-  --token_cost <token-count> --content_type exchange:content-type:code --content <base64-result>
-```
-
-**Fleet/team tier (relay-attached) — content is ENCRYPTED BY CONSTRUCTION, not plaintext:**
-```bash
-dontguess put --description "what you computed" \
-  --token_cost <token-count> --content_type exchange:content-type:code --content <base64-result> \
-  --operator-npub <operator-npub>
-```
-`--content` is still raw base64 plaintext bytes on the wire IN — the CLI wraps it in a §541 v2
-envelope and encrypts the CEK to `--operator-npub` before it ever leaves your process. **A team-tier
-put that omits `--operator-npub` (the pre-§541 legacy shape) is not silently accepted as plaintext —
-`applyPut` DROPS it fail-closed** (see `pkg/exchange/put_confidentiality_4bed_test.go`,
-`pkg/exchange/encrypted_required_scripless_adv7_test.go`): the put never folds into inventory, no
-scrip is credited, and it is not retryable as-is. Always pass `--operator-npub` once you are on a
-relay-attached exchange.
-
-You get paid in scrip immediately on a successful put. You earn 10% residual every time someone else
-buys your work. The exchange handles pricing, compression, settlement. Every response tells you what
-happened and what to do next.
-
-### Informed consent — read before putting or federating anything (permanent, §541/§7.3/ADV-10)
-
-> **Your home operator can read your plaintext content.** Team-tier content is envelope-encrypted end
-> to end over the wire, but the home operator holds the CEK to service matches — that is inherent to
-> how matching/delivery works, not a bug.
+> **Your home operator can read your plaintext content.** Team-tier content is envelope-encrypted end to end over the wire, but the home operator holds the CEK to service matches — inherent to how matching and delivery work, not a bug.
 >
-> **Federating for resale (custodial mode) extends that trust to the remote peer.** ROUTER mode (the
-> default, once federation ships) never does — a router peer sees only metadata and ciphertext hashes,
-> never the CEK. Custodial resale is an explicit per-entry seller opt-in, never a side effect of
-> discovery or federation itself.
+> **Federating for resale (custodial mode) extends that trust to the remote peer.** ROUTER mode (the default, once federation ships) never does — a router peer sees only metadata and ciphertext hashes, never the CEK. Custodial resale is an explicit per-entry seller opt-in, never a side effect of discovery or federation itself.
 >
-> **There is no forward secrecy.** One operator-key leak decrypts that operator's ENTIRE historical
-> corpus offline, from data already scraped off the relay and Blossom — every `wrapped_cek_operator`
-> ever emitted unwraps with the leaked key, and every ciphertext blob it references is already public.
-> Rotating the key protects only content put AFTER rotation; it gives zero retroactive protection.
+> **There is no forward secrecy.** One operator-key leak decrypts that operator's ENTIRE historical corpus offline, from data already scraped off the relay and Blossom — every `wrapped_cek_operator` ever emitted unwraps with the leaked key, and every ciphertext blob it references is already public. Rotation protects only content put AFTER it; zero retroactive protection.
 >
-> **There is no content revocation once public.** Ciphertext, once published to the relay, is
-> append-only — it cannot be un-published or recalled.
+> **There is no content revocation once public.** Ciphertext, once published, is append-only.
 >
-> Full threat model, custody boundaries, and the operator-key rotation runbook:
-> `docs/design/onboarding-tiered-scaling-federation.md` §7.3.
+> Full threat model, custody boundaries, and the operator-key rotation runbook: `docs/design/onboarding-tiered-scaling-federation.md` §7.3. Rationale: `docs/design/federation.md` §8.9.
 
-### Per-agent identity (v0.8.3+ — project-local `.dg/`, NO env var)
-# Identity lives in a project-local `.dg/` discovered by walking UP from the cwd
-# (like `.git`). There is NO AGENT_CF_HOME and no per-command flag — run agent-init
-# ONCE in the project root and every buy/put in that tree signs correctly:
-dontguess agent-init my-agent --fleet-member \
-  --relay ws://192.168.2.40:7777,ws://192.168.2.41:7777 \
-  --operator-npub <operator-npub>
-#   → provisions ./.dg/  (identity in .dg/agents/my-agent/, reach-config in .dg/config.json)
-# agent-init only PROVISIONS identity — it does NOT admit the key. A fresh
-# fleet-member npub is NOT on the operator's allowlist, so `put` is REJECTED
-# ("REJECTED: not-allowlisted") until it is admitted. Get admitted one of two ways:
-#   • redeem an operator invite (auto-admits):  dontguess join <token>
-#   • or have the operator run:                 dontguess allowlist add <your-npub>
-# YOU MUST BE ADMITTED TO BUY ANYTHING, not just to put. An earlier version of this
-# file said "`buy` works anonymously (no admission needed); only `put` requires the
-# allowlist" — that is FALSE and it cost a full investigation (dontguess-c0a), so
-# here is the precise rule:
-#   exchange:buy (kind 3402) is genuinely anonymous — an unadmitted key MATCHES fine.
-#   exchange:settle (kind 3404) is a SEPARATE kind, not "a kind of put", and it
-#   carries the settlement state machine for BOTH flows with per-phase trust
-#   (pkg/exchange/trust.go defaultSettlePhaseLevels):
-#     put-accept / put-reject / deliver / preview  → operator-authored
-#     buyer-accept / buyer-reject / complete / dispute / preview-request → ALLOWLISTED
-# A buy is worthless without its settle chain: buyer-accept is what reserves scrip
-# and complete is what records the purchase. So an unadmitted agent gets a MATCH and
-# then nothing — content is never delivered. Until dontguess-c0a's remaining UX fix
-# lands it does not even learn why: the settle is trust-rejected operator-side and
-# the buyer sees only "ambiguous timeout — matched but content was not delivered".
-# If you see that after a clean match, suspect admission FIRST.
-# Once admitted, from anywhere in the tree, with no env var and no flag:
-dontguess buy  --task "..."                 # signs as my-agent, reaches the exchange
-dontguess put  --description "..." --token_cost N --content_type ... --content <b64>
-# --fleet-member is required for a persistent agent (fail-closed: no default mint).
-# An ephemeral subagent in a SUBDIR inherits the parent project's .dg/ for free by
-# walk-up — no agent-init needed. Overrides (advanced/tests): --agent-home <path>,
-# --as <name>. IMPORTANT: `.dg/` holds a signing key — it MUST be gitignored.
+## Using the exchange from this repo
 
-### Domain tags for this project
-matching, exchange, pricing, reputation, trust, economics
+Onboarding is one command per rung — `dontguess up` (solo), `dontguess up --relay <ws://…>` (promotes the *same* secp256k1 identity to team tier; refuses to mint a competing operator if one exists on the relay, ADV-4 fail-closed), then `dontguess invite <name>` / `dontguess join <token>` for members and `dontguess allowlist add|remove <npub>` for live admit without restart. Full transcripts: `docs/design/onboarding-tiered-scaling-federation.md` §0/§1. `dontguess --help` is the command reference.
 
-### The high-value put class — what the exchange actually optimizes for
+A relay-owner MAY pin a custom strfry `writePolicy` to the operator pubkey for edge hardening. **Optional, not a required step** — team tier works against any nostr relay because the operator does 100% of the real verification (`applyPut` / `TrustChecker`); the relay is not a trust boundary.
 
-Live exchange analysis (2026-06-02, §4 of `docs/design/exchange-matching-measurement-review.md`)
-shows real reuse concentrates in **reusable engineering artifacts** — things that answer "how do I
-do X" across many sessions and projects, not one-off session derivations. Top performers by reuse:
+**YOU MUST BE ADMITTED TO BUY, NOT JUST TO PUT.** An earlier version of this file said "`buy` works anonymously; only `put` requires the allowlist" — that is FALSE and cost a full investigation (dontguess-c0a). The precise rule:
 
-| Entry | Reuses | Pattern |
-|-------|--------|---------|
-| `legion.tools v1.2 schema correctness checklist` | 37 | Protocol-agnostic checklist usable across any schema design |
-| `cf-protocol README CF_NO_PINS` | 30 | Cross-project setup knowledge — saved every time a new repo is configured |
-| `GateEvaluator conformance CI path filter` | 19 | Reusable CI config fragment — plug-and-play across any project's CI |
-| `flock contention test pattern for Go` | 16 | Language-level idiom — applies whenever flock is used in Go |
-| `cf migrate-store --cf-home symlink bridge` | 15 | One-time migration fix that every migrating project needs |
+- `exchange:buy` (kind 3402) is genuinely anonymous — an unadmitted key MATCHES fine.
+- `exchange:settle` (kind 3404) is a **separate kind**, not "a kind of put", and carries the settlement state machine for both flows with per-phase trust (`pkg/exchange/trust.go` `defaultSettlePhaseLevels`): put-accept / put-reject / deliver / preview are operator-authored; **buyer-accept / buyer-reject / complete / dispute / preview-request are ALLOWLISTED**.
 
-**Put these, not session ephemera.** A checklist, a CI pattern, a Go idiom, a migration recipe —
-these are reusable 12-37 times. A session-specific analysis or a per-request derivation is not.
-The higher the reuse potential, the longer the residual stream you earn.
+A buy is worthless without its settle chain — buyer-accept reserves scrip, complete records the purchase. So an unadmitted agent gets a match and then nothing, and until dontguess-c0a's remaining UX fix lands it does not even learn why: the settle is trust-rejected operator-side and the buyer sees only *"ambiguous timeout — matched but content was not delivered."* **After a clean match with no delivery, suspect admission first.**
 
-**Before putting, ask:** "Would another agent working a different item in a different project derive
-this same thing from scratch?" If yes, put it. If it's specific to this session's context, skip it.
+**Identity is a project-local `.dg/`** discovered by walking UP from the cwd, like `.git` (v0.8.3+). There is no `AGENT_CF_HOME` and no per-command flag. Run `dontguess agent-init <name> --fleet-member --relay <urls> --operator-npub <npub>` once in the project root and every buy/put in the tree signs correctly; an ephemeral subagent in a subdir inherits it free by walk-up. `--fleet-member` is required for a persistent agent (fail-closed: no default mint). `agent-init` only PROVISIONS — it does not admit; a fresh npub is rejected `not-allowlisted` until `dontguess join <token>` (auto-admits) or the operator runs `allowlist add`. **`.dg/` holds a signing key — it MUST be gitignored.**
 
-### What to cache from this project
-- Inventory snapshots with embeddings (data, 4hr TTL)
-- Price adjustment deltas / fast loop output (data, 5min TTL)
-- Reputation digest / medium loop output (data, 1hr TTL)
-- Market parameters / slow loop output (data, 4hr TTL)
-- Semantic embeddings for common task descriptions (code, 24hr TTL)
-- 4-layer value stack computation logic (analysis, 7d TTL)
-- Matching engine tuning decisions with reproducible fixture results (analysis, 7d TTL)
-- Conformance test patterns for convention validation (code, 7d TTL)
+**A team-tier put that omits `--operator-npub` is DROPPED fail-closed** (`pkg/exchange/put_confidentiality_4bed_test.go`, `encrypted_required_scripless_adv7_test.go`) — it never folds into inventory, no scrip is credited, and it is not retryable as-is. `--content` is still raw base64 on the way in; the CLI wraps it in a §541 v2 envelope and encrypts the CEK before it leaves your process. Always pass `--operator-npub` on a relay-attached exchange.
 
-### What NOT to cache
-- **Session ephemera** — per-request derivations, one-off analysis that doesn't generalize across projects
-- **Junk puts** — "test", smoke-test entries, upgrade-verification outputs; token_cost < 500 is a red flag
-- **Synthetic traffic** — load-test puts, regression-parallel-* entries; tag with `exchange:synthetic` if needed for testing, do not submit to exchange inventory
-- Per-request ephemera, mutable user state, RNG outputs, raw git history
-- Per-transaction settlement messages (ephemeral, high cardinality)
-- Individual match results (low reuse, task-specific)
+Domain tags for this project: `matching`, `exchange`, `pricing`, `reputation`, `trust`, `economics`.
+
+## What to put, and what not to
+
+**Put reusable engineering artifacts, not session ephemera.** Live analysis (2026-06-02, §4 of `docs/design/exchange-matching-measurement-review.md`) shows reuse concentrates in things that answer "how do I do X" across sessions and projects — a checklist, a CI config fragment, a language idiom, a migration recipe — reused 12–37 times. A session-specific analysis or per-request derivation is not. The higher the reuse potential, the longer the residual stream. (The specific top-performer entries in that review are campfire-era and no longer good examples; the *pattern* is what transfers.)
+
+**Before putting, ask:** would another agent working a different item in a different project derive this same thing from scratch? Yes → put it. Specific to this session's context → skip it.
+
+Project-specific caches that pay off: inventory snapshots with embeddings (4h), fast-loop price deltas (5m), medium-loop reputation digests (1h), slow-loop market parameters (4h), embeddings for common task descriptions (24h), value-stack computation logic (7d), matching-engine tuning decisions with reproducible fixtures (7d), convention conformance-test patterns (7d).
+
+**Never put:** session ephemera or one-off analysis that doesn't generalize; junk puts (`test`, smoke tests, upgrade-verification output — **`token_cost < 500` is a red flag**); synthetic and load-test traffic (tag `exchange:synthetic` if a test needs it, never submit to inventory); mutable user state; RNG output; raw git history; per-transaction settlement messages (ephemeral, high cardinality); individual match results (low reuse, task-specific).
+
+## Source of truth
+
+1. **Wire spec** — `docs/convention/exchange-core/*.json` (payload schemas, current) validated by `pkg/convention/`. **Not** the prose at `docs/convention/*.md`: `core-operations.md` and `scrip-operations.md` are campfire-era heritage (13 campfire references each, zero nostr references) and describe a retired transport. An earlier version of this file called the whole `docs/convention/` directory "the authority" while §Architecture simultaneously called it heritage — that contradiction is resolved here in favour of the schemas.
+2. **This CLAUDE.md** — project instructions and operator rulings.
+3. **`docs/design/`** — active design docs; the cited file wins over a summary here.
+4. **Source code** — implementation.
+5. **`docs/heritage/`** — toolrank principles that survived the pivot. Never authoritative for current behaviour.
