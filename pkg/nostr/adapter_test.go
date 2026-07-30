@@ -74,8 +74,15 @@ func assertRoundTrip(t *testing.T, in *proto.Message) *Event {
 	if out.Sender != in.Sender {
 		t.Errorf("Sender: got %q want %q", out.Sender, in.Sender)
 	}
-	if out.CampfireID != in.CampfireID {
-		t.Errorf("CampfireID: got %q want %q", out.CampfireID, in.CampfireID)
+	// DELIBERATE CONTRACT CHANGE (dontguess-ab6): CampfireID is no longer carried
+	// on the wire, so it does NOT survive a round-trip and must come back empty.
+	// Campfire is retired and the field was vestigial — across the entire live log
+	// it held exactly two values, "local" and "", neither carrying information,
+	// and nothing in the runtime reads it (ListMessages has zero non-test callers).
+	// Reading an INBOUND dg_cf is still supported for events already published to
+	// the relay; that is pinned by TestDGCampfireStillReadInboundForBackCompat.
+	if out.CampfireID != "" {
+		t.Errorf("CampfireID: got %q, want \"\" — dg_cf must no longer be emitted", out.CampfireID)
 	}
 	if out.Instance != in.Instance {
 		t.Errorf("Instance: got %q want %q", out.Instance, in.Instance)
@@ -674,4 +681,44 @@ func hasStr(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// TestDGCampfireNotEmitted pins the write half of the dontguess-ab6 contract:
+// no new event carries a dg_cf tag.
+func TestDGCampfireNotEmitted(t *testing.T) {
+	t.Parallel()
+	in := mkMsg(exchange.TagPut, nil, nil)
+	in.CampfireID = "campfire-xyz"
+	ev, err := ToNostrEvent(in)
+	if err != nil {
+		t.Fatalf("ToNostrEvent: %v", err)
+	}
+	for _, tg := range ev.Tags {
+		if len(tg) >= 1 && tg[0] == "dg_cf" {
+			t.Fatalf("a dg_cf tag was emitted (%v) — campfire is retired and the field is vestigial", tg)
+		}
+	}
+}
+
+// TestDGCampfireStillReadInboundForBackCompat pins the read half. Events carrying
+// dg_cf are already published to the relay and are immutable; refusing to read
+// them would silently drop a field from history. Emission stops; ingestion does
+// not change.
+func TestDGCampfireStillReadInboundForBackCompat(t *testing.T) {
+	t.Parallel()
+	in := mkMsg(exchange.TagPut, nil, nil)
+	ev, err := ToNostrEvent(in)
+	if err != nil {
+		t.Fatalf("ToNostrEvent: %v", err)
+	}
+	// Simulate an event published before this change.
+	ev.Tags = append(ev.Tags, []string{"dg_cf", "campfire-legacy"})
+
+	back, err := FromNostrEvent(ev)
+	if err != nil {
+		t.Fatalf("FromNostrEvent: %v", err)
+	}
+	if back.CampfireID != "campfire-legacy" {
+		t.Fatalf("inbound dg_cf = %q, want %q — historical events must still read back intact", back.CampfireID, "campfire-legacy")
+	}
 }

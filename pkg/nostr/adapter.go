@@ -173,11 +173,15 @@ func ToNostrEvent(msg *proto.Message) (*Event, error) {
 		}
 	}
 
-	// Preservation tags for campfire-era fields with no nostr-native home.
+	// Preservation tag for the exact nanosecond Timestamp, which has no
+	// nostr-native home (created_at is seconds).
 	tags = append(tags, []string{tagDGTimestamp, strconv.FormatInt(msg.Timestamp, 10)})
-	if msg.CampfireID != "" {
-		tags = append(tags, []string{tagDGCampfire, msg.CampfireID})
-	}
+	// dg_cf (CampfireID) is NO LONGER EMITTED (dontguess-ab6). Campfire is retired
+	// and the field was vestigial: across the entire live log it held exactly two
+	// values, "local" and "", neither carrying any information. Nothing in the
+	// runtime reads it — ListMessages is its only consumer and has zero non-test
+	// callers. Reading it back is retained below so events already on the relay
+	// still round-trip exactly.
 	if msg.Instance != "" {
 		tags = append(tags, []string{tagDGInstance, msg.Instance})
 	}
@@ -296,6 +300,8 @@ func FromNostrEvent(ev *Event) (*proto.Message, error) {
 				}
 			}
 		case tagDGCampfire:
+			// Still READ for backward compatibility with events already published
+			// to the relay; never written again (see ToNostrEvent).
 			if len(t) >= 2 {
 				msg.CampfireID = t[1]
 			}

@@ -694,7 +694,6 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 	openAdmission := !serveNoOpenAdmission
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        localStore,
 		OperatorPublicKey: engineOperatorKey,
 		OperatorSigner:    operatorSigner,

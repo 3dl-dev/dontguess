@@ -197,7 +197,6 @@ func handleOpPut(eng *exchange.Engine, req operatorRequest) opPutResponse {
 
 	if err := eng.IngestLocalRecord(dgstore.Record{
 		ID:         putID,
-		CampfireID: "local",
 		Sender:     sellerKey,
 		Payload:    payload,
 		Tags:       []string{exchange.TagPut},
@@ -270,7 +269,6 @@ func handleOpBuy(eng *exchange.Engine, conn net.Conn, req operatorRequest) opBuy
 
 	if err := eng.IngestLocalRecord(dgstore.Record{
 		ID:         buyID,
-		CampfireID: "local",
 		Sender:     buyerKey,
 		Payload:    payload,
 		Tags:       []string{exchange.TagBuy},
