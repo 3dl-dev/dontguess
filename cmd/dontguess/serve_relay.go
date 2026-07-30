@@ -1199,7 +1199,7 @@ func storeWatermarkSeconds(ls *dgstore.Store) int64 {
 
 // guardOperatorKeyMigration LOUD-warns when the relay is being enabled on a
 // DG_HOME that already holds operator-authored records signed under a DIFFERENT
-// operator key than the nostr relay identity now in force — the campfire-era →
+// operator key than the nostr relay identity now in force — the pre-nostr →
 // nostr operator-key switch (serve.go sets engineOperatorKey = relaySigner
 // pubkey when the relay is on). The Outbox would RE-SIGN those historical records
 // under the new key and republish them, re-attributing authorship; surfacing it
@@ -1230,7 +1230,7 @@ func guardOperatorKeyMigration(ls *dgstore.Store, operatorKeyHex string, logf fu
 		foreign[r.Sender] = struct{}{}
 	}
 	if n > 0 {
-		warn("  relay migration guard: WARN %d operator-authored record(s) under %d prior operator key(s) differ from the nostr relay operator key %s… — enabling the relay will RE-SIGN and republish them under the new identity (campfire-era → nostr operator-key switch). Migrate deliberately if this is not intended.",
+		warn("  relay migration guard: WARN %d operator-authored record(s) under %d prior operator key(s) differ from the nostr relay operator key %s… — enabling the relay will RE-SIGN and republish them under the new identity (pre-nostr → nostr operator-key switch). Migrate deliberately if this is not intended.",
 			n, len(foreign), operatorKeyHex[:min(16, len(operatorKeyHex))])
 	}
 	return n
@@ -1409,7 +1409,7 @@ func attachRelayTransport(
 	// Register this leg's Outbox for egress-health reporting (dontguess-b4b).
 	publishReg.addLeg(wiring.outbox)
 
-	// LOW: warn if enabling the relay would re-attribute campfire-era operator
+	// LOW: warn if enabling the relay would re-attribute pre-nostr operator
 	// records under the new nostr operator key (non-fatal, LOUD).
 	guardOperatorKeyMigration(ls, operatorKeyHex, logf)
 
