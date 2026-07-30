@@ -36,7 +36,7 @@ func buildMatchedState(t *testing.T, h *testHarness, eng *exchange.Engine) (matc
 		[]string{exchange.TagPut, "exchange:content-type:analysis"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(168*time.Hour)); err != nil {
@@ -64,10 +64,10 @@ func buildMatchedState(t *testing.T, h *testHarness, eng *exchange.Engine) (matc
 	}
 
 	// Find the emitted match message.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	matchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(matchMsgs) == 0 {
 		t.Fatal("no match message emitted")
 	}
@@ -331,7 +331,7 @@ func TestBuyerAccept_ViaPreviewAntecedent(t *testing.T) {
 	eng.State().Apply(exchange.FromStoreRecord(completeRec))
 
 	// Re-sync state from the store to pick up all messages.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// After complete: seller reputation must be above the default.
@@ -383,7 +383,7 @@ func TestEngineDispatch_PreviewRequest_EmitsPreviewResponse(t *testing.T) {
 	matchRec, entryID := buildMatchedState(t, h, eng)
 
 	// Count existing settle messages before preview-request.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	preCount := len(preMsgs)
 
 	// Buyer sends preview-request; dispatch through engine.
@@ -400,7 +400,7 @@ func TestEngineDispatch_PreviewRequest_EmitsPreviewResponse(t *testing.T) {
 	}
 
 	// A settle(preview) message should have been emitted.
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	if len(postMsgs) <= preCount {
 		t.Fatal("engine did not emit a settle(preview) response")
 	}
@@ -457,14 +457,14 @@ func TestEngineDispatch_PreviewRequest_InvalidAntecedent_NoResponse(t *testing.T
 	preqRec, _ := h.st.GetMessage(preqMsg.ID)
 	eng.State().Apply(exchange.FromStoreRecord(preqRec))
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	preCount := len(preMsgs)
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(preqRec)); err != nil {
 		t.Fatalf("DispatchForTest: %v", err)
 	}
 
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	if len(postMsgs) != preCount {
 		t.Errorf("engine emitted %d extra settle messages for invalid preview-request, want 0",
 			len(postMsgs)-preCount)
@@ -510,7 +510,7 @@ func TestEngineDispatch_PreviewRequest_TeaserEchoedNoChunks(t *testing.T) {
 	}
 
 	// Find the emitted preview message.
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	var previewMsg *store.MessageRecord
 	for i := range postMsgs {
 		m := &postMsgs[i]
@@ -699,7 +699,7 @@ func TestPreviewRequest_NoRealContentLeak(t *testing.T) {
 	}
 
 	// Find the emitted preview message.
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	var previewMsg *store.MessageRecord
 	for i := range postMsgs {
 		m := &postMsgs[i]

@@ -44,7 +44,7 @@ func TestAutoAcceptPut_TriggersCompressionAssign(t *testing.T) {
 	}
 
 	// Query the store for exchange:assign messages.
-	allMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {
@@ -148,7 +148,7 @@ func TestAutoAcceptPut_CompressionAssignOddTokenCost(t *testing.T) {
 		t.Fatalf("AutoAcceptPut: %v", err)
 	}
 
-	allMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {
@@ -205,7 +205,7 @@ func TestAutoAcceptPut_ZeroTokenCost(t *testing.T) {
 	}
 
 	// No compression assign must have been emitted.
-	allMsgs, listErr := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allMsgs, listErr := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if listErr != nil {
@@ -254,7 +254,7 @@ func TestAutoAcceptPut_DuplicateIdempotent(t *testing.T) {
 	}
 
 	// Exactly one compression assign must exist for this entry.
-	allMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {
@@ -311,7 +311,7 @@ func TestHotAndWarmCompressionAssign_Coexistence(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages after put: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestHotAndWarmCompressionAssign_Coexistence(t *testing.T) {
 	}
 
 	// Verify the hot compression assign was emitted immediately after put-accept.
-	assignsAfterAccept, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	assignsAfterAccept, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {
@@ -371,7 +371,7 @@ func TestHotAndWarmCompressionAssign_Coexistence(t *testing.T) {
 	}
 
 	// Verify a match was sent (buy did not miss).
-	matchMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	matchMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	if err != nil {
@@ -382,7 +382,7 @@ func TestHotAndWarmCompressionAssign_Coexistence(t *testing.T) {
 	}
 
 	// Step 4: collect all assigns for this entry from the write log.
-	allAssigns, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allAssigns, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {

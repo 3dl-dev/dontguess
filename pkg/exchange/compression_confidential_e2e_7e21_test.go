@@ -352,7 +352,7 @@ func (f *confidentialCompressFixture) outstanding() int64 {
 // the bytes) in a single sweep — if either regresses, this fails.
 func assertNoPlaintextOnWire(t *testing.T, h *testHarness, originalText, compressedText string) {
 	t.Helper()
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}

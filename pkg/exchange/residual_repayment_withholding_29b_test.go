@@ -100,7 +100,7 @@ func TestSettleResidual_WithholdsForOutstandingLoan(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(completeMsg.ID)
 	if err != nil {

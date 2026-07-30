@@ -45,7 +45,7 @@ func TestWarmCompression_MatchTriggersAssign(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages after put: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestWarmCompression_MatchTriggersAssign(t *testing.T) {
 	}
 
 	// Step 4: verify a match message was sent.
-	matchMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	matchMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	if err != nil {
@@ -96,7 +96,7 @@ func TestWarmCompression_MatchTriggersAssign(t *testing.T) {
 	}
 
 	// Step 5: find the warm compression assign for the buyer.
-	allAssigns, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allAssigns, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {
@@ -176,7 +176,7 @@ func TestWarmCompression_SkippedWhenDerivativeExists(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages after put: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestWarmCompression_SkippedWhenDerivativeExists(t *testing.T) {
 	}
 
 	// Record all assign messages before the buy.
-	assignsBefore, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	assignsBefore, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {
@@ -281,7 +281,7 @@ func TestWarmCompression_SkippedWhenDerivativeExists(t *testing.T) {
 	}
 
 	// Verify a match was sent.
-	matchMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	matchMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	if err != nil {
@@ -292,7 +292,7 @@ func TestWarmCompression_SkippedWhenDerivativeExists(t *testing.T) {
 	}
 
 	// Verify no NEW buyer-exclusive warm compression assign was emitted after the buy.
-	assignsAfter, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	assignsAfter, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {
@@ -344,7 +344,7 @@ func TestWarmCompression_DerivativeEntrySkipped(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages after put: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestWarmCompression_DerivativeEntrySkipped(t *testing.T) {
 			eng.SetMatchIndexForTest(origIdx)
 		}()
 
-		assignsBefore, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		assignsBefore, err := h.st.ListMessages(0, store.MessageFilter{
 			Tags: []string{exchange.TagAssign},
 		})
 		if err != nil {
@@ -468,7 +468,7 @@ func TestWarmCompression_DerivativeEntrySkipped(t *testing.T) {
 			t.Fatalf("DispatchForTest(buy): %v", err)
 		}
 
-		matchMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		matchMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 			Tags: []string{exchange.TagMatch},
 		})
 		if err != nil {
@@ -478,7 +478,7 @@ func TestWarmCompression_DerivativeEntrySkipped(t *testing.T) {
 			t.Fatal("expected a match message, found none")
 		}
 
-		assignsAfter, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		assignsAfter, err := h.st.ListMessages(0, store.MessageFilter{
 			Tags: []string{exchange.TagAssign},
 		})
 		if err != nil {
@@ -517,7 +517,7 @@ func TestWarmCompression_DerivativeEntrySkipped(t *testing.T) {
 			[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 			nil,
 		)
-		msgs2, err := h2.st.ListMessages(h2.cfID, 0)
+		msgs2, err := h2.st.ListMessages(0)
 		if err != nil {
 			t.Fatalf("ListMessages after put: %v", err)
 		}
@@ -534,7 +534,7 @@ func TestWarmCompression_DerivativeEntrySkipped(t *testing.T) {
 		origEntryID2 := inv2[0].EntryID
 
 		// No compressed version exists — warm assign should fire.
-		assignsBefore2, err := h2.st.ListMessages(h2.cfID, 0, store.MessageFilter{
+		assignsBefore2, err := h2.st.ListMessages(0, store.MessageFilter{
 			Tags: []string{exchange.TagAssign},
 		})
 		if err != nil {
@@ -556,7 +556,7 @@ func TestWarmCompression_DerivativeEntrySkipped(t *testing.T) {
 			t.Fatalf("DispatchForTest(buy): %v", err)
 		}
 
-		assignsAfter2, err := h2.st.ListMessages(h2.cfID, 0, store.MessageFilter{
+		assignsAfter2, err := h2.st.ListMessages(0, store.MessageFilter{
 			Tags: []string{exchange.TagAssign},
 		})
 		if err != nil {
@@ -607,7 +607,7 @@ func TestWarmCompression_ActiveAssignSkipped(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages after put: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestWarmCompression_ActiveAssignSkipped(t *testing.T) {
 	}
 
 	// Verify the first warm assign was sent.
-	assignsAfterFirstBuy, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	assignsAfterFirstBuy, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {
@@ -681,7 +681,7 @@ func TestWarmCompression_ActiveAssignSkipped(t *testing.T) {
 		t.Fatalf("DispatchForTest(second buy): %v", err)
 	}
 
-	assignsAfterSecondBuy, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	assignsAfterSecondBuy, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {

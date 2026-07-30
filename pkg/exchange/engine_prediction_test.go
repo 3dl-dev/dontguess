@@ -63,7 +63,7 @@ func TestEngine_Prediction_FullPath(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsgB.ID, 7000, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut entry-B: %v", err)
@@ -86,7 +86,7 @@ func TestEngine_Prediction_FullPath(t *testing.T) {
 	)
 
 	// Record baseline assign count before dispatch.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 	preCount := len(preMsgs)
 
 	// --- Step 4: Buyer sends settle(complete) and engine dispatches it ---
@@ -103,7 +103,7 @@ func TestEngine_Prediction_FullPath(t *testing.T) {
 	)
 
 	// Reload state so settle(complete) and its antecedent chain are visible.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispatch the complete message through the real engine handler.
@@ -118,7 +118,7 @@ func TestEngine_Prediction_FullPath(t *testing.T) {
 	}
 
 	// --- Step 5: Verify a standing assign for entry-B was posted ---
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 	if len(postMsgs) <= preCount {
 		t.Fatalf("stagePredictions: expected new brokered-match assign after settle(complete), got none (pre=%d, post=%d)",
 			preCount, len(postMsgs))
@@ -172,7 +172,7 @@ func TestEngine_Prediction_FanoutCap(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsgA.ID, 7000, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut entry-A: %v", err)
@@ -184,7 +184,7 @@ func TestEngine_Prediction_FanoutCap(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsgB.ID, 7000, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut entry-B: %v", err)
@@ -233,7 +233,7 @@ func TestEngine_Prediction_FanoutCap(t *testing.T) {
 	}
 
 	// Reload state to ensure all assigns are visible.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Confirm exactly MaxPredictionFanout open assigns exist for entry-B.
@@ -243,14 +243,14 @@ func TestEngine_Prediction_FanoutCap(t *testing.T) {
 	}
 
 	// Record assign count in the store before StagePredictionsForTest.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 	preCount := len(preMsgs)
 
 	// --- Step 4: Call StagePredictionsForTest — must be a no-op for entry-B ---
 	eng.StagePredictionsForTest(entryAID)
 
 	// --- Step 5: Verify assign count did NOT increase ---
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 	if len(postMsgs) > preCount {
 		t.Errorf("fanout cap: assign count increased from %d to %d after StagePredictionsForTest; want no new assigns for entry-B (cap=%d)",
 			preCount, len(postMsgs), exchange.MaxPredictionFanout)

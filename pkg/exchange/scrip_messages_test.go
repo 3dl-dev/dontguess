@@ -28,7 +28,7 @@ import (
 // countMsgsWithTag counts messages in the store with the given tag.
 func countMsgsWithTag(t *testing.T, h *testHarness, tag string) int {
 	t.Helper()
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{tag}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{tag}})
 	return len(msgs)
 }
 
@@ -71,7 +71,7 @@ func TestBuyHold_EmitsConventionMessage(t *testing.T) {
 	preMatch := countMsgsWithTag(t, h, exchange.TagMatch)
 
 	// Run engine to get a match (no buy-hold emitted at buy time).
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	go func() { _ = eng.Start(ctx) }()
@@ -98,7 +98,7 @@ func TestBuyHold_EmitsConventionMessage(t *testing.T) {
 	_ = sendBuyerAcceptAndDispatch(t, h, eng, matchMsg.ID, inv[0].EntryID)
 
 	// Buy-hold message must appear after buyer-accept.
-	holdMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	holdMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(holdMsgs) <= preBuyHold {
 		t.Fatal("expected scrip-buy-hold message to be emitted after buyer-accept")
 	}
@@ -185,7 +185,7 @@ func TestSettle_EmitsConventionMessages(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -225,7 +225,7 @@ func TestSettle_EmitsConventionMessages(t *testing.T) {
 	)
 
 	// Replay so antecedent chain is in state.
-	chainMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	chainMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(chainMsgs))
 
 	// Pre-count settle and burn messages.
@@ -244,7 +244,7 @@ func TestSettle_EmitsConventionMessages(t *testing.T) {
 		},
 		[]string{deliverMsgRec.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(completeMsg.ID)
 	if err != nil {
@@ -261,7 +261,7 @@ func TestSettle_EmitsConventionMessages(t *testing.T) {
 	}
 
 	// Parse the settle payload.
-	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	settleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 	settleMsg := settleMsgs[len(settleMsgs)-1]
 	var sp scrip.SettlePayload
 	if err := json.Unmarshal(settleMsg.Payload, &sp); err != nil {
@@ -289,7 +289,7 @@ func TestSettle_EmitsConventionMessages(t *testing.T) {
 		t.Fatal("expected scrip-burn message to be emitted for matching fee")
 	}
 
-	burnMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
+	burnMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
 	burnMsg := burnMsgs[len(burnMsgs)-1]
 	var bp scrip.BurnPayload
 	if err := json.Unmarshal(burnMsg.Payload, &bp); err != nil {

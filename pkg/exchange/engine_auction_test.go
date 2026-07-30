@@ -48,7 +48,7 @@ func TestEngine_AuctionSweep_FullPath(t *testing.T) {
 	const baseReward int64 = 500
 
 	// Replay existing store messages (operator membership, etc.) into state.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Step 1: operator posts assign with a 1-second auction window.
@@ -113,14 +113,14 @@ func TestEngine_AuctionSweep_FullPath(t *testing.T) {
 	// Step 4: winner delivers assign-complete. Use a fresh engine in dispatch mode
 	// so we don't race the running engine (already cancelled above).
 	eng2 := h.newEngineWithOpts(nil)
-	allMsgs2, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs2, _ := h.st.ListMessages(0)
 	eng2.State().Replay(exchange.FromStoreRecords(allMsgs2))
 
 	completePayload := []byte(`{"output":"freshness check done"}`)
 	// Antecedent for assign-complete is the ClaimMsgID set during auction close.
 	completeMsg := h.sendMessage(worker1, completePayload, []string{exchange.TagAssignComplete}, []string{rec.ClaimMsgID})
 
-	allMsgs2, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs2, _ = h.st.ListMessages(0)
 	eng2.State().Replay(exchange.FromStoreRecords(allMsgs2))
 
 	completeRec, err := h.st.GetMessage(completeMsg.ID)
@@ -134,7 +134,7 @@ func TestEngine_AuctionSweep_FullPath(t *testing.T) {
 	// Step 5: operator accepts.
 	acceptMsg := h.sendMessage(h.operator, []byte(`{}`), []string{exchange.TagAssignAccept}, []string{completeMsg.ID})
 
-	allMsgs2, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs2, _ = h.st.ListMessages(0)
 	eng2.State().Replay(exchange.FromStoreRecords(allMsgs2))
 
 	acceptRec, err := h.st.GetMessage(acceptMsg.ID)
@@ -182,7 +182,7 @@ func TestEngine_StalePredictionSweep_FullPath(t *testing.T) {
 	})
 
 	// Replay existing store messages (operator membership, etc.) into state.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Operator posts a standing brokered-match assign already past its deadline.
@@ -260,7 +260,7 @@ func TestEngine_AuctionVickreyPrice_PaymentCorrectness(t *testing.T) {
 	const bid2 int64 = 350 // worker2 — second-lowest bid = Vickrey clearing price
 
 	// Step 1: replay current state.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Step 2: operator posts assign with a large auction window (window stays open
@@ -273,7 +273,7 @@ func TestEngine_AuctionVickreyPrice_PaymentCorrectness(t *testing.T) {
 	})
 	assignMsg := h.sendMessage(h.operator, assignPayload, []string{exchange.TagAssign}, nil)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	assignRec, err := h.st.GetMessage(assignMsg.ID)
@@ -290,7 +290,7 @@ func TestEngine_AuctionVickreyPrice_PaymentCorrectness(t *testing.T) {
 	claim1Msg := h.sendMessage(worker1, bid1Payload, []string{exchange.TagAssignClaim}, []string{assignMsg.ID})
 	claim2Msg := h.sendMessage(worker2, bid2Payload, []string{exchange.TagAssignClaim}, []string{assignMsg.ID})
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispatch both claim messages so bids are recorded in state.
@@ -331,7 +331,7 @@ func TestEngine_AuctionVickreyPrice_PaymentCorrectness(t *testing.T) {
 	})
 	closeMsg := h.sendMessage(h.operator, closePayload, []string{exchange.TagAssignAuctionClose}, []string{assignMsg.ID})
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	closeRec, err := h.st.GetMessage(closeMsg.ID)
@@ -364,7 +364,7 @@ func TestEngine_AuctionVickreyPrice_PaymentCorrectness(t *testing.T) {
 	completePayload := []byte(`{"output":"validation done"}`)
 	completeMsg := h.sendMessage(worker1, completePayload, []string{exchange.TagAssignComplete}, []string{rec.ClaimMsgID})
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completeRec, err := h.st.GetMessage(completeMsg.ID)
@@ -378,7 +378,7 @@ func TestEngine_AuctionVickreyPrice_PaymentCorrectness(t *testing.T) {
 	// Step 6: operator accepts — engine must pay VickreyPrice (350), not Reward (500).
 	acceptMsg := h.sendMessage(h.operator, []byte(`{}`), []string{exchange.TagAssignAccept}, []string{completeMsg.ID})
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	acceptRec, err := h.st.GetMessage(acceptMsg.ID)
@@ -403,7 +403,7 @@ func TestEngine_AuctionVickreyPrice_PaymentCorrectness(t *testing.T) {
 	}
 
 	// Verify scrip-assign-pay was emitted with Vickrey clearing price.
-	payMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripAssignPay}})
+	payMsgs, err := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripAssignPay}})
 	if err != nil {
 		t.Fatalf("listing scrip-assign-pay messages: %v", err)
 	}
@@ -457,12 +457,12 @@ func auctionPollForTag(t *testing.T, h *testHarness, tag string, minCount int, t
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{tag}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{tag}})
 		if len(msgs) >= minCount {
 			return msgs
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{tag}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{tag}})
 	return msgs
 }

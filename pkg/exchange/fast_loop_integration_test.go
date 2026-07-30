@@ -45,7 +45,7 @@ func TestComputePrice_FastLoopAdjustment_RealEngine(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestFastLoop_PriceHistoryFromRealFlow(t *testing.T) {
 		[]string{deliverMsgID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Verify PriceHistory has a record for our entry.
@@ -193,7 +193,7 @@ func TestFastLoop_DemandAndPreviewCountsFromRealFlow(t *testing.T) {
 		[]string{deliverMsgID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// EntryDemandCount must be > 0 (buyer completed a purchase).

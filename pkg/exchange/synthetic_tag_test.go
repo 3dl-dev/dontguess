@@ -66,7 +66,7 @@ func TestSyntheticTag_BuyMissTaggedAndExcluded(t *testing.T) {
 	eng := h.newEngine()
 
 	// Replay existing state (convention declarations written by Init).
-	existing, err := h.st.ListMessages(h.cfID, 0)
+	existing, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages for replay: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestSyntheticTag_BuyMissTaggedAndExcluded(t *testing.T) {
 
 	// --- Read exchange:buy-miss messages from the store ---
 
-	allMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagBuyMiss},
 	})
 	if err != nil {
@@ -139,7 +139,7 @@ func TestSyntheticTag_BuyMissTaggedAndExcluded(t *testing.T) {
 	// --- Build buy and match sets for ComputeHitRate ---
 
 	// Collect all buy messages from the store (tagged exchange:buy).
-	buyMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	buyMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagBuy},
 	})
 	if err != nil {
@@ -162,7 +162,7 @@ func TestSyntheticTag_BuyMissTaggedAndExcluded(t *testing.T) {
 	}
 
 	// Collect all match messages (both hits and misses carry exchange:match).
-	matchMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	matchMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	if err != nil {
@@ -234,7 +234,7 @@ func TestSyntheticTag_PutAcceptTagged(t *testing.T) {
 	eng := h.newEngine()
 
 	// Replay existing state (convention declarations written by Init).
-	existing, err := h.st.ListMessages(h.cfID, 0)
+	existing, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages for replay: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestSyntheticTag_PutAcceptTagged(t *testing.T) {
 	}
 
 	// Step 3: read settle messages from the store and find the put-accept.
-	settleMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	settleMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagSettle},
 	})
 	if err != nil {

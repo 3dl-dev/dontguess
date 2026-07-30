@@ -111,7 +111,7 @@ func TestHoldForReview_DoesNotEmitConventionMessage(t *testing.T) {
 	eng := h.newEngineWithOpts(nil)
 
 	// Count messages before submitting the put.
-	msgsBefore, err := h.st.ListMessages(h.cfID, 0)
+	msgsBefore, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages before put: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestHoldForReview_DoesNotEmitConventionMessage(t *testing.T) {
 	replayAll(t, h, eng)
 
 	// Count messages after submitting the put — one new message expected.
-	msgsAfterPut, err := h.st.ListMessages(h.cfID, 0)
+	msgsAfterPut, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages after put: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestHoldForReview_DoesNotEmitConventionMessage(t *testing.T) {
 		eng.RunAutoAccept(maxAccept, now, skipped)
 	}
 
-	msgsAfterHold, err := h.st.ListMessages(h.cfID, 0)
+	msgsAfterHold, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages after hold: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestHoldForReview_Prune(t *testing.T) {
 	logBuf.Reset()
 	putID2 := sendPutWithCost(t, h, fmt.Sprintf("prune-test result 2 seed=%d", overCapCost+1), overCapCost)
 	// Replay to pick up the new put.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}

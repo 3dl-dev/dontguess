@@ -34,7 +34,7 @@ func setupMatchedOrder(t *testing.T, h *testHarness, eng *exchange.Engine) (matc
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 8400, time.Now().Add(168*time.Hour)); err != nil {
@@ -64,13 +64,13 @@ func setupMatchedOrder(t *testing.T, h *testHarness, eng *exchange.Engine) (matc
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	go func() { _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -83,7 +83,7 @@ func setupMatchedOrder(t *testing.T, h *testHarness, eng *exchange.Engine) (matc
 	matchMsg = matchMsgs[len(matchMsgs)-1]
 
 	// Sync state with the match message.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	return matchMsg, entryID
@@ -144,7 +144,7 @@ func TestState_BuyerAccept_WrongSenderRejected(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Verify: operator deliver should fail because the match was never accepted.
@@ -201,7 +201,7 @@ func TestState_BuyerAccept_CorrectSenderAccepted(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Seller reputation must have increased.
@@ -246,7 +246,7 @@ func TestState_Complete_WrongSenderRejected(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	repBefore := eng.State().SellerReputation(h.seller.PublicKeyHex())
@@ -262,7 +262,7 @@ func TestState_Complete_WrongSenderRejected(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Seller reputation must NOT have changed.
@@ -309,7 +309,7 @@ func TestState_BuyerReject_RemovesAcceptedOrder(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Verify the accept was recorded.
@@ -328,7 +328,7 @@ func TestState_BuyerReject_RemovesAcceptedOrder(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// acceptedOrders entry must be removed.
@@ -372,7 +372,7 @@ func TestState_BuyerReject_WrongSenderIgnored(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	if !eng.State().IsMatchAccepted(matchMsg.ID) {
@@ -390,7 +390,7 @@ func TestState_BuyerReject_WrongSenderIgnored(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// The accepted order must still be present (impostor reject ignored).

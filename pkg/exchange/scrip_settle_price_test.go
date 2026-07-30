@@ -54,7 +54,7 @@ func buildSettleChainForPriceTests(
 		t.Fatalf("buildSettleChainForPriceTests: Replay: %v", err)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -99,7 +99,7 @@ func buildSettleChainForPriceTests(
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	return res, deliverMsg, salePrice
@@ -146,7 +146,7 @@ func TestSettle_PriceLockedAtBuyerAcceptTime(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	rec, err := h.st.GetMessage(completeMsg.ID)
@@ -214,7 +214,7 @@ func TestSettle_CompleteWithoutBuyerAcceptIsSkipped(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	go func() { _ = eng.Start(ctx) }()
@@ -259,7 +259,7 @@ func TestSettle_CompleteWithoutBuyerAcceptIsSkipped(t *testing.T) {
 	)
 
 	// Replay state (buyer-accept in state, but NOT dispatched through engine).
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	sellerBalanceBefore := cs.Balance(h.seller.PublicKeyHex())
@@ -278,7 +278,7 @@ func TestSettle_CompleteWithoutBuyerAcceptIsSkipped(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	rec, err := h.st.GetMessage(completeMsg.ID)

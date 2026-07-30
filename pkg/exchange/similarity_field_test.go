@@ -60,7 +60,7 @@ func TestMatchResult_SimilarityFieldVaries(t *testing.T) {
 		)
 
 		// Replay log and accept the put so it appears in inventory.
-		msgs, err := h.st.ListMessages(h.cfID, 0)
+		msgs, err := h.st.ListMessages(0)
 		if err != nil {
 			t.Fatalf("listing messages: %v", err)
 		}
@@ -76,7 +76,7 @@ func TestMatchResult_SimilarityFieldVaries(t *testing.T) {
 		}
 
 		// Send the buy.
-		preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		preCount := len(preMsgs)
 
 		buyMsg := h.sendMessage(h.buyer,
@@ -95,10 +95,10 @@ func TestMatchResult_SimilarityFieldVaries(t *testing.T) {
 		}
 
 		// Reload state.
-		allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+		allMsgs, _ := h.st.ListMessages(0)
 		eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-		postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(postMsgs) <= preCount {
 			t.Fatal("engine emitted no match-tagged message after buy")
 		}

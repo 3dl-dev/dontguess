@@ -60,7 +60,7 @@ func replayIntoEngine(t *testing.T, h *testHarness, eng *exchange.Engine, payloa
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -74,7 +74,7 @@ func replayBuyIntoEngine(t *testing.T, h *testHarness, eng *exchange.Engine, pay
 		[]string{exchange.TagBuy},
 		nil,
 	)
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestValidation_Put_ExactDescriptionLimitAccepted(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
@@ -157,7 +157,7 @@ func TestValidation_Put_ExactDomainsLimitAccepted(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
@@ -222,7 +222,7 @@ func TestValidation_Put_MaxTokenCostAccepted(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {

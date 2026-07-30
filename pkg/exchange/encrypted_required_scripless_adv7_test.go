@@ -55,7 +55,7 @@ func TestEncryptedRequired_ScriplessRelayRung_DropsPlaintext(t *testing.T) {
 		putPayload(plainDesc, "sha256:"+fmt.Sprintf("%064x", 9), "code", 6000, 2048),
 		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
 
-	all, _ := h.st.ListMessages(h.cfID, 0)
+	all, _ := h.st.ListMessages(0)
 	engScriplessTeam.State().Replay(exchange.FromStoreRecords(all))
 
 	// The v2 (encrypted) put must fold — otherwise the drop assertion below is
@@ -101,7 +101,7 @@ func TestEncryptedRequired_ScriplessRelayRung_DropsPlaintext(t *testing.T) {
 	ctrlPut := h2.sendMessage(h2.seller,
 		putPayload(plainDesc, "sha256:"+fmt.Sprintf("%064x", 9), "code", 6000, 2048),
 		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
-	all2, _ := h2.st.ListMessages(h2.cfID, 0)
+	all2, _ := h2.st.ListMessages(0)
 	engIndiv.State().Replay(exchange.FromStoreRecords(all2))
 	if err := engIndiv.AutoAcceptPut(ctrlPut.ID, 4000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("individual-tier control: the SAME plaintext put must fold (no signer ⇒ encryptedRequired off): %v", err)

@@ -56,7 +56,7 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 	eng := h.newEngine()
 
 	// Replay existing state (convention declarations written by Init).
-	existing, err := h.st.ListMessages(h.cfID, 0)
+	existing, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages for initial replay: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages after junk put: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(schemaPutMsg.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
@@ -124,7 +124,7 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(pinsPutMsg.ID, 4200, time.Now().Add(72*time.Hour)); err != nil {
@@ -139,7 +139,7 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(flockPutMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
@@ -180,7 +180,7 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 		},
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preMatchCount := len(preMsgs)
 
 	type buyRecord struct {
@@ -208,10 +208,10 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 	}
 
 	// Reload state to pick up emitted match messages.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	postNonsenseMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	postNonsenseMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	newNonsenseMatches := len(postNonsenseMsgs) - preMatchCount
 	if newNonsenseMatches < len(nonsenseCases) {
 		t.Fatalf("engine emitted %d match messages for %d nonsense buys, want %d",
@@ -294,7 +294,7 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 		},
 	}
 
-	preSubstantiveMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preSubstantiveMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preSubstantiveCount := len(preSubstantiveMsgs)
 
 	var substantiveBuyRecords []buyRecord
@@ -316,10 +316,10 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 	}
 
 	// Reload state.
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	postSubstantiveMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	postSubstantiveMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	newSubstantiveMatches := len(postSubstantiveMsgs) - preSubstantiveCount
 	if newSubstantiveMatches < len(substantiveCases) {
 		t.Fatalf("engine emitted %d match messages for %d substantive buys, want %d",
@@ -418,8 +418,8 @@ func TestE2E_PostFixMeasurement(t *testing.T) {
 	// -------------------------------------------------------------------------
 
 	// Collect all buy messages for this test.
-	allBuyMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuy}})
-	allMatchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	allBuyMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuy}})
+	allMatchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	// Build the test buy ID set (nonsense + substantive).
 	testBuyIDs := make(map[string]struct{})

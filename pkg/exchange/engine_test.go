@@ -106,7 +106,7 @@ func newTestHarness(t *testing.T) *testHarness {
 	// The exchange campfire ID is just an opaque 32-byte hex identifier here —
 	// nothing derives trust from it in the local single-writer model. It only
 	// has to be stable and shared between sendMessage records and engine egress
-	// so ListMessages(cfID, …) scopes correctly.
+	// so ListMessages(…) scopes correctly.
 	cfID := randomHex32(t)
 
 	// One append-only local event log backs the whole harness.
@@ -301,7 +301,7 @@ func TestState_PutAppearsInInventoryAfterAccept(t *testing.T) {
 	)
 
 	// Replay log into state.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestEngine_BuyEmitsMatchResponse(t *testing.T) {
 	)
 
 	// Replay to load the put.
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// Accept the put.
@@ -377,7 +377,7 @@ func TestEngine_BuyEmitsMatchResponse(t *testing.T) {
 	// Dispatch the buy (triggers match response).
 	// Access via a test hook: manually run handleBuy via poll.
 	// We simulate a poll cycle by listing messages with buy tag after the buy timestamp.
-	preMatchMessages, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	preMatchMessages, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	preMatchCount := len(preMatchMessages)
@@ -398,7 +398,7 @@ func TestEngine_BuyEmitsMatchResponse(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{
 			Tags: []string{exchange.TagMatch},
 		})
 		if len(matchMsgs) > preMatchCount {
@@ -469,7 +469,7 @@ func TestState_ReplayRebuildsInventory(t *testing.T) {
 
 	// Create fresh state, replay from store.
 	freshState := exchange.NewState()
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestState_ExpiredEntryExcludedFromFindCandidates(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:analysis", "exchange:domain:python"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(expiredPutMsg.ID, 4200, time.Now().Add(-2*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut (expired): %v", err)
@@ -554,7 +554,7 @@ func TestState_ExpiredEntryExcludedFromFindCandidates(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(livePutMsg.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut (live): %v", err)
@@ -572,14 +572,14 @@ func TestState_ExpiredEntryExcludedFromFindCandidates(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	done := make(chan struct{})
 	go func() { defer close(done); _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -638,7 +638,7 @@ func TestState_BuyOrderExpiry(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	orders := eng.State().ActiveOrders()
@@ -681,7 +681,7 @@ func TestState_PutRejectRemovesFromPending(t *testing.T) {
 		[]string{putMsg.ID},
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	inv := eng.State().Inventory()
@@ -704,7 +704,7 @@ func TestState_SettleDeliverMarksMatchDelivered(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(48*time.Hour)); err != nil {
@@ -721,14 +721,14 @@ func TestState_SettleDeliverMarksMatchDelivered(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	done := make(chan struct{})
 	go func() { defer close(done); _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -766,7 +766,7 @@ func TestState_SettleDeliverMarksMatchDelivered(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Before deliver: match must not be marked delivered.
@@ -789,7 +789,7 @@ func TestState_SettleDeliverMarksMatchDelivered(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// After deliver: match must be marked delivered.
@@ -822,7 +822,7 @@ func TestEngine_MatchIndexPopulatedAfterPutAccept(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -854,7 +854,7 @@ func TestEngine_SemanticMatchConfidenceUsedInMatchPayload(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(relatedPut.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut related: %v", err)
@@ -874,14 +874,14 @@ func TestEngine_SemanticMatchConfidenceUsedInMatchPayload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	done := make(chan struct{})
 	go func() { defer close(done); _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -944,7 +944,7 @@ func TestEngine_IsPartialMatchForwardedToWirePayload(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(closePut.ID, 7000, time.Now().Add(48*time.Hour)); err != nil {
@@ -962,14 +962,14 @@ func TestEngine_IsPartialMatchForwardedToWirePayload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	done := make(chan struct{})
 	go func() { defer close(done); _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -1036,7 +1036,7 @@ func runFullFlowToDeliver(t *testing.T, h *testHarness, eng *exchange.Engine, en
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -1050,12 +1050,12 @@ func runFullFlowToDeliver(t *testing.T, h *testHarness, eng *exchange.Engine, en
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	done := make(chan struct{})
 	go func() { defer close(done); _ = eng.Start(ctx) }()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		ms, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		ms, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(ms) > len(preMsgs) {
 			break
 		}
@@ -1064,7 +1064,7 @@ func runFullFlowToDeliver(t *testing.T, h *testHarness, eng *exchange.Engine, en
 	cancel()
 	<-done // wait for engine goroutine to fully exit before assertions / return
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	allMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(allMsgs) <= len(preMsgs) {
 		t.Fatal("no match message emitted")
 	}
@@ -1111,7 +1111,7 @@ func runFullFlowToDeliver(t *testing.T, h *testHarness, eng *exchange.Engine, en
 	deliverMsgID = deliverRec.ID
 
 	// Replay so state reflects all messages including deliver.
-	allMsgs2, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs2, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs2))
 
 	return matchMsg, buyerAcceptMsgID, deliverMsgID, entryID
@@ -1143,7 +1143,7 @@ func TestState_SettleComplete_HappyPath(t *testing.T) {
 		[]string{deliverMsgID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Seller reputation must have increased by 1 (SuccessCount++).
@@ -1188,7 +1188,7 @@ func TestState_SettleComplete_SpoofedEntryIDRejected(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:rust"},
 		nil,
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	if err := eng.AutoAcceptPut(putMsgB.ID, 14000, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut entryB: %v", err)
@@ -1213,7 +1213,7 @@ func TestState_SettleComplete_SpoofedEntryIDRejected(t *testing.T) {
 		[]string{deliverMsgID}, // correct antecedent — chain for entryA
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Price history must have exactly one new entry (for entryA, not entryB).
@@ -1250,7 +1250,7 @@ func TestState_SettleComplete_BrokenChainRejected(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:analysis"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 3500, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -1273,7 +1273,7 @@ func TestState_SettleComplete_BrokenChainRejected(t *testing.T) {
 		[]string{"fabricated-deliver-message-id-that-does-not-exist"},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// No reputation change — complete must be silently dropped.
@@ -1344,8 +1344,8 @@ func TestEngine_BrokeredMatchMode_PostsAssignNotMatch(t *testing.T) {
 	)
 
 	// Count pre-existing assigns and matches.
-	preAssigns, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
-	preMatches, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preAssigns, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	preMatches, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preAssignCount := len(preAssigns)
 	preMatchCount := len(preMatches)
 
@@ -1356,7 +1356,7 @@ func TestEngine_BrokeredMatchMode_PostsAssignNotMatch(t *testing.T) {
 	var assignMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		assignMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+		assignMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 		if len(assignMsgs) > preAssignCount {
 			break
 		}
@@ -1371,7 +1371,7 @@ func TestEngine_BrokeredMatchMode_PostsAssignNotMatch(t *testing.T) {
 	}
 
 	// No new match messages (matching is async).
-	postMatches, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	postMatches, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(postMatches) != preMatchCount {
 		t.Errorf("brokered mode: expected no match messages, got %d new", len(postMatches)-preMatchCount)
 	}
@@ -1436,7 +1436,7 @@ func TestEngine_BrokeredMatchMode_BuyMsgIDCorrelation(t *testing.T) {
 	var assignMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		assignMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+		assignMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 		if len(assignMsgs) > 0 {
 			// Check if any is a brokered-match assign. Gate on STATE convergence,
 			// not just store visibility: sendBrokeredMatchAssign appends the assign
@@ -1537,7 +1537,7 @@ func TestEngine_BrokeredMatchMode_IdempotentOnRestart(t *testing.T) {
 	// Count only brokered-match assigns as baseline (compression assigns also exist
 	// after AutoAcceptPut, but we only care about brokered-match here).
 	countBrokeredMatchAssigns := func() int {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 		n := 0
 		for _, m := range msgs {
 			var p struct {
@@ -1619,7 +1619,7 @@ func TestEngine_BrokeredMatchMode_DefaultReward(t *testing.T) {
 	var assignMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 		for _, m := range msgs {
 			var p struct {
 				TaskType string `json:"task_type"`
@@ -1679,7 +1679,7 @@ func TestEngine_BrokeredMatchMode_InlineFallbackUnchanged(t *testing.T) {
 		t.Fatalf("AutoAcceptPut: %v", err)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preCount := len(preMsgs)
 
 	h.sendMessage(h.buyer,
@@ -1695,7 +1695,7 @@ func TestEngine_BrokeredMatchMode_InlineFallbackUnchanged(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > preCount {
 			break
 		}
@@ -1731,7 +1731,7 @@ func TestEngine_RestartNoDuplicateMatchForAlreadyMatchedOrder(t *testing.T) {
 	)
 
 	// Count match messages before run 1.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	preCount := len(preMsgs)
@@ -1744,7 +1744,7 @@ func TestEngine_RestartNoDuplicateMatchForAlreadyMatchedOrder(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{
 			Tags: []string{exchange.TagMatch},
 		})
 		if len(msgs) > preCount {
@@ -1755,7 +1755,7 @@ func TestEngine_RestartNoDuplicateMatchForAlreadyMatchedOrder(t *testing.T) {
 	cancel1()
 	<-done1 // eng1 must be fully stopped before eng2 starts (shared store) and before return
 
-	afterRun1, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	afterRun1, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	if len(afterRun1) != preCount+1 {
@@ -1778,7 +1778,7 @@ func TestEngine_RestartNoDuplicateMatchForAlreadyMatchedOrder(t *testing.T) {
 	<-done2 // eng2 must be fully stopped before the test returns
 
 	// Step 6: assert exactly one match total — no double-dispatch.
-	afterRun2, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	afterRun2, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	if len(afterRun2) != preCount+1 {
@@ -1879,7 +1879,7 @@ func TestEngine_HandleBuy_DebtorPriorityReducesResults(t *testing.T) {
 			[]string{exchange.TagPut, "exchange:content-type:code"},
 			nil,
 		)
-		msgs, _ := h.st.ListMessages(h.cfID, 0)
+		msgs, _ := h.st.ListMessages(0)
 		eng.State().Replay(exchange.FromStoreRecords(msgs))
 		if err := eng.AutoAcceptPut(putMsg.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
 			t.Fatalf("AutoAcceptPut entry %d: %v", i, err)
@@ -1905,7 +1905,7 @@ func TestEngine_HandleBuy_DebtorPriorityReducesResults(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
-			msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+			msgs, _ := h.st.ListMessages(0, store.MessageFilter{
 				Tags: []string{exchange.TagMatch},
 			})
 			if len(msgs) > startCount {
@@ -1920,7 +1920,7 @@ func TestEngine_HandleBuy_DebtorPriorityReducesResults(t *testing.T) {
 	nonDebtorBuyer := newTestAgent(t)
 	// DebtorScore not set → defaults to 1.0 → full priority
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preCount := len(preMsgs)
 
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1964,7 +1964,7 @@ func TestEngine_HandleBuy_DebtorPriorityReducesResults(t *testing.T) {
 	debtorBuyer := newTestAgent(t)
 	eng.State().SetDebtorScore(debtorBuyer.PublicKeyHex(), 0.5)
 
-	preMsgs2, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs2, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preCount2 := len(preMsgs2)
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
@@ -2026,7 +2026,7 @@ func TestEngine_HandleBuy_MaximumDebtorAlwaysGetsOne(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -2036,7 +2036,7 @@ func TestEngine_HandleBuy_MaximumDebtorAlwaysGetsOne(t *testing.T) {
 	debtorBuyer := newTestAgent(t)
 	eng.State().SetDebtorScore(debtorBuyer.PublicKeyHex(), 0.0)
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preCount := len(preMsgs)
 
 	buyPayloadWithResults := func(task string, budget int64, maxResults int) []byte {
@@ -2062,7 +2062,7 @@ func TestEngine_HandleBuy_MaximumDebtorAlwaysGetsOne(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	var matchMsgs []store.MessageRecord
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > preCount {
 			break
 		}

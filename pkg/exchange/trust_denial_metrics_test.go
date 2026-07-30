@@ -62,7 +62,7 @@ func TestTrustDenial_NotAllowlisted_CountsAndAlarms(t *testing.T) {
 	before := eng.DegradationSnapshot()
 
 	rec := injectPutMsg(t, h, keyAnon)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(rec)); err != nil {
@@ -99,7 +99,7 @@ func TestTrustDenial_NotOperator_CountsAndAlarms(t *testing.T) {
 	before := eng.DegradationSnapshot()
 
 	rec := injectMsg(t, h, exchange.TagMatch, keyAllowlisted)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(rec)); err != nil {
@@ -133,7 +133,7 @@ func TestTrustDenial_LowReputation_CountsAndAlarms(t *testing.T) {
 	before := eng.DegradationSnapshot()
 
 	rec := injectPutMsg(t, h, keyAllowlisted)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(rec)); err != nil {
@@ -166,7 +166,7 @@ func TestTrustDenial_AllowedOp_NoCounterIncrement(t *testing.T) {
 	before := eng.DegradationSnapshot()
 
 	rec := injectMsg(t, h, exchange.TagPut, keyAllowlisted)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(rec)); err != nil {

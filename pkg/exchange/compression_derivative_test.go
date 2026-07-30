@@ -33,7 +33,7 @@ func TestCompressionDerivative_FullLifecycle(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages after put: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestCompressionDerivative_FullLifecycle(t *testing.T) {
 	})
 	assignMsg := h.sendMessage(h.operator, assignPayload, []string{exchange.TagAssign}, nil)
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	assignRec, err := h.st.GetMessage(assignMsg.ID)
@@ -78,7 +78,7 @@ func TestCompressionDerivative_FullLifecycle(t *testing.T) {
 	worker := newTestAgent(t)
 	claimMsg := h.sendMessage(worker, []byte(`{}`), []string{exchange.TagAssignClaim}, []string{assignMsg.ID})
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	claimRec, err := h.st.GetMessage(claimMsg.ID)
@@ -103,7 +103,7 @@ func TestCompressionDerivative_FullLifecycle(t *testing.T) {
 	})
 	completeMsg := h.sendMessage(worker, completeResult, []string{exchange.TagAssignComplete}, []string{claimMsg.ID})
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	completeRec, err := h.st.GetMessage(completeMsg.ID)
@@ -117,7 +117,7 @@ func TestCompressionDerivative_FullLifecycle(t *testing.T) {
 	// ── Step 5: operator accepts the compression result ──────────────────────
 	acceptMsg := h.sendMessage(h.operator, []byte(`{}`), []string{exchange.TagAssignAccept}, []string{completeMsg.ID})
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	acceptRec, err := h.st.GetMessage(acceptMsg.ID)
@@ -193,7 +193,7 @@ func TestCompressionDerivative_InvalidContentHashDropped(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:analysis", "exchange:domain:rust"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 10000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -212,7 +212,7 @@ func TestCompressionDerivative_InvalidContentHashDropped(t *testing.T) {
 		"reward":    500,
 	})
 	assignMsg := h.sendMessage(h.operator, assignPayload, []string{exchange.TagAssign}, nil)
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, assignMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest assign: %v", err)
@@ -220,7 +220,7 @@ func TestCompressionDerivative_InvalidContentHashDropped(t *testing.T) {
 
 	worker := newTestAgent(t)
 	claimMsg := h.sendMessage(worker, []byte(`{}`), []string{exchange.TagAssignClaim}, []string{assignMsg.ID})
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, claimMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest claim: %v", err)
@@ -233,7 +233,7 @@ func TestCompressionDerivative_InvalidContentHashDropped(t *testing.T) {
 		"content_size": int64(8000),
 	})
 	completeMsg := h.sendMessage(worker, completeResult, []string{exchange.TagAssignComplete}, []string{claimMsg.ID})
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, completeMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest complete: %v", err)
@@ -241,7 +241,7 @@ func TestCompressionDerivative_InvalidContentHashDropped(t *testing.T) {
 
 	// Operator accepts (non-fatal — derivative creation fails, bounty still paid).
 	acceptMsg := h.sendMessage(h.operator, []byte(`{}`), []string{exchange.TagAssignAccept}, []string{completeMsg.ID})
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, acceptMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest accept: %v", err)
@@ -271,7 +271,7 @@ func TestCompressionDerivative_NonCompressTaskNoDerivative(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:python"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -290,7 +290,7 @@ func TestCompressionDerivative_NonCompressTaskNoDerivative(t *testing.T) {
 		"reward":    50,
 	})
 	assignMsg := h.sendMessage(h.operator, assignPayload, []string{exchange.TagAssign}, nil)
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, assignMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest assign: %v", err)
@@ -298,21 +298,21 @@ func TestCompressionDerivative_NonCompressTaskNoDerivative(t *testing.T) {
 
 	worker := newTestAgent(t)
 	claimMsg := h.sendMessage(worker, []byte(`{}`), []string{exchange.TagAssignClaim}, []string{assignMsg.ID})
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, claimMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest claim: %v", err)
 	}
 
 	completeMsg := h.sendMessage(worker, []byte(`{"result":"still fresh"}`), []string{exchange.TagAssignComplete}, []string{claimMsg.ID})
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, completeMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest complete: %v", err)
 	}
 
 	acceptMsg := h.sendMessage(h.operator, []byte(`{}`), []string{exchange.TagAssignAccept}, []string{completeMsg.ID})
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, acceptMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest accept: %v", err)
@@ -358,7 +358,7 @@ func TestCompressionDerivative_ReplayIdempotent(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages after put: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestCompressionDerivative_ReplayIdempotent(t *testing.T) {
 	})
 	assignMsg := h.sendMessage(h.operator, assignPayload, []string{exchange.TagAssign}, nil)
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, assignMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest assign: %v", err)
@@ -391,7 +391,7 @@ func TestCompressionDerivative_ReplayIdempotent(t *testing.T) {
 	worker := newTestAgent(t)
 	claimMsg := h.sendMessage(worker, []byte(`{}`), []string{exchange.TagAssignClaim}, []string{assignMsg.ID})
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, claimMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest claim: %v", err)
@@ -407,7 +407,7 @@ func TestCompressionDerivative_ReplayIdempotent(t *testing.T) {
 	})
 	completeMsg := h.sendMessage(worker, completeResult, []string{exchange.TagAssignComplete}, []string{claimMsg.ID})
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, completeMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest complete: %v", err)
@@ -416,7 +416,7 @@ func TestCompressionDerivative_ReplayIdempotent(t *testing.T) {
 	// ── Step 5: operator accepts ─────────────────────────────────────────────
 	acceptMsg := h.sendMessage(h.operator, []byte(`{}`), []string{exchange.TagAssignAccept}, []string{completeMsg.ID})
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, acceptMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest accept: %v", err)
@@ -432,7 +432,7 @@ func TestCompressionDerivative_ReplayIdempotent(t *testing.T) {
 	// Re-dispatch the accept message as if the engine restarted and is
 	// re-processing its message log. The derivative ID must be stable, and
 	// applyDerivativePut must be idempotent — no new entry should be created.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(mustGetStoreRecord(t, h, acceptMsg.ID))); err != nil {
 		t.Fatalf("DispatchForTest accept (replay): %v", err)

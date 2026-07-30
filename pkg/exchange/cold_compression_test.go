@@ -159,7 +159,7 @@ func TestPostOpenCompressionAssign_EntryNotFound(t *testing.T) {
 
 func listAssignMessages(t *testing.T, h *testHarness) []store.MessageRecord {
 	t.Helper()
-	msgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	msgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagAssign},
 	})
 	if err != nil {

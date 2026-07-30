@@ -134,7 +134,7 @@ func seedOversizePut(t *testing.T, h *testHarness, eng *exchange.Engine, desc st
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 1400000, time.Now().Add(168*time.Hour)); err != nil {
@@ -158,10 +158,10 @@ func seedOversizePut(t *testing.T, h *testHarness, eng *exchange.Engine, desc st
 		t.Fatalf("DispatchForTest buy: %v", err)
 	}
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	matchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(matchMsgs) == 0 {
 		t.Fatal("no match message emitted")
 	}
@@ -182,7 +182,7 @@ func seedOversizePut(t *testing.T, h *testHarness, eng *exchange.Engine, desc st
 		[]string{matchRec.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	deliverTriggerPayload, _ := json.Marshal(map[string]any{
@@ -197,7 +197,7 @@ func seedOversizePut(t *testing.T, h *testHarness, eng *exchange.Engine, desc st
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	return entryID, deliverMsg, originalContent
@@ -225,7 +225,7 @@ func findDeliverPointerMessage(h *testHarness) *store.MessageRecord {
 // findOperatorDeliverMessage scans settle messages for an operator-emitted,
 // deliver-phase message whose payload has requiredField present.
 func findOperatorDeliverMessage(h *testHarness, requiredField string) *store.MessageRecord {
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	for i := range msgs {
 		m := &msgs[i]
 		if m.Sender != h.operator.PublicKeyHex() {
@@ -416,7 +416,7 @@ func TestEngineDeliverBlossom_OversizeContentNeverInlinedWithoutBlobPointer(t *t
 
 	deliverMsg, _ := buildOversizeDeliverableStateNoBlobStore(t, h, eng)
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	preCount := len(preMsgs)
 
 	deliverRec, _ := h.st.GetMessage(deliverMsg.ID)
@@ -431,7 +431,7 @@ func TestEngineDeliverBlossom_OversizeContentNeverInlinedWithoutBlobPointer(t *t
 		t.Fatal("engine emitted a blob_pointer deliver message for an entry with no BlobPointer")
 	}
 
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	if len(postMsgs) > preCount {
 		t.Fatalf("expected no new settle messages after a size-guard-refused deliver, got %d new", len(postMsgs)-preCount)
 	}

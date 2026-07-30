@@ -31,7 +31,7 @@ func TestConsumeSignal_ZeroAntecedents(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -58,7 +58,7 @@ func TestConsumeSignal_ZeroAntecedents(t *testing.T) {
 	)
 
 	// Replay state so the complete message is visible.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// dispatch must NOT panic. The engine logs the emitConsumeSignal error but
@@ -107,7 +107,7 @@ func TestConsumeSignal_BrokenDeliverMatchChain(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 8400, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -143,7 +143,7 @@ func TestConsumeSignal_BrokenDeliverMatchChain(t *testing.T) {
 	)
 
 	// Replay state (no chain maps populated for fakeDeliverID).
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Must NOT panic. The engine logs the error and swallows it.

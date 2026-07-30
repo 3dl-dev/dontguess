@@ -39,7 +39,7 @@ func waitForWarmCompressionAssign(t *testing.T, h *testHarness, entryID, buyerKe
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 		for _, am := range msgs {
 			var ap struct {
 				EntryID         string `json:"entry_id"`
@@ -64,7 +64,7 @@ func waitForWarmCompressionAssign(t *testing.T, h *testHarness, entryID, buyerKe
 // message and returns its parsed payload, or nil if none exists.
 func extractLoanMintFromLog(t *testing.T, h *testHarness) *scrip.LoanMintPayload {
 	t.Helper()
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripLoanMint}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripLoanMint}})
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -119,7 +119,7 @@ func TestDeliverOnCredit_ZeroBalanceBuyerCompletesEndToEnd(t *testing.T) {
 		t.Fatalf("test setup: buyer balance should start at 0, got %d", bal)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -233,7 +233,7 @@ func TestDeliverOnCredit_ZeroBalanceBuyerCompletesEndToEnd(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	deliverRec, err := h.st.GetMessage(deliverMsg.ID)
 	if err != nil {
@@ -250,7 +250,7 @@ func TestDeliverOnCredit_ZeroBalanceBuyerCompletesEndToEnd(t *testing.T) {
 		t.Fatalf("expected exactly 1 settle(deliver) carrying content after credit-funded buyer-accept, got %d", n)
 	}
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// complete (antecedent = the operator's deliver TRIGGER message, not the
@@ -268,7 +268,7 @@ func TestDeliverOnCredit_ZeroBalanceBuyerCompletesEndToEnd(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(completeMsg.ID)
 	if err != nil {
@@ -323,7 +323,7 @@ func TestDeliverOnCredit_PartialBalanceOnlyBorrowsShortfall(t *testing.T) {
 		t.Fatalf("test setup: buyer balance = %d, want %d", buyerBalanceBefore, holdAmount-1)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

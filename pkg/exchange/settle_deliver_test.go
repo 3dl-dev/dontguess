@@ -50,7 +50,7 @@ func buildDeliverableState(t *testing.T, h *testHarness, eng *exchange.Engine) (
 	)
 
 	// Replay to pick up the put.
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// Step 2: Operator accepts the put.
@@ -78,10 +78,10 @@ func buildDeliverableState(t *testing.T, h *testHarness, eng *exchange.Engine) (
 	}
 
 	// Find the emitted match message.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	matchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(matchMsgs) == 0 {
 		t.Fatal("no match message emitted")
 	}
@@ -105,10 +105,10 @@ func buildDeliverableState(t *testing.T, h *testHarness, eng *exchange.Engine) (
 	}
 
 	// Find the emitted preview message.
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	previewMsgs, _ := h.st.ListMessages(h.cfID, 0,
+	previewMsgs, _ := h.st.ListMessages(0,
 		store.MessageFilter{Tags: []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrPreview}})
 	if len(previewMsgs) == 0 {
 		t.Fatal("no preview message emitted")
@@ -130,7 +130,7 @@ func buildDeliverableState(t *testing.T, h *testHarness, eng *exchange.Engine) (
 		[]string{previewRec.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Step 7: Operator sends settle(deliver) trigger — no content field (just metadata).
@@ -148,7 +148,7 @@ func buildDeliverableState(t *testing.T, h *testHarness, eng *exchange.Engine) (
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	return deliverMsg, originalContent
@@ -165,7 +165,7 @@ func TestSettleDeliver_ContentDelivered(t *testing.T) {
 	deliverMsg, originalContent := buildDeliverableState(t, h, eng)
 
 	// Count settle messages before dispatching the operator deliver trigger.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	preCount := len(preMsgs)
 
 	// Dispatch the operator deliver trigger through the engine.
@@ -175,7 +175,7 @@ func TestSettleDeliver_ContentDelivered(t *testing.T) {
 	}
 
 	// Engine must have emitted at least one new settle message.
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	if len(postMsgs) <= preCount {
 		t.Fatalf("settle(deliver) dispatch: expected engine to emit content message, got no new settle messages")
 	}
@@ -259,7 +259,7 @@ func TestSettleDeliver_NonOperatorIgnored(t *testing.T) {
 	_ = originalContent
 
 	// Count settle messages before the attacker's deliver.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 
 	// Attacker (buyer) sends a deliver trigger.
 	inv := eng.State().Inventory()
@@ -284,7 +284,7 @@ func TestSettleDeliver_NonOperatorIgnored(t *testing.T) {
 		t.Fatalf("DispatchForTest fake deliver: %v", err)
 	}
 
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	// The fake deliver message itself was written (by sendMessage), so count it.
 	// Engine should NOT have emitted an additional content message.
 	// preMsgs includes messages up to buildDeliverableState; fakeMsg adds 1 (by sendMessage).

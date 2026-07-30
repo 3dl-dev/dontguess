@@ -55,7 +55,7 @@ func TestInventory_ReturnsCopies(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(168*time.Hour)); err != nil {
@@ -140,7 +140,7 @@ func TestInventoryEntryCopyIndependence(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 3500, time.Now().Add(48*time.Hour)); err != nil {

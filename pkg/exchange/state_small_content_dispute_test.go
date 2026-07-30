@@ -32,7 +32,7 @@ func setupSmallContentEntry(t *testing.T, h *testHarness, eng *exchange.Engine) 
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 175, time.Now().Add(72*time.Hour)); err != nil {
@@ -57,7 +57,7 @@ func setupLargeContentEntry(t *testing.T, h *testHarness, eng *exchange.Engine) 
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
@@ -116,7 +116,7 @@ func buildDeliverChain(t *testing.T, h *testHarness, eng *exchange.Engine, entry
 	)
 
 	// Replay to pick up the match.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Buyer sends buyer-accept referencing the match.
@@ -134,7 +134,7 @@ func buildDeliverChain(t *testing.T, h *testHarness, eng *exchange.Engine, entry
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Operator delivers content.
@@ -152,7 +152,7 @@ func buildDeliverChain(t *testing.T, h *testHarness, eng *exchange.Engine, entry
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	return &deliverChainResult{
@@ -192,7 +192,7 @@ func TestState_SmallContentDispute_IncrementsDisputeCount(t *testing.T) {
 		[]string{chain.deliverMsgID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispute count must be 1.
@@ -222,7 +222,7 @@ func TestState_SmallContentDispute_SellerReputationDecreasedBy3(t *testing.T) {
 		[]string{chain.deliverMsgID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	repAfter := eng.State().SellerReputation(h.seller.PublicKeyHex())
@@ -255,7 +255,7 @@ func TestState_SmallContentDispute_SmallContentRefundCountIncremented(t *testing
 		[]string{chain.deliverMsgID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	if got := eng.State().SellerSmallContentRefundCount(h.seller.PublicKeyHex()); got != 1 {
@@ -285,7 +285,7 @@ func TestState_SmallContentDispute_RejectedForLargeContent(t *testing.T) {
 		[]string{chain.deliverMsgID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispute must be rejected — count stays 0.
@@ -327,7 +327,7 @@ func TestState_SmallContentDispute_WrongBuyerIgnored(t *testing.T) {
 		[]string{chain.deliverMsgID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispute count must stay 0 — wrong sender.
@@ -369,7 +369,7 @@ func TestState_SmallContentDispute_MultipleDisputes_CumulativePenalty(t *testing
 			[]string{chain.deliverMsgID},
 		)
 
-		allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+		allMsgs, _ := h.st.ListMessages(0)
 		eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 		expectedPenalty := (i + 1) * exchange.SmallContentReputationPenalty
@@ -415,7 +415,7 @@ func TestState_SmallContentDispute_ReputationCalcIncludesField(t *testing.T) {
 		[]string{chain.deliverMsgID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	repAfter := eng.State().SellerReputation(h.seller.PublicKeyHex())
@@ -452,7 +452,7 @@ func setupEntryWithCosts(t *testing.T, h *testHarness, eng *exchange.Engine, tok
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	putPrice := tokenCost * 70 / 100
 	if putPrice < 1 {
@@ -486,7 +486,7 @@ func TestSmallContentDispute_ThresholdBoundary_TokenCost499Accepted(t *testing.T
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrSmallContentDispute},
 		[]string{chain.deliverMsgID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispute must be accepted: count=1, reputation decreased.
@@ -518,7 +518,7 @@ func TestSmallContentDispute_ThresholdBoundary_TokenCost500Rejected(t *testing.T
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrSmallContentDispute},
 		[]string{chain.deliverMsgID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispute must be rejected: count=0, no reputation change.
@@ -549,7 +549,7 @@ func TestSmallContentDispute_ThresholdBoundary_ContentSize1999Accepted(t *testin
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrSmallContentDispute},
 		[]string{chain.deliverMsgID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispute must be accepted: count=1.
@@ -581,7 +581,7 @@ func TestSmallContentDispute_ThresholdBoundary_ContentSize2000Rejected(t *testin
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrSmallContentDispute},
 		[]string{chain.deliverMsgID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispute must be rejected: count=0.
@@ -611,7 +611,7 @@ func TestSmallContentDispute_ThresholdBoundary_BothBelow(t *testing.T) {
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrSmallContentDispute},
 		[]string{chain.deliverMsgID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	if got := eng.State().SmallContentDisputeCount(entryID); got != 1 {
@@ -675,7 +675,7 @@ func TestSmallContentDispute_ScripRefundPath(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 175, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -697,7 +697,7 @@ func TestSmallContentDispute_ScripRefundPath(t *testing.T) {
 	buyerBalanceBefore := cs.Balance(h.buyer.PublicKeyHex())
 
 	// Start the engine to process the buy and emit a match (which creates the reservation).
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -719,7 +719,7 @@ func TestSmallContentDispute_ScripRefundPath(t *testing.T) {
 	}
 
 	// Build the full deliver chain: dispatch buyer-accept (triggers hold), then deliver.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	buyerAcceptMsg := sendBuyerAcceptAndDispatch(t, h, eng, matchMsg.ID, entryID)
@@ -741,7 +741,7 @@ func TestSmallContentDispute_ScripRefundPath(t *testing.T) {
 		t.Fatalf("expected reservation %s to exist after buyer-accept: %v", resID, err)
 	}
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	deliverPayloadBytes, _ := json.Marshal(map[string]any{
@@ -757,11 +757,11 @@ func TestSmallContentDispute_ScripRefundPath(t *testing.T) {
 		},
 		[]string{buyerAcceptMsg.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Count scrip-dispute-refund messages before dispute.
-	preRefundMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
+	preRefundMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
 
 	// Buyer sends small-content-dispute with reservation_id and buyer_key.
 	disputeMsg := h.sendMessage(h.buyer,
@@ -773,7 +773,7 @@ func TestSmallContentDispute_ScripRefundPath(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	rec, err := h.st.GetMessage(disputeMsg.ID)
@@ -797,7 +797,7 @@ func TestSmallContentDispute_ScripRefundPath(t *testing.T) {
 	}
 
 	// scrip-dispute-refund message must have been emitted.
-	postRefundMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
+	postRefundMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
 	if len(postRefundMsgs) <= len(preRefundMsgs) {
 		t.Errorf("expected scrip-dispute-refund message to be emitted after small-content-dispute")
 	}
@@ -854,7 +854,7 @@ func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 175, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -876,7 +876,7 @@ func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 	buyerBalanceBefore := cs.Balance(h.buyer.PublicKeyHex())
 
 	// Start the engine to process buy and get a reservation.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -892,7 +892,7 @@ func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 	cancel()
 
 	// Dispatch buyer-accept to trigger the scrip hold and create the reservation.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	buyerAcceptMsg := sendBuyerAcceptAndDispatch(t, h, eng, matchMsg.ID, entryID)
@@ -903,7 +903,7 @@ func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 		t.Fatal("expected non-empty reservation_id after buyer-accept")
 	}
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	deliverPayloadBytes, _ := json.Marshal(map[string]any{
@@ -919,7 +919,7 @@ func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 		},
 		[]string{buyerAcceptMsg.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Simulate expiry: remove the entry from inventory BEFORE the dispute arrives.
@@ -933,7 +933,7 @@ func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 	repBefore := eng.State().SellerReputation(h.seller.PublicKeyHex())
 
 	// Count scrip-dispute-refund messages before dispute attempt.
-	preRefundMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
+	preRefundMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
 
 	// Buyer sends small-content-dispute AFTER entry is removed.
 	// Write the message to the store but do NOT replay — the entry must stay gone.
@@ -981,7 +981,7 @@ func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 			buyerBalanceAfter, wantHeld)
 	}
 	// No scrip-dispute-refund may be emitted (engine refused the refund).
-	postRefundMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
+	postRefundMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
 	if len(postRefundMsgs) != len(preRefundMsgs) {
 		t.Errorf("expected NO scrip-dispute-refund message for missing-entry dispute (engine refuses refund when entry absent): before=%d after=%d",
 			len(preRefundMsgs), len(postRefundMsgs))

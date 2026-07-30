@@ -68,7 +68,7 @@ func TestBuyerAccept_MarshalFailure_NoBudgetDecrement(t *testing.T) {
 	balanceBefore := cs.Balance(h.buyer.PublicKeyHex())
 
 	// Run engine to generate a match.
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	go func() { _ = eng.Start(ctx) }()
@@ -104,7 +104,7 @@ func TestBuyerAccept_MarshalFailure_NoBudgetDecrement(t *testing.T) {
 		},
 		[]string{matchMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(buyerAcceptMsg.ID)
 	if err != nil || rec == nil {
@@ -159,7 +159,7 @@ func TestSettle_MarshalFailure_NoBalanceMutation(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -198,7 +198,7 @@ func TestSettle_MarshalFailure_NoBalanceMutation(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Record balances before settle dispatch.
@@ -220,7 +220,7 @@ func TestSettle_MarshalFailure_NoBalanceMutation(t *testing.T) {
 		},
 		[]string{deliverMsgRec.ID},
 	)
-	allMsgs2, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs2, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs2))
 
 	rec, err := h.st.GetMessage(completeMsg.ID)

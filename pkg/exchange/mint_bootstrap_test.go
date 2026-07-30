@@ -102,7 +102,7 @@ func TestMintBootstrap_FundedBuySettlesEndToEnd(t *testing.T) {
 		t.Fatalf("buyer balance after mint: got %d, want %d", got, minted)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -144,7 +144,7 @@ func TestMintBootstrap_FundedBuySettlesEndToEnd(t *testing.T) {
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrDeliver},
 		[]string{buyerAcceptMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// complete (antecedent = deliver).
@@ -153,7 +153,7 @@ func TestMintBootstrap_FundedBuySettlesEndToEnd(t *testing.T) {
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrComplete},
 		[]string{deliverMsg.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(completeMsg.ID)
 	if err != nil {
@@ -238,7 +238,7 @@ func TestMintBootstrap_UnfundedBuyerCoveredByCredit(t *testing.T) {
 		t.Fatalf("precondition: unfunded buyer must have zero balance, got %d", got)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -248,14 +248,14 @@ func TestMintBootstrap_UnfundedBuyerCoveredByCredit(t *testing.T) {
 	matchMsg := waitForMatchMessage(t, h, preMsgs, 2*time.Second)
 	cancel()
 
-	preHold, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	preHold, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 
 	buyerAcceptPayload, _ := json.Marshal(map[string]any{"phase": "buyer-accept", "entry_id": inv[0].EntryID, "accepted": true})
 	buyerAcceptMsg := h.sendMessage(h.buyer, buyerAcceptPayload,
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrBuyerAccept, exchange.TagVerdictPrefix + "accepted"},
 		[]string{matchMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(buyerAcceptMsg.ID)
 	if err != nil {
@@ -271,7 +271,7 @@ func TestMintBootstrap_UnfundedBuyerCoveredByCredit(t *testing.T) {
 	}
 
 	// A hold WAS emitted — the loan topped up the balance first.
-	afterHold, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	afterHold, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(afterHold) <= len(preHold) {
 		t.Error("expected a scrip-buy-hold once the shortfall was covered by credit")
 	}

@@ -46,7 +46,7 @@ func TestActiveOrder_CompressionTier_SurvivesReplay(t *testing.T) {
 	)
 
 	// Replay the full message log into state (simulating a fresh engine restart).
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestActiveOrder_CompressionTier_AbsentWhenNotSet(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestActiveOrder_CompressionTier_AllTierValues(t *testing.T) {
 				nil,
 			)
 
-			msgs, err := h.st.ListMessages(h.cfID, 0)
+			msgs, err := h.st.ListMessages(0)
 			if err != nil {
 				t.Fatalf("listing messages: %v", err)
 			}

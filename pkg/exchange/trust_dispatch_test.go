@@ -50,7 +50,7 @@ func dispatchTrustChecker(t *testing.T) *exchange.TrustChecker {
 // countMatchMessages returns how many exchange:match messages are in the store.
 func countMatchMessages(t *testing.T, h *testHarness) int {
 	t.Helper()
-	msgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	msgs, err := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if err != nil {
 		t.Fatalf("listing match messages: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestTrustDispatch_AnonymousPutRejected(t *testing.T) {
 	h, eng := newEngineWithTrust(t, dispatchTrustChecker(t))
 
 	putRec := injectPutMsg(t, h, keyAnon)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(putRec)); err != nil {
@@ -156,7 +156,7 @@ func TestTrustDispatch_DroppedAnonPut_EmitsPutReject(t *testing.T) {
 		putPayload("gRPC retry-budget worked example", "sha256:"+fmt.Sprintf("%064x", 7), "code", 6000, 2048),
 		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
 
-	all, _ := h.st.ListMessages(h.cfID, 0)
+	all, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(all))
 
 	// Precondition: the put was DROPPED at fold — not pending. (If it were
@@ -173,7 +173,7 @@ func TestTrustDispatch_DroppedAnonPut_EmitsPutReject(t *testing.T) {
 
 	// Assert: an operator-signed settle(put-reject) referencing the anon put now
 	// exists on the log — the signal the put client REQ-subscribes for.
-	settles, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	settles, err := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	if err != nil {
 		t.Fatalf("listing settle messages: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestTrustDispatch_AnonymousBuyAccepted(t *testing.T) {
 	h, eng := newEngineWithTrust(t, dispatchTrustChecker(t))
 
 	buyRec := injectBuyMsg(t, h, keyAnon)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(buyRec)); err != nil {
@@ -233,7 +233,7 @@ func TestTrustDispatch_AllowlistedPutAccepted(t *testing.T) {
 	h, eng := newEngineWithTrust(t, dispatchTrustChecker(t))
 
 	putRec := injectPutMsg(t, h, keyAllowlisted)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(putRec)); err != nil {
@@ -249,7 +249,7 @@ func TestTrustDispatch_UnverifiedInventory_BuyReturnsEmpty(t *testing.T) {
 
 	// Step 1: unallowlisted seller injects a put.
 	putRec := injectPutMsg(t, h, keyAnon)
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages after put: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestTrustDispatch_UnverifiedInventory_BuyReturnsEmpty(t *testing.T) {
 
 	// Step 3: an allowlisted buyer sends a buy order.
 	buyRec := injectBuyMsg(t, h, keyAllowlisted)
-	msgs, err = h.st.ListMessages(h.cfID, 0)
+	msgs, err = h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages after buy: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestTrustDispatch_UnverifiedInventory_BuyReturnsEmpty(t *testing.T) {
 	}
 
 	// Step 5: verify the match message was emitted with zero results.
-	matchMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, err := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if err != nil {
 		t.Fatalf("listing match messages: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestTrustDispatch_NilChecker_AllOperationsPass(t *testing.T) {
 	})
 
 	putRec := injectPutMsg(t, h, keyAnon)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(putRec)); err != nil {

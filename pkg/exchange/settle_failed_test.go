@@ -115,7 +115,7 @@ func TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed(t
 
 	// Replay all state into eng2 so it knows about the antecedent chain,
 	// inventory, and buyer mappings.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng2.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// matchToReservation is engine state (not replay state): it is populated when
@@ -124,7 +124,7 @@ func TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed(t
 	// log and sets up the mapping. The failingAddBudgetStore delegates
 	// ConsumeReservation / GetBudget / DecrementBudget to the real store, so the
 	// replay path (which calls GetBudget + SaveReservation) succeeds.
-	buyerAcceptMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	buyerAcceptMsgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrBuyerAccept},
 	})
 	for i := range buyerAcceptMsgs {
@@ -138,14 +138,14 @@ func TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed(t
 	// settle(failed) count (must not grow) and the durable scrip-settle count
 	// (must grow by exactly one — the authoritative record emitted BEFORE the
 	// doomed AddBudget).
-	failedPre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	failedPre, _ := h.st.ListMessages(0, store.MessageFilter{
 		// Filter by the failed-phase tag ALONE. The store's Tags filter is
 		// OR-semantics, so listing TagSettle too would also match the
 		// settle(complete)/deliver/etc. messages and inflate the count. Only
 		// settle(failed) messages carry this phase tag.
 		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
 	})
-	settlePre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	settlePre, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 
 	completePayload, _ := json.Marshal(map[string]any{
 		"phase": "complete",
@@ -171,7 +171,7 @@ func TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed(t
 
 	// The authoritative scrip-settle must have been durably emitted exactly once
 	// (before the failing credit) — Replay will reconcile the missing live credit.
-	settlePost, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	settlePost, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 	if len(settlePost) != len(settlePre)+1 {
 		t.Fatalf("durable scrip-settle count = %d, want %d (exactly one authoritative record emitted before the failing credit)",
 			len(settlePost), len(settlePre)+1)
@@ -181,7 +181,7 @@ func TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed(t
 	// contradictory settled + settle(failed)-retry for one reservation. Give any
 	// (erroneously) emitted settle(failed) time to appear before asserting absence.
 	time.Sleep(200 * time.Millisecond)
-	failedPost, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	failedPost, _ := h.st.ListMessages(0, store.MessageFilter{
 		// Filter by the failed-phase tag ALONE. The store's Tags filter is
 		// OR-semantics, so listing TagSettle too would also match the
 		// settle(complete)/deliver/etc. messages and inflate the count. Only
@@ -307,11 +307,11 @@ func TestSettle_OperatorAddBudgetFailureAfterDurableEmit_NoRollbackNoRestore(t *
 	})
 
 	// Replay all state into eng2.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng2.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Re-dispatch buyer-accept through eng2 to establish matchToReservation.
-	buyerAcceptMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	buyerAcceptMsgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrBuyerAccept},
 	})
 	for i := range buyerAcceptMsgs {
@@ -321,14 +321,14 @@ func TestSettle_OperatorAddBudgetFailureAfterDurableEmit_NoRollbackNoRestore(t *
 		}
 	}
 
-	failedPre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	failedPre, _ := h.st.ListMessages(0, store.MessageFilter{
 		// Filter by the failed-phase tag ALONE. The store's Tags filter is
 		// OR-semantics, so listing TagSettle too would also match the
 		// settle(complete)/deliver/etc. messages and inflate the count. Only
 		// settle(failed) messages carry this phase tag.
 		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
 	})
-	settlePre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	settlePre, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 
 	completePayload, _ := json.Marshal(map[string]any{"phase": "complete"})
 	completeMsg := h.sendMessage(h.buyer, completePayload,
@@ -350,7 +350,7 @@ func TestSettle_OperatorAddBudgetFailureAfterDurableEmit_NoRollbackNoRestore(t *
 	}
 
 	// The authoritative scrip-settle must be durably emitted exactly once.
-	settlePost, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	settlePost, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 	if len(settlePost) != len(settlePre)+1 {
 		t.Fatalf("durable scrip-settle count = %d, want %d (exactly one authoritative record)",
 			len(settlePost), len(settlePre)+1)
@@ -358,7 +358,7 @@ func TestSettle_OperatorAddBudgetFailureAfterDurableEmit_NoRollbackNoRestore(t *
 
 	// NO settle(failed) may be emitted (no contradictory settled + settle(failed)).
 	time.Sleep(200 * time.Millisecond)
-	failedPost, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	failedPost, _ := h.st.ListMessages(0, store.MessageFilter{
 		// Filter by the failed-phase tag ALONE. The store's Tags filter is
 		// OR-semantics, so listing TagSettle too would also match the
 		// settle(complete)/deliver/etc. messages and inflate the count. Only

@@ -129,7 +129,7 @@ func TestEngine_HandlerCancellationOnShutdown(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestEngine_HandlerCancellationOnShutdown(t *testing.T) {
 	}
 
 	// The match handleBuy emitted is now durably on the log and bound in state.
-	matchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(matchMsgs) == 0 {
 		t.Fatal("expected a match message after dispatching the buy")
 	}
@@ -207,7 +207,7 @@ func TestEngine_HandlerCancellationOnShutdown(t *testing.T) {
 		},
 		[]string{matchMsgID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	driverDone := make(chan struct{})
 	go func() {
@@ -289,7 +289,7 @@ func TestEngine_HandlerCtxIsBackground_BeforeStart(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 3000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)

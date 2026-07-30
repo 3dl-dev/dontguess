@@ -128,7 +128,7 @@ func TestClimbFence_E2E_GrandfatheredNeverMatchedNorHashLeaked(t *testing.T) {
 
 	// --- (1) NO exchange:match result references the grandfathered entry. The buy
 	//     must have produced a buy-miss (proving it was processed, not silently lost).
-	allMatchTagged, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	allMatchTagged, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	sawBuyMiss := false
 	for i := range allMatchTagged {
 		m := &allMatchTagged[i]
@@ -162,7 +162,7 @@ func TestClimbFence_E2E_GrandfatheredNeverMatchedNorHashLeaked(t *testing.T) {
 	//     check to operator-authored egress.
 	operatorHex := h.operator.PublicKeyHex()
 	plainB64 := base64.StdEncoding.EncodeToString(plaintext)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	sawOperatorEgress := false
 	for i := range allMsgs {
 		if allMsgs[i].Sender != operatorHex {

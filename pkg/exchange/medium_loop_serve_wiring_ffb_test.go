@@ -138,7 +138,7 @@ func seedRealCompletedPurchase(t *testing.T, h *testHarness, eng *exchange.Engin
 
 	// Converge from the full log so every fold (buyer-accept/deliver/complete)
 	// applies in order, same as completeBuyTransactionForBuyer's final step.
-	allMsgs, err := h.st.ListMessages(h.cfID, 0)
+	allMsgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("seedRealCompletedPurchase: listing messages: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestMediumLoop_ServeWiring_TicksPostRealOpenCompressionAssign(t *testing.T)
 		},
 		[]string{putMsg.ID},
 	)
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}

@@ -44,7 +44,7 @@ func runMatchOnce(t *testing.T, h *testHarness, eng *exchange.Engine, task strin
 
 	buyMsg := h.sendMessage(h.buyer, buyPayload(task, budget), []string{exchange.TagBuy}, nil)
 
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preCount := len(preMatch)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -58,7 +58,7 @@ func runMatchOnce(t *testing.T, h *testHarness, eng *exchange.Engine, task strin
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > preCount {
 			break
 		}
@@ -119,7 +119,7 @@ func abandonCycle(t *testing.T, h *testHarness, eng *exchange.Engine, matchMsg s
 	)
 
 	// Re-sync so buyerAcceptToMatch is populated before the deliver lands.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Operator delivers content (deliver-without-consume: this is the operator
@@ -139,7 +139,7 @@ func abandonCycle(t *testing.T, h *testHarness, eng *exchange.Engine, matchMsg s
 	)
 
 	// The buyer NEVER sends settle:complete. Re-sync so entryDeliverCount++ lands.
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 }
 
@@ -165,7 +165,7 @@ func TestGriefing_DeliverWithoutConsume_CannotRemoveOrDerankCompetitor(t *testin
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 8400, time.Now().Add(168*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -197,7 +197,7 @@ func TestGriefing_DeliverWithoutConsume_CannotRemoveOrDerankCompetitor(t *testin
 
 	// Re-sync and refresh the index behavioral signals (the engine does this on
 	// settle; we force it here to evaluate the post-griefing steady state).
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Assertion 1: entry NOT autonomously removed from inventory. ---

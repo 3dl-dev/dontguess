@@ -99,7 +99,7 @@ func TestLedgerConservation_TotalSupplyMatchesSumOfBalances_AfterWithheldPutPay(
 		nil,
 	)
 
-	preBuyMiss, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	preBuyMiss, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 
 	ctxRun, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -107,13 +107,13 @@ func TestLedgerConservation_TotalSupplyMatchesSumOfBalances_AfterWithheldPutPay(
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 		if len(msgs) > len(preBuyMiss) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	buyMissMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	buyMissMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 	if len(buyMissMsgs) <= len(preBuyMiss) {
 		cancel()
 		t.Fatal("no buy-miss offer emitted")
@@ -136,7 +136,7 @@ func TestLedgerConservation_TotalSupplyMatchesSumOfBalances_AfterWithheldPutPay(
 	// happen together, in the same fold call).
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripLoanRepay}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripLoanRepay}})
 		if len(msgs) > 0 {
 			break
 		}
@@ -144,7 +144,7 @@ func TestLedgerConservation_TotalSupplyMatchesSumOfBalances_AfterWithheldPutPay(
 	}
 	cancel()
 
-	loanRepayMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripLoanRepay}})
+	loanRepayMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripLoanRepay}})
 	if len(loanRepayMsgs) == 0 {
 		t.Fatal("expected a scrip:loan-repay message after the withheld put-pay")
 	}

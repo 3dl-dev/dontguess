@@ -63,7 +63,7 @@ func TestEngine_DeadlineMissRefund(t *testing.T) {
 	}
 
 	// Step 1: start engine to process the buy and emit a match.
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() { _ = eng.Start(ctx) }()
@@ -83,7 +83,7 @@ func TestEngine_DeadlineMissRefund(t *testing.T) {
 	cancel() // stop the running engine before dispatch mode
 
 	// Step 2: verify GuaranteeForMatch returns correct terms (deadline is in ~1s from buy).
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	deadline, gotInsuredAmount, hasGuarantee := eng.State().GuaranteeForMatch(matchMsg.ID)
@@ -103,7 +103,7 @@ func TestEngine_DeadlineMissRefund(t *testing.T) {
 	buyerAcceptMsg := sendBuyerAcceptAndDispatch(t, h, eng, matchMsg.ID, entryID)
 
 	// Verify reservation was created (scrip-buy-hold message present).
-	holdMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	holdMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(holdMsgs) == 0 {
 		t.Fatal("expected scrip-buy-hold message after buyer-accept")
 	}
@@ -133,7 +133,7 @@ func TestEngine_DeadlineMissRefund(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completeP, _ := json.Marshal(map[string]any{"entry_id": entryID})
@@ -142,7 +142,7 @@ func TestEngine_DeadlineMissRefund(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completeRec, err := h.st.GetMessage(completeMsg.ID)
@@ -170,7 +170,7 @@ func TestEngine_DeadlineMissRefund(t *testing.T) {
 	}
 
 	// Step 7: parse the refund message and verify the payload fields.
-	refundMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
+	refundMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripDisputeRefund}})
 	if len(refundMsgs) == 0 {
 		t.Fatal("scrip-dispute-refund message not found in store")
 	}
@@ -226,7 +226,7 @@ func TestEngine_DeadlineMissRefund_Idempotent(t *testing.T) {
 		t.Fatalf("cs.Replay: %v", err)
 	}
 
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() { _ = eng.Start(ctx) }()
@@ -243,7 +243,7 @@ func TestEngine_DeadlineMissRefund_Idempotent(t *testing.T) {
 	matchMsg := waitForMatchMessage(t, h, preMatch, 3*time.Second)
 	cancel()
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	deadline, _, hasGuarantee := eng.State().GuaranteeForMatch(matchMsg.ID)
@@ -269,7 +269,7 @@ func TestEngine_DeadlineMissRefund_Idempotent(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completeP, _ := json.Marshal(map[string]any{"entry_id": entryID})
@@ -278,7 +278,7 @@ func TestEngine_DeadlineMissRefund_Idempotent(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completeRec1, err := h.st.GetMessage(completeMsg1.ID)

@@ -25,7 +25,7 @@ func TestConsume_ForgedNonOperator_CountsNotOperator(t *testing.T) {
 	before := eng.DegradationSnapshot()
 
 	rec := injectMsg(t, h, exchange.TagConsume, keyAllowlisted)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(rec)); err != nil {
@@ -50,7 +50,7 @@ func TestConsume_Operator_Passes(t *testing.T) {
 	before := eng.DegradationSnapshot()
 
 	rec := injectMsg(t, h, exchange.TagConsume, keyOperator)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(rec)); err != nil {

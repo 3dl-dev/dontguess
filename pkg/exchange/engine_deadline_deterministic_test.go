@@ -75,7 +75,7 @@ func newInsuredMatchFixture(t *testing.T, guaranteeSeconds int) *insuredMatchFix
 		t.Fatalf("cs.Replay: %v", err)
 	}
 
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() { _ = eng.Start(ctx) }()
@@ -92,7 +92,7 @@ func newInsuredMatchFixture(t *testing.T, guaranteeSeconds int) *insuredMatchFix
 	matchMsg := waitForMatchMessage(t, h, preMatch, 3*time.Second)
 	cancel()
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	deadline, _, hasGuarantee := eng.State().GuaranteeForMatch(matchMsg.ID)
@@ -128,7 +128,7 @@ func (f *insuredMatchFixture) sendDeliver(t *testing.T) *exchange.Message {
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrDeliver},
 		[]string{f.buyerAcceptMsg.ID},
 	)
-	allMsgs, _ := f.h.st.ListMessages(f.h.cfID, 0)
+	allMsgs, _ := f.h.st.ListMessages(0)
 	f.eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	return deliverMsg
 }

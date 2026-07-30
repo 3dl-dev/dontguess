@@ -158,7 +158,7 @@ func (h *opTestHarness) sendHeldPut(eng *exchange.Engine, desc string, tokenCost
 	}
 
 	// Replay all messages into eng state.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		h.t.Fatalf("ListMessages: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestOperatorSocket_AcceptPut(t *testing.T) {
 	}
 
 	// Assert a settle put-accept message was posted to the campfire.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestOperatorSocket_AcceptPut_ZeroPriceRejected(t *testing.T) {
 	}
 
 	// Assert no settle put-accept message was posted to the campfire.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestOperatorSocket_RejectPut(t *testing.T) {
 	}
 
 	// Assert a settle put-reject message was posted to the campfire.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -689,7 +689,7 @@ func TestOperator_AcceptPut_UnknownID(t *testing.T) {
 
 	// The fixed code returns an error here — verify the error is non-nil and
 	// descriptive. Also verify no accept-put message was sent to the campfire.
-	msgsBefore, err := h.st.ListMessages(h.cfID, 0)
+	msgsBefore, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages before: %v", err)
 	}
@@ -704,7 +704,7 @@ func TestOperator_AcceptPut_UnknownID(t *testing.T) {
 	// is unchanged.
 
 	// (No accept-put request should be sent for an unknown ID.)
-	msgsAfter, err := h.st.ListMessages(h.cfID, 0)
+	msgsAfter, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages after: %v", err)
 	}

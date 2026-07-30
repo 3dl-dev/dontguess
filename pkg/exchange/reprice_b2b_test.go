@@ -729,7 +729,7 @@ func TestReprice_ResidualMathOnAlreadySoldCopyIsReconstructible(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	before := eng.State().PriceHistory()

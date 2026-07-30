@@ -64,7 +64,7 @@ func TestBelowFloor_JunkOnlyInventory_YieldsMiss(t *testing.T) {
 	)
 
 	// Replay and accept the put.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestBelowFloor_JunkOnlyInventory_YieldsMiss(t *testing.T) {
 	// junk entry in the live exchange before the fix.
 	unrelatedTask := "RPT review of campfire SDK surface: offline send, relay create, naming CLI, multi-op install"
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preMatchCount := len(preMsgs)
 
 	buyMsg := h.sendMessage(h.buyer,
@@ -104,11 +104,11 @@ func TestBelowFloor_JunkOnlyInventory_YieldsMiss(t *testing.T) {
 	}
 
 	// Reload state to pick up the emitted message.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Exactly one new match-tagged message must have been emitted.
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(postMsgs) <= preMatchCount {
 		t.Fatal("engine emitted no response — expected at least one message with exchange:match tag")
 	}
@@ -162,7 +162,7 @@ func TestAboveFloor_SemanticMatch_YieldsHit(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestAboveFloor_SemanticMatch_YieldsHit(t *testing.T) {
 	// This is a §4 substantive reuse case from the D1 fixture.
 	buyTask := "document EventSink contract for warm-worker backends in warm-worker-backends.md"
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preMatchCount := len(preMsgs)
 
 	buyMsg := h.sendMessage(h.buyer,
@@ -199,10 +199,10 @@ func TestAboveFloor_SemanticMatch_YieldsHit(t *testing.T) {
 		t.Fatalf("DispatchForTest: %v", err)
 	}
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(postMsgs) <= preMatchCount {
 		t.Fatal("engine emitted no match-tagged message — expected a real match for above-floor entry")
 	}
@@ -256,7 +256,7 @@ func TestAboveFloor_SemanticMatch_YieldsHit(t *testing.T) {
 
 	// Start the engine with a full event loop to confirm the match also works
 	// end-to-end (not just via DispatchForTest).
-	preMsgs2, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs2, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	buyer2 := newTestAgent(t)
 	buyMsg2 := h.sendMessage(buyer2,
 		buyPayload(buyTask+" variant", 20000),
@@ -271,7 +271,7 @@ func TestAboveFloor_SemanticMatch_YieldsHit(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs2) {
 			break
 		}

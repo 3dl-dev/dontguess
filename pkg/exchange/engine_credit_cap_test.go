@@ -286,7 +286,7 @@ func TestPaySellerForBuyMiss_WithholdsForOutstandingLoan(t *testing.T) {
 		nil,
 	)
 
-	preBuyMiss, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	preBuyMiss, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 
 	ctxRun, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -294,13 +294,13 @@ func TestPaySellerForBuyMiss_WithholdsForOutstandingLoan(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 		if len(msgs) > len(preBuyMiss) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	buyMissMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	buyMissMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 	if len(buyMissMsgs) <= len(preBuyMiss) {
 		cancel()
 		t.Fatal("step 1: no buy-miss offer emitted")
@@ -345,7 +345,7 @@ func TestPaySellerForBuyMiss_WithholdsForOutstandingLoan(t *testing.T) {
 
 	// A durable scrip:loan-repay message must exist on the log (not just a
 	// live in-memory mutation) so a fresh Replay reconstructs it.
-	repayMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripLoanRepay}})
+	repayMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripLoanRepay}})
 	if len(repayMsgs) == 0 {
 		t.Error("expected at least 1 durable scrip:loan-repay message, found none")
 	}
@@ -367,7 +367,7 @@ func TestPaySellerForBuyMiss_WithholdsForOutstandingLoan(t *testing.T) {
 // harness log.
 func mustListLoanMints(t *testing.T, h *testHarness) []store.MessageRecord {
 	t.Helper()
-	msgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripLoanMint}})
+	msgs, err := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripLoanMint}})
 	if err != nil {
 		t.Fatalf("ListMessages(scrip:loan-mint): %v", err)
 	}

@@ -52,7 +52,7 @@ func deliverMessagesWithContent(t *testing.T, h *testHarness) int {
 	t.Helper()
 	// Filter on the unique phase tag only — store.MessageFilter.Tags uses OR
 	// semantics, so including TagSettle would also match every other settle phase.
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrDeliver},
 	})
 	n := 0
@@ -76,7 +76,7 @@ func deliverMessagesWithContent(t *testing.T, h *testHarness) int {
 func buyerAcceptRejectMessages(t *testing.T, h *testHarness) []store.MessageRecord {
 	t.Helper()
 	// Unique phase tag only (Tags filter is OR — see deliverMessagesWithContent).
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrBuyerAcceptReject},
 	})
 	return msgs
@@ -134,7 +134,7 @@ func TestUnfundedBuyerAcceptDeliver_FleetCreditCoversHold_ed2D29b(t *testing.T) 
 	// Drive the buy through the running engine to obtain a real match. The buy's
 	// stated budget is high (the buyer LIES about willingness) — the actual scrip
 	// balance is what gates the hold, and it is tiny.
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	done := make(chan struct{})
 	go func() { _ = eng.Start(ctx); close(done) }()
@@ -167,7 +167,7 @@ func TestUnfundedBuyerAcceptDeliver_FleetCreditCoversHold_ed2D29b(t *testing.T) 
 		},
 		[]string{matchMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	baRec, err := h.st.GetMessage(buyerAccept.ID)
 	if err != nil {
@@ -219,7 +219,7 @@ func TestUnfundedBuyerAcceptDeliver_FleetCreditCoversHold_ed2D29b(t *testing.T) 
 		},
 		[]string{buyerAccept.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	dtRec, err := h.st.GetMessage(deliverTrigger.ID)
 	if err != nil {

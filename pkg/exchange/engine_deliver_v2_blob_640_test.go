@@ -133,7 +133,7 @@ func TestE2E_V2BlobOffload_RoundTrip_RecoversOriginalPlaintext(t *testing.T) {
 	// ── seller publishes the offloaded put; operator folds it ──
 	putMsg := h.sendMessage(h.seller, putPayload,
 		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 2100, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -190,9 +190,9 @@ func TestE2E_V2BlobOffload_RoundTrip_RecoversOriginalPlaintext(t *testing.T) {
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(buyRec)); err != nil {
 		t.Fatalf("DispatchForTest buy: %v", err)
 	}
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
-	matchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(matchMsgs) == 0 {
 		t.Fatal("no match emitted for the oversize v2 entry")
 	}
@@ -208,7 +208,7 @@ func TestE2E_V2BlobOffload_RoundTrip_RecoversOriginalPlaintext(t *testing.T) {
 			exchange.TagVerdictPrefix + "accepted",
 		},
 		[]string{matchRec.ID})
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	deliverTriggerPayload, _ := json.Marshal(map[string]any{
@@ -217,7 +217,7 @@ func TestE2E_V2BlobOffload_RoundTrip_RecoversOriginalPlaintext(t *testing.T) {
 	deliverTrigger := h.sendMessage(h.operator, deliverTriggerPayload,
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrDeliver},
 		[]string{buyerAcceptMsg.ID})
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	deliverRec, _ := h.st.GetMessage(deliverTrigger.ID)
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(deliverRec)); err != nil {

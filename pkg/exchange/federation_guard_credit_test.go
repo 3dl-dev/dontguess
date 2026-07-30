@@ -139,7 +139,7 @@ func TestDeliverOnCredit_FederationGuardEnabledMintsNoCredit(t *testing.T) {
 		t.Fatalf("test setup: buyer balance should start at 0, got %d", bal)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -170,7 +170,7 @@ func TestDeliverOnCredit_FederationGuardEnabledMintsNoCredit(t *testing.T) {
 		},
 		[]string{matchMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	baRec, err := h.st.GetMessage(buyerAccept.ID)
 	if err != nil {
@@ -182,7 +182,7 @@ func TestDeliverOnCredit_FederationGuardEnabledMintsNoCredit(t *testing.T) {
 	}
 
 	// NO scrip-loan-mint message must exist anywhere on the log.
-	loanMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripLoanMint}})
+	loanMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripLoanMint}})
 	if len(loanMsgs) != 0 {
 		t.Errorf("expected 0 scrip-loan-mint messages at federation tier, got %d", len(loanMsgs))
 	}

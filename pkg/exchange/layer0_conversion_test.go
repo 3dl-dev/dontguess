@@ -57,7 +57,7 @@ func TestLayer0_LowConversionEntryExcludedFromBuyResults(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -82,7 +82,7 @@ func TestLayer0_LowConversionEntryExcludedFromBuyResults(t *testing.T) {
 			[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrPreview},
 			[]string{previewReqID},
 		)
-		allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+		allMsgs, _ := h.st.ListMessages(0)
 		eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	}
 
@@ -100,7 +100,7 @@ func TestLayer0_LowConversionEntryExcludedFromBuyResults(t *testing.T) {
 	}
 
 	// Now dispatch a buy targeting the entry's description and verify it's absent.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	h.sendMessage(h.buyer,
 		buyPayload("Go HTTP handler unit test patterns", 20000),
@@ -117,7 +117,7 @@ func TestLayer0_LowConversionEntryExcludedFromBuyResults(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -162,7 +162,7 @@ func TestLayer0_HighConversionEntryIncluded(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -186,7 +186,7 @@ func TestLayer0_HighConversionEntryIncluded(t *testing.T) {
 			[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrPreview},
 			[]string{previewReqID},
 		)
-		allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+		allMsgs, _ := h.st.ListMessages(0)
 		eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	}
 	for i := 0; i < 2; i++ {
@@ -203,7 +203,7 @@ func TestLayer0_HighConversionEntryIncluded(t *testing.T) {
 	}
 
 	// Run a buy dispatch; the entry must appear in results.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	h.sendMessage(h.buyer,
 		buyPayload("Python data analysis with pandas dataframes", 20000),
 		[]string{exchange.TagBuy},
@@ -216,7 +216,7 @@ func TestLayer0_HighConversionEntryIncluded(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -263,7 +263,7 @@ func TestLayer0_InsufficientPreviewsNotExcluded(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -287,7 +287,7 @@ func TestLayer0_InsufficientPreviewsNotExcluded(t *testing.T) {
 			[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrPreview},
 			[]string{previewReqID},
 		)
-		allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+		allMsgs, _ := h.st.ListMessages(0)
 		eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	}
 
@@ -300,7 +300,7 @@ func TestLayer0_InsufficientPreviewsNotExcluded(t *testing.T) {
 	}
 
 	// Run a buy dispatch; the entry must still appear in results.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	h.sendMessage(h.buyer,
 		buyPayload("Rust async runtime tokio integration tests", 20000),
 		[]string{exchange.TagBuy},
@@ -313,7 +313,7 @@ func TestLayer0_InsufficientPreviewsNotExcluded(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -376,7 +376,7 @@ func TestLayer0_ReversibilityAfterConversionImproves(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 7000, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -400,7 +400,7 @@ func TestLayer0_ReversibilityAfterConversionImproves(t *testing.T) {
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrPreview},
 		[]string{previewReqIDA},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	// Confirm: 1 preview, not excluded.
 	lowAfterA := eng.State().LowConversionEntries(exchange.Layer0MinPreviews, exchange.Layer0MaxConversionRate)
@@ -422,7 +422,7 @@ func TestLayer0_ReversibilityAfterConversionImproves(t *testing.T) {
 			[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrPreview},
 			[]string{previewReqID},
 		)
-		allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+		allMsgs, _ = h.st.ListMessages(0)
 		eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	}
 
@@ -450,7 +450,7 @@ func TestLayer0_ReversibilityAfterConversionImproves(t *testing.T) {
 		[]string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrBuyerAccept},
 		[]string{prevMsgA.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Verify reversal: entry should no longer be in LowConversionEntries.
@@ -462,7 +462,7 @@ func TestLayer0_ReversibilityAfterConversionImproves(t *testing.T) {
 	}
 
 	// Verify end-to-end: dispatch a buy and assert the entry reappears.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	h.sendMessage(h.buyer,
 		buyPayload("TypeScript React hooks unit testing best practices", 20000),
 		[]string{exchange.TagBuy},
@@ -475,7 +475,7 @@ func TestLayer0_ReversibilityAfterConversionImproves(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}

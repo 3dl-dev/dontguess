@@ -42,7 +42,7 @@ import (
 // demand-only entry.
 func matchCount(t *testing.T, h *testHarness) int {
 	t.Helper()
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	n := 0
 	for _, m := range msgs {
 		demandOnly := false
@@ -177,7 +177,7 @@ func TestAnonBuySignalBound_FundedBuyMovesPriceAndRank(t *testing.T) {
 	}
 
 	matchesBefore := matchCount(t, h)
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	h.startEngine(eng, ctx, cancel)
@@ -235,7 +235,7 @@ func TestAnonBuySignalBound_FundedBuyMovesPriceAndRank(t *testing.T) {
 		},
 		[]string{buyerAcceptMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completePayload, _ := json.Marshal(map[string]any{
@@ -250,7 +250,7 @@ func TestAnonBuySignalBound_FundedBuyMovesPriceAndRank(t *testing.T) {
 		},
 		[]string{deliverMsg.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(completeMsg.ID)
 	if err != nil {

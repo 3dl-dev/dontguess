@@ -130,7 +130,7 @@ func acceptV2Put(t *testing.T, h *testHarness, eng *exchange.Engine, putPayload 
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 2100, time.Now().Add(72*time.Hour)); err != nil {
@@ -166,9 +166,9 @@ func driveTeamTierPreview(t *testing.T, h *testHarness, eng *exchange.Engine, pu
 		t.Fatalf("DispatchForTest buy: %v", err)
 	}
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
-	matchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(matchMsgs) == 0 {
 		t.Fatal("no match message emitted for the v2 entry")
 	}
@@ -190,7 +190,7 @@ func driveTeamTierPreview(t *testing.T, h *testHarness, eng *exchange.Engine, pu
 	}
 
 	// Locate the operator-emitted settle(preview) whose antecedent is the request.
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrPreview},
 	})
 	for i := range postMsgs {
@@ -289,7 +289,7 @@ func TestPut_OverCapTeaser_Dropped(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// The over-cap put must NOT be in pendingPuts (dropped at applyPut).

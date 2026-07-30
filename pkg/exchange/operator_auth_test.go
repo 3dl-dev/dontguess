@@ -30,7 +30,7 @@ func TestOperatorAuth_ForgePutAcceptIgnored(t *testing.T) {
 	)
 
 	// Replay so the put lands in state.
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// Confirm the entry is in pendingPuts.
@@ -56,7 +56,7 @@ func TestOperatorAuth_ForgePutAcceptIgnored(t *testing.T) {
 	)
 
 	// Replay all messages including the forged accept.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Inventory must still be empty — forged accept was rejected.
@@ -86,7 +86,7 @@ func TestOperatorAuth_ForgePutRejectIgnored(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if len(eng.State().PendingPuts()) == 0 {
@@ -107,7 +107,7 @@ func TestOperatorAuth_ForgePutRejectIgnored(t *testing.T) {
 		[]string{putMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Entry must still be in pendingPuts — forged reject was ignored.
@@ -130,7 +130,7 @@ func TestOperatorAuth_ForgeMatchIgnored(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:rust"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 5600, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -148,7 +148,7 @@ func TestOperatorAuth_ForgeMatchIgnored(t *testing.T) {
 		[]string{exchange.TagBuy},
 		nil,
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Confirm order is active (not yet matched).
@@ -174,7 +174,7 @@ func TestOperatorAuth_ForgeMatchIgnored(t *testing.T) {
 		[]string{buyMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Order must still be active — forged match was rejected.
@@ -203,7 +203,7 @@ func TestOperatorAuth_ForgeDeliverIgnored(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:python"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 8400, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -215,7 +215,7 @@ func TestOperatorAuth_ForgeDeliverIgnored(t *testing.T) {
 		[]string{exchange.TagBuy},
 		nil,
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Operator emits a legitimate match.
@@ -243,7 +243,7 @@ func TestOperatorAuth_ForgeDeliverIgnored(t *testing.T) {
 	)
 
 	// Verify match is not yet marked as delivered.
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	if eng.State().IsMatchDelivered(matchMsg.ID) {
 		t.Fatal("match incorrectly marked as delivered before any deliver message")
@@ -261,7 +261,7 @@ func TestOperatorAuth_ForgeDeliverIgnored(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Match must NOT be marked as delivered — forged deliver was rejected.
@@ -283,7 +283,7 @@ func TestOperatorAuth_LegitimateOperatorMessagesAccepted(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:k8s"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 10500, time.Now().Add(72*time.Hour)); err != nil {

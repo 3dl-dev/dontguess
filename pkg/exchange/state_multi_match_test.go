@@ -50,7 +50,7 @@ func setupMultiMatchInventory(t *testing.T, h *testHarness, eng *exchange.Engine
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg0.ID, 7000, time.Now().Add(48*time.Hour)); err != nil {
@@ -60,7 +60,7 @@ func setupMultiMatchInventory(t *testing.T, h *testHarness, eng *exchange.Engine
 		t.Fatalf("AutoAcceptPut entry1: %v", err)
 	}
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	inv := eng.State().Inventory()
@@ -112,7 +112,7 @@ func TestState_MultiMatch_BuyerSelectsSecondResult(t *testing.T) {
 		[]string{buyMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Buyer accepts result #1 (entryID1, not the default entryID0).
@@ -144,7 +144,7 @@ func TestState_MultiMatch_BuyerSelectsSecondResult(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Seller reputation must have increased (completion recorded).
@@ -194,7 +194,7 @@ func TestState_MultiMatch_InvalidEntryIDFallsBackToFirst(t *testing.T) {
 		[]string{buyMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Buyer sends buyer-accept with a bogus entry_id not in the match results.
@@ -227,7 +227,7 @@ func TestState_MultiMatch_InvalidEntryIDFallsBackToFirst(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Settlement chain should have completed against entryID0 (the fallback).
@@ -255,14 +255,14 @@ func TestState_SingleMatch_BackwardsCompat(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 8400, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
 	}
 
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	inv := eng.State().Inventory()
@@ -291,7 +291,7 @@ func TestState_SingleMatch_BackwardsCompat(t *testing.T) {
 		[]string{buyMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Buyer accepts with the correct entry_id.
@@ -323,7 +323,7 @@ func TestState_SingleMatch_BackwardsCompat(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Seller reputation must have increased.

@@ -58,7 +58,7 @@ func TestSettleComplete_RedeliveryDoesNotDoubleEmitConsumeSignal(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	rec, err := h.st.GetMessage(completeMsg.ID)
@@ -67,14 +67,14 @@ func TestSettleComplete_RedeliveryDoesNotDoubleEmitConsumeSignal(t *testing.T) {
 	}
 	completeRecord := exchange.FromStoreRecord(rec)
 
-	preConsume, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
+	preConsume, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
 
 	// First dispatch: settles scrip AND emits the consume signal.
 	if err := eng.DispatchForTest(completeRecord); err != nil {
 		t.Fatalf("first DispatchForTest(complete): %v", err)
 	}
 
-	afterFirst, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
+	afterFirst, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
 	if len(afterFirst) != len(preConsume)+1 {
 		t.Fatalf("consume messages after first dispatch = %d, want %d (exactly one new)",
 			len(afterFirst), len(preConsume)+1)
@@ -86,7 +86,7 @@ func TestSettleComplete_RedeliveryDoesNotDoubleEmitConsumeSignal(t *testing.T) {
 		t.Fatalf("second DispatchForTest(complete) (redelivery): %v", err)
 	}
 
-	afterSecond, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
+	afterSecond, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
 	if len(afterSecond) != len(afterFirst) {
 		t.Errorf("consume messages after redelivery = %d, want %d (redelivery must not double-emit; ADV-7 regression)",
 			len(afterSecond), len(afterFirst))
@@ -136,7 +136,7 @@ func TestSettleComplete_NoConsumeSignalWithoutLiveReservation(t *testing.T) {
 		},
 		[]string{matchMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	deliverMsg := h.sendMessage(h.operator, deliverPayloadFor(entryID),
@@ -146,7 +146,7 @@ func TestSettleComplete_NoConsumeSignalWithoutLiveReservation(t *testing.T) {
 		},
 		[]string{buyerAcceptMsg.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completeMsg := h.sendMessage(h.buyer, completePayloadFor(entryID, 12000),
@@ -157,10 +157,10 @@ func TestSettleComplete_NoConsumeSignalWithoutLiveReservation(t *testing.T) {
 		},
 		[]string{deliverMsg.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	preConsume, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
+	preConsume, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
 
 	rec, err := h.st.GetMessage(completeMsg.ID)
 	if err != nil {
@@ -170,7 +170,7 @@ func TestSettleComplete_NoConsumeSignalWithoutLiveReservation(t *testing.T) {
 		t.Fatalf("DispatchForTest(complete): %v", err)
 	}
 
-	afterConsume, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
+	afterConsume, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
 	if len(afterConsume) != len(preConsume) {
 		t.Errorf("consume messages = %d, want %d (no live reservation — consume signal must be skipped)",
 			len(afterConsume), len(preConsume))

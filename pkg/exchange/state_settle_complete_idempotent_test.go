@@ -52,7 +52,7 @@ func TestState_SettleComplete_ReplayIdempotent(t *testing.T) {
 	)
 
 	// Replay once — record baseline reputation.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	repAfterFirstReplay := eng.State().SellerReputation(h.seller.PublicKeyHex())
 
@@ -115,7 +115,7 @@ func TestState_SettleComplete_SuccessCountExactlyOne(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 
 	// Replay 5 times — SuccessCount must remain 1 throughout.
 	for i := 1; i <= 5; i++ {
@@ -165,7 +165,7 @@ func TestState_SettleComplete_PriceHistoryNotDuplicated(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 
 	// First replay — expect exactly 1 price record.
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))

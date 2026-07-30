@@ -53,7 +53,7 @@ type matchPayload3c3 struct {
 // operatorMessages3c3 returns every message the operator emitted, newest last.
 func operatorMessages3c3(t *testing.T, h *testHarness) []store.MessageRecord {
 	t.Helper()
-	all, err := h.st.ListMessages(h.cfID, 0)
+	all, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}
@@ -80,10 +80,10 @@ func matchResultFor3c3(t *testing.T, h *testHarness, eng *exchange.Engine, task,
 	if derr := eng.DispatchForTest(exchange.FromStoreRecord(buyRec)); derr != nil {
 		t.Fatalf("dispatch buy %q: %v", task, derr)
 	}
-	all, _ := h.st.ListMessages(h.cfID, 0)
+	all, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(all))
 
-	matchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	// Scan newest-first so we read the match this buy just produced.
 	for i := len(matchMsgs) - 1; i >= 0; i-- {
 		if len(matchMsgs[i].Antecedents) == 0 || matchMsgs[i].Antecedents[0] != buyMsg.ID {
@@ -141,7 +141,7 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 	v2Put := h.sendMessage(h.seller, v2PutPayload,
 		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
 
-	all, _ := h.st.ListMessages(h.cfID, 0)
+	all, _ := h.st.ListMessages(0)
 	engTeam.State().Replay(exchange.FromStoreRecords(all))
 	if err := engTeam.AutoAcceptPut(v2Put.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut v2: %v", err)
@@ -181,7 +181,7 @@ func TestMatch_V2_PlaintextHashNeverOnPublicWire(t *testing.T) {
 		putPayload(legacyDesc, "sha256:"+fmt.Sprintf("%064x", 7), "code", 8000, 4096),
 		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
 
-	all2, _ := h2.st.ListMessages(h2.cfID, 0)
+	all2, _ := h2.st.ListMessages(0)
 	engIndiv.State().Replay(exchange.FromStoreRecords(all2))
 	if err := engIndiv.AutoAcceptPut(legacyPut.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut legacy: %v", err)
@@ -330,7 +330,7 @@ func TestBuyMissScripPay_V2_UsesCiphertextHashNotPlaintext(t *testing.T) {
 	// Wait for the operator's scrip-put-pay for this fulfillment.
 	var payMsg *store.MessageRecord
 	waitForCond3c3(t, 4*time.Second, "scrip-put-pay emitted", func() bool {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripPutPay}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripPutPay}})
 		for i := len(msgs) - 1; i >= 0; i-- {
 			if msgs[i].Sender == operator.PubKeyHex() {
 				m := msgs[i]
@@ -343,7 +343,7 @@ func TestBuyMissScripPay_V2_UsesCiphertextHashNotPlaintext(t *testing.T) {
 	cancel()
 
 	// Locate the folded v2 entry to read its two DISTINCT hashes.
-	all, _ := h.st.ListMessages(h.cfID, 0)
+	all, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(all))
 	var entry *exchange.InventoryEntry
 	for _, e := range eng.State().Inventory() {

@@ -69,13 +69,13 @@ func TestPerformScripSettlement_EmitsDurableRecordBeforeBalanceMutationFails(t *
 		Logger:            func(format string, args ...any) { t.Logf("[eng2] "+format, args...) },
 	})
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng2.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Re-dispatch buyer-accept through eng2 so it detects the existing
 	// reservation from the scrip-buy-hold log and populates matchToReservation
 	// (engine-local state, not replay state).
-	buyerAcceptMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	buyerAcceptMsgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrBuyerAccept},
 	})
 	for i := range buyerAcceptMsgs {
@@ -85,7 +85,7 @@ func TestPerformScripSettlement_EmitsDurableRecordBeforeBalanceMutationFails(t *
 		}
 	}
 
-	preScripSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	preScripSettle, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 
 	completePayload, _ := json.Marshal(map[string]any{"phase": "complete"})
 	completeMsg := h.sendMessage(h.buyer, completePayload,
@@ -109,7 +109,7 @@ func TestPerformScripSettlement_EmitsDurableRecordBeforeBalanceMutationFails(t *
 	// ... but the scrip-settle convention message must STILL have been
 	// durably emitted — proving emit ran BEFORE (and independent of) the
 	// doomed balance mutation.
-	postScripSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	postScripSettle, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 	if len(postScripSettle) != len(preScripSettle)+1 {
 		t.Fatalf("scrip-settle messages after failed-mutation settle = %d, want %d (exactly one new — "+
 			"emit-durable-then-mutate ordering regression: emit did not happen before/independent of the failing mutation)",
@@ -142,7 +142,7 @@ func TestPerformScripSettlement_EmitsDurableRecordBeforeBalanceMutationFails(t *
 
 	// The durable log must never hold a contradictory settle(failed) for a
 	// reservation that already has a durable scrip-settle.
-	failedMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	failedMsgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		// Filter by the failed-phase tag alone (the store's Tags filter is
 		// OR-semantics — adding TagSettle would also match complete/deliver).
 		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrFailed},
@@ -179,7 +179,7 @@ func TestPerformScripSettlement_EmitsDurableRecordBeforeBalanceMutationFails(t *
 	if derr := eng2.DispatchForTest(exchange.FromStoreRecord(retryRec)); derr != nil {
 		t.Logf("retry dispatch returned: %v (acceptable — settlement is a no-op)", derr)
 	}
-	afterRetry, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	afterRetry, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 	if len(afterRetry) != len(postScripSettle) {
 		t.Fatalf("buyer retry after a post-emit failure emitted a SECOND scrip-settle: count %d → %d — "+
 			"double-mint (reservation must stay consumed and matchToReservation cleaned so retry is a no-op)",

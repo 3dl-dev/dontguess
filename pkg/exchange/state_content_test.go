@@ -217,7 +217,7 @@ func TestApplyPut_IdempotentByMsgID(t *testing.T) {
 	)
 
 	// Fetch the messages from the store — contains exactly one put message.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}

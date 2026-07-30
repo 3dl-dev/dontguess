@@ -46,7 +46,7 @@ func dispatchBuy(t *testing.T, h *testHarness, eng *exchange.Engine, sender *tes
 // demandOnlyMsgs returns the demand-only messages currently in the harness log.
 func demandOnlyMsgs(t *testing.T, h *testHarness) []store.MessageRecord {
 	t.Helper()
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagDemandOnly}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagDemandOnly}})
 	return msgs
 }
 
@@ -56,7 +56,7 @@ func demandOnlyMsgs(t *testing.T, h *testHarness) []store.MessageRecord {
 // does. This proves the entry surfaces in `dontguess demand`, not just in state.
 func buildBacklogFromLog(t *testing.T, h *testHarness) demand.Backlog {
 	t.Helper()
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 	var miss []demand.MissMessage
 	for _, m := range msgs {
 		// Mirror buyMissFilter's ExcludeTags{TagSettle}: a fulfilled offer's
@@ -178,7 +178,7 @@ func TestDemandOnly_SybilFloodOneTaskHash_CollapsesToOneUnmovedEntry(t *testing.
 
 	// (ZERO scrip movement) No scrip event was emitted, and every Sybil (plus the
 	// operator) holds zero scrip.
-	scripMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	scripMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(scripMsgs) != 0 {
 		t.Fatalf("demand-only registration moved scrip: %d scrip-buy-hold messages", len(scripMsgs))
 	}
@@ -270,7 +270,7 @@ func TestDemandOnly_FundedMissPathUnaffected(t *testing.T) {
 	}
 
 	// The emitted buy-miss carries the funded 70% rate, not the demand-only 0 rate.
-	missMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	missMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 	if len(missMsgs) != 1 {
 		t.Fatalf("expected exactly 1 buy-miss message, got %d", len(missMsgs))
 	}

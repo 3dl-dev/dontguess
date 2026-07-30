@@ -107,7 +107,7 @@ func foldOffloadedEntry(t *testing.T, desc string, plaintext []byte) (entry *exc
 
 	putMsg := h.sendMessage(h.seller, putPayload,
 		[]string{exchange.TagPut, "exchange:content-type:code"}, nil)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 2100, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -125,7 +125,7 @@ func foldOffloadedEntry(t *testing.T, desc string, plaintext []byte) (entry *exc
 	if entry.Content != nil {
 		t.Fatalf("entry.Content is non-nil (%d bytes) — an OFFLOADED entry must keep bytes in the blob only; Gate 6 fail-open only bites when Content is nil", len(entry.Content))
 	}
-	stored, _ := h.st.ListMessages(h.cfID, 0)
+	stored, _ := h.st.ListMessages(0)
 	return entry, operator, shared, exchange.FromStoreRecords(stored)
 }
 

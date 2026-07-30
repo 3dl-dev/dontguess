@@ -58,7 +58,7 @@ func TestFederationProfile_CreatedOnFirstMessage(t *testing.T) {
 	)
 
 	// Apply via engine's Replay to ensure state is updated.
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{})
 	state := exchange.NewState()
 	exMsgs := exchange.FromStoreRecords(msgs)
 	state.Replay(exMsgs)
@@ -254,9 +254,9 @@ func TestFederationDualGuard_LowTrustRoutesInline(t *testing.T) {
 		nil,
 	)
 
-	allAssignsPre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	allAssignsPre, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 	preBrokeredCount := countBrokeredMatchAssigns(allAssignsPre)
-	preMatches, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatches, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	h.startEngine(eng, ctx, cancel)
@@ -265,8 +265,8 @@ func TestFederationDualGuard_LowTrustRoutesInline(t *testing.T) {
 	var finalAllAssigns, finalMatches []store.MessageRecord
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		finalAllAssigns, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
-		finalMatches, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		finalAllAssigns, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+		finalMatches, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		newBrokered := countBrokeredMatchAssigns(finalAllAssigns) - preBrokeredCount
 		newMatches := len(finalMatches) - len(preMatches)
 		if newMatches > 0 || newBrokered > 0 {
@@ -322,9 +322,9 @@ func TestFederationDualGuard_HighTrustRoutesBrokered(t *testing.T) {
 		nil,
 	)
 
-	allAssignsPre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	allAssignsPre, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 	preBrokeredCount := countBrokeredMatchAssigns(allAssignsPre)
-	preMatches, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatches, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	h.startEngine(eng, ctx, cancel)
@@ -332,7 +332,7 @@ func TestFederationDualGuard_HighTrustRoutesBrokered(t *testing.T) {
 	var finalAllAssigns []store.MessageRecord
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		finalAllAssigns, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+		finalAllAssigns, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 		if countBrokeredMatchAssigns(finalAllAssigns) > preBrokeredCount {
 			break
 		}
@@ -341,7 +341,7 @@ func TestFederationDualGuard_HighTrustRoutesBrokered(t *testing.T) {
 	cancel()
 
 	newBrokeredAssigns := countBrokeredMatchAssigns(finalAllAssigns) - preBrokeredCount
-	finalMatches, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	finalMatches, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	newMatches := len(finalMatches) - len(preMatches)
 
 	// High-trust buyer should get brokered routing: exactly 1 brokered-match assign.
@@ -381,7 +381,7 @@ func TestFederationDualGuard_DisabledNoEffect(t *testing.T) {
 		nil,
 	)
 
-	allAssignsPre, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	allAssignsPre, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 	preBrokeredCount := countBrokeredMatchAssigns(allAssignsPre)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -390,7 +390,7 @@ func TestFederationDualGuard_DisabledNoEffect(t *testing.T) {
 	var finalAllAssigns []store.MessageRecord
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		finalAllAssigns, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+		finalAllAssigns, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 		if countBrokeredMatchAssigns(finalAllAssigns) > preBrokeredCount {
 			break
 		}

@@ -136,7 +136,7 @@ func seedInventoryEntry(t *testing.T, h *testHarness, eng *exchange.Engine, desc
 		[]string{exchange.TagPut, "exchange:content-type:" + contentType},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, putPrice, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -149,7 +149,7 @@ func waitForMatchMessage(t *testing.T, h *testHarness, before []store.MessageRec
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(msgs) > len(before) {
 			last := msgs[len(msgs)-1]
 			return &last
@@ -166,7 +166,7 @@ func waitForMatchMessage(t *testing.T, h *testHarness, before []store.MessageRec
 // longer in the match payload — it is created at buyer-accept time).
 func extractReservationIDFromLog(t *testing.T, h *testHarness) string {
 	t.Helper()
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(msgs) == 0 {
 		return ""
 	}
@@ -197,7 +197,7 @@ func sendBuyerAcceptAndDispatch(t *testing.T, h *testHarness, eng *exchange.Engi
 		[]string{matchMsgID},
 	)
 	// Replay state so engine sees the buyer-accept before dispatching.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(msg.ID)
 	if err != nil {
@@ -249,7 +249,7 @@ func TestBuyerAccept_DecrementsScripAfterPreview(t *testing.T) {
 	}
 	buyerBalanceBefore := cs.Balance(h.buyer.PublicKeyHex())
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -284,7 +284,7 @@ func TestBuyerAccept_DecrementsScripAfterPreview(t *testing.T) {
 	}
 
 	// Buyer sends buyer-accept → engine creates scrip hold.
-	preBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	preBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	sendBuyerAcceptAndDispatch(t, h, eng, matchMsg.ID, inv[0].EntryID)
 
 	// Buyer balance must have decreased by holdAmount.
@@ -295,7 +295,7 @@ func TestBuyerAccept_DecrementsScripAfterPreview(t *testing.T) {
 	}
 
 	// A scrip-buy-hold message must be in the log.
-	afterBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	afterBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(afterBuyHoldMsgs) <= len(preBuyHoldMsgs) {
 		t.Error("scrip-buy-hold message must be emitted after buyer-accept")
 	}
@@ -356,7 +356,7 @@ func TestBuyerAccept_InsufficientScripCoveredByCredit(t *testing.T) {
 	}
 	buyerBalanceBefore := cs.Balance(h.buyer.PublicKeyHex())
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -379,7 +379,7 @@ func TestBuyerAccept_InsufficientScripCoveredByCredit(t *testing.T) {
 	}
 
 	// Send buyer-accept — this must now SUCCEED via the credit top-up.
-	preBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	preBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 
 	buyerAcceptPayload, _ := json.Marshal(map[string]any{
 		"phase":    "buyer-accept",
@@ -394,7 +394,7 @@ func TestBuyerAccept_InsufficientScripCoveredByCredit(t *testing.T) {
 		},
 		[]string{matchMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(buyerAcceptMsg.ID)
 	if err != nil {
@@ -407,7 +407,7 @@ func TestBuyerAccept_InsufficientScripCoveredByCredit(t *testing.T) {
 
 	// A scrip-buy-hold message MUST now have been emitted — the hold
 	// succeeded because the loan topped up the balance first.
-	afterBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	afterBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(afterBuyHoldMsgs) <= len(preBuyHoldMsgs) {
 		t.Error("expected a scrip-buy-hold message once the shortfall was covered by credit")
 	}
@@ -464,7 +464,7 @@ func TestSettle_AdjustsScripOnComplete(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -516,7 +516,7 @@ func TestSettle_AdjustsScripOnComplete(t *testing.T) {
 	)
 
 	// Replay all messages so the antecedent chain is in state.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// complete (antecedent = deliver message).
@@ -535,7 +535,7 @@ func TestSettle_AdjustsScripOnComplete(t *testing.T) {
 	)
 
 	// Apply complete to state and dispatch.
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(completeMsg.ID)
 	if err != nil {
@@ -616,7 +616,7 @@ func TestRestart_NoDoubleHoldOnBuyerAccept(t *testing.T) {
 	addScripMintMsg(t, h, h.buyer.PublicKeyHex(), 2*holdAmount+extraScrip)
 
 	// Run a buy → match to get a real match message in the log.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx0, cancel0 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel0()
@@ -699,7 +699,7 @@ func TestRestart_NoDoubleHoldOnBuyerAccept(t *testing.T) {
 	})
 
 	// Replay state so the engine processes the buyer-accept during dispatch.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispatch the buyer-accept: the fix should detect the existing buy-hold and skip.
@@ -765,7 +765,7 @@ func TestSettle_FakeSellerKeyIgnored(t *testing.T) {
 	}
 
 	// Run engine to emit a match (buyer buys, engine pre-decrements and matches).
-	preMatchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	go func() { _ = eng.Start(ctx) }()
@@ -803,7 +803,7 @@ func TestSettle_FakeSellerKeyIgnored(t *testing.T) {
 	)
 
 	// Replay so antecedent chain is in state.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Attacker-controlled complete message: seller_key points to attacker.
@@ -823,7 +823,7 @@ func TestSettle_FakeSellerKeyIgnored(t *testing.T) {
 	)
 
 	// Replay and dispatch the complete message.
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(completeMsg.ID)
 	if err != nil {
@@ -888,7 +888,7 @@ func TestEngine_AssignFullLifecycleBountyPaid(t *testing.T) {
 	assignMsg := h.sendMessage(h.operator, assignPayload, []string{exchange.TagAssign}, nil)
 
 	// Replay state.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispatch assign (no-op handler, just ensures routing works).
@@ -904,7 +904,7 @@ func TestEngine_AssignFullLifecycleBountyPaid(t *testing.T) {
 	claimPayload := []byte(`{}`)
 	claimMsg := h.sendMessage(worker, claimPayload, []string{exchange.TagAssignClaim}, []string{assignMsg.ID})
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	claimRec, err := h.st.GetMessage(claimMsg.ID)
@@ -919,7 +919,7 @@ func TestEngine_AssignFullLifecycleBountyPaid(t *testing.T) {
 	completePayload := []byte(`{"output":"freshness check done"}`)
 	completeMsg := h.sendMessage(worker, completePayload, []string{exchange.TagAssignComplete}, []string{claimMsg.ID})
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completeRec, err := h.st.GetMessage(completeMsg.ID)
@@ -934,7 +934,7 @@ func TestEngine_AssignFullLifecycleBountyPaid(t *testing.T) {
 	acceptPayload := []byte(`{}`)
 	acceptMsg := h.sendMessage(h.operator, acceptPayload, []string{exchange.TagAssignAccept}, []string{completeMsg.ID})
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	acceptRec, err := h.st.GetMessage(acceptMsg.ID)
@@ -952,7 +952,7 @@ func TestEngine_AssignFullLifecycleBountyPaid(t *testing.T) {
 	}
 
 	// Verify scrip-assign-pay message was emitted.
-	payMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripAssignPay}})
+	payMsgs, err := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripAssignPay}})
 	if err != nil {
 		t.Fatalf("listing scrip-assign-pay messages: %v", err)
 	}

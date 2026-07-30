@@ -47,7 +47,7 @@ func TestE2E_FullHappyPath(t *testing.T) {
 	)
 
 	// Replay to pick up the put.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestE2E_FullHappyPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	preMatchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preMatchCount := len(preMatchMsgs)
 
 	go func() { _ = eng.Start(ctx) }()
@@ -113,7 +113,7 @@ func TestE2E_FullHappyPath(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > preMatchCount {
 			break
 		}
@@ -155,7 +155,7 @@ func TestE2E_FullHappyPath(t *testing.T) {
 
 	// Order must now be marked matched in state.
 	// Re-sync state from store before checking.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	if !eng.State().IsOrderMatched(buyMsg.ID) {
 		t.Error("step 4: buy order should be marked matched after engine emitted match")
@@ -176,7 +176,7 @@ func TestE2E_FullHappyPath(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// acceptedOrders state: matchMsg.ID → entryID (not exported directly, but
@@ -201,7 +201,7 @@ func TestE2E_FullHappyPath(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Step 7: Buyer completes the transaction ---
@@ -221,7 +221,7 @@ func TestE2E_FullHappyPath(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// After complete, seller reputation must be > default.
@@ -276,7 +276,7 @@ func TestE2E_BuyerReject(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:python"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 5600, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -293,13 +293,13 @@ func TestE2E_BuyerReject(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	go func() { _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -323,7 +323,7 @@ func TestE2E_BuyerReject(t *testing.T) {
 	}
 
 	// Snapshot scrip-buy-hold count before reject — no new holds should appear.
-	preBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	preBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 
 	// Buyer rejects (no buyer-accept was sent — buyer declines after seeing the match).
 	rejectPayload, _ := json.Marshal(map[string]any{
@@ -341,7 +341,7 @@ func TestE2E_BuyerReject(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Scrip balance assertions: escrow refund path ---
@@ -355,7 +355,7 @@ func TestE2E_BuyerReject(t *testing.T) {
 			buyerBalanceAfter, buyerBalanceBefore)
 	}
 
-	afterBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	afterBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(afterBuyHoldMsgs) != len(preBuyHoldMsgs) {
 		t.Errorf("buyer-reject: unexpected scrip-buy-hold message emitted (before=%d, after=%d) — no escrow should be created on reject",
 			len(preBuyHoldMsgs), len(afterBuyHoldMsgs))
@@ -400,7 +400,7 @@ func TestE2E_PutReject(t *testing.T) {
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// Operator rejects the put.
@@ -418,7 +418,7 @@ func TestE2E_PutReject(t *testing.T) {
 		[]string{putMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Inventory must be empty: rejected put never enters inventory.
@@ -447,7 +447,7 @@ func TestE2E_EmptyMatch(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:analysis", "exchange:domain:finance"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	// Accept at 35000 scrip → ask price = 35000 * 120/100 = 42000.
 	if err := eng.AutoAcceptPut(putMsg.ID, 35000, time.Now().Add(48*time.Hour)); err != nil {
@@ -465,13 +465,13 @@ func TestE2E_EmptyMatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	go func() { _ = eng.Start(ctx) }()
 
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -581,8 +581,8 @@ func TestE2E_ScripBalances(t *testing.T) {
 	}
 
 	// --- Step 3: Buy — buyer balance decremented ---
-	preBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
-	preMatchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	preMatchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -610,7 +610,7 @@ func TestE2E_ScripBalances(t *testing.T) {
 	buyerAcceptMsgE2E := sendBuyerAcceptAndDispatch(t, h, eng, matchMsg.ID, entry.EntryID)
 
 	// Buy-hold message must appear after buyer-accept.
-	afterBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	afterBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(afterBuyHoldMsgs) <= len(preBuyHoldMsgs) {
 		t.Error("step 4 (buyer-accept): expected scrip-buy-hold message in campfire log after buyer-accept")
 	}
@@ -637,8 +637,8 @@ func TestE2E_ScripBalances(t *testing.T) {
 	sellerBalanceBefore := cs.Balance(h.seller.PublicKeyHex())
 	operatorBalanceBefore := cs.Balance(h.operator.PublicKeyHex())
 
-	preSettleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
-	preBurnMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
+	preSettleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	preBurnMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
 
 	// deliver (antecedent = buyer-accept message).
 	deliverPayloadE2E, _ := json.Marshal(map[string]any{
@@ -656,7 +656,7 @@ func TestE2E_ScripBalances(t *testing.T) {
 	)
 
 	// Replay to pick up deliver before dispatching complete.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Price is derived from the reservation (locked at buyer-accept), not from payload.
@@ -671,7 +671,7 @@ func TestE2E_ScripBalances(t *testing.T) {
 		[]string{deliverMsgE2E.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(completeMsg.ID)
 	if err != nil {
@@ -702,12 +702,12 @@ func TestE2E_ScripBalances(t *testing.T) {
 	}
 
 	// --- Step 6: Campfire log — scrip convention messages present ---
-	afterSettleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	afterSettleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 	if len(afterSettleMsgs) <= len(preSettleMsgs) {
 		t.Error("step 6 (log): scrip-settle message not found in campfire log")
 	}
 
-	afterBurnMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
+	afterBurnMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
 	if len(afterBurnMsgs) <= len(preBurnMsgs) {
 		t.Error("step 6 (log): scrip-burn message not found in campfire log")
 	}
@@ -815,7 +815,7 @@ func TestE2E_SmallContentDisputePath(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -849,7 +849,7 @@ func TestE2E_SmallContentDisputePath(t *testing.T) {
 	buyerBalanceAfterMint := cs.Balance(h.buyer.PublicKeyHex())
 
 	// --- Step 3: Buyer sends a buy request ---
-	preMatchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	h.sendMessage(h.buyer,
 		buyPayload("Tiny Go helper function", holdAmount+buyerExtra),
@@ -865,7 +865,7 @@ func TestE2E_SmallContentDisputePath(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMatchMsgs) {
 			break
 		}
@@ -898,7 +898,7 @@ func TestE2E_SmallContentDisputePath(t *testing.T) {
 	}
 
 	// Sync state.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Step 5: Buyer sends settle(buyer-accept) with antecedent = match message ---
@@ -919,7 +919,7 @@ func TestE2E_SmallContentDisputePath(t *testing.T) {
 	)
 
 	// Dispatch buyer-accept through the engine to trigger scrip hold.
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	buyerAcceptRec, err := h.st.GetMessage(buyerAcceptMsg.ID)
 	if err != nil {
@@ -944,7 +944,7 @@ func TestE2E_SmallContentDisputePath(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Step 7: Buyer sends settle(small-content-dispute) ---
@@ -973,7 +973,7 @@ func TestE2E_SmallContentDisputePath(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispatch the dispute through the engine to trigger auto-refund logic.
@@ -986,7 +986,7 @@ func TestE2E_SmallContentDisputePath(t *testing.T) {
 	}
 
 	// Sync state after dispute.
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Verify: smallContentDisputes incremented ---
@@ -1069,7 +1069,7 @@ func TestE2E_AssignPay(t *testing.T) {
 
 	// Post the scrip-assign-pay message to the campfire log.
 	// The operator signs this message; the message sender is the operator.
-	preAssignPayMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripAssignPay}})
+	preAssignPayMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripAssignPay}})
 
 	assignPayload, err := json.Marshal(scrip.AssignPayPayload{
 		Worker:     workerKey,
@@ -1107,7 +1107,7 @@ func TestE2E_AssignPay(t *testing.T) {
 	}
 
 	// Assert: scrip-assign-pay message is in the campfire log.
-	afterAssignPayMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripAssignPay}})
+	afterAssignPayMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripAssignPay}})
 	if len(afterAssignPayMsgs) <= len(preAssignPayMsgs) {
 		t.Fatal("scrip-assign-pay message not found in campfire log")
 	}
@@ -1189,7 +1189,7 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("step 1: listing messages: %v", err)
 	}
@@ -1234,7 +1234,7 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 	}
 
 	// --- Step 3: Buyer sends buy request ---
-	preBuyMatchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preBuyMatchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -1285,7 +1285,7 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 	}
 
 	// Sync state to pick up the match.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Step 5: Buyer sends settle(preview-request) with match as antecedent ---
@@ -1319,14 +1319,14 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 	}
 
 	// --- Step 6: Engine emits settle(preview) in response to preview-request ---
-	preSettleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preSettleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	preCount := len(preSettleMsgs)
 
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(preqRec)); err != nil {
 		t.Fatalf("step 6: DispatchForTest preview-request: %v", err)
 	}
 
-	postSettleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postSettleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	if len(postSettleMsgs) <= preCount {
 		t.Fatal("step 6: engine did not emit a settle(preview) response")
 	}
@@ -1367,7 +1367,7 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 	}
 
 	// Apply preview message to state so previewToMatch is populated.
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	previewToMatch := eng.State().PreviewToMatchForTest()
@@ -1377,12 +1377,12 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 
 	// --- Step 7: Buyer sends settle(buyer-accept) with preview as antecedent ---
 	// Scrip hold is created HERE (not at buy time).
-	preBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	preBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 
 	buyerAcceptMsg := sendBuyerAcceptViaPreview(t, h, eng, previewMsg.ID, entry.EntryID)
 
 	// Step 7 assertions: scrip hold created and buyer balance decremented.
-	afterBuyHoldMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	afterBuyHoldMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(afterBuyHoldMsgs) <= len(preBuyHoldMsgs) {
 		t.Error("step 7 (buyer-accept): expected scrip-buy-hold message in campfire log after buyer-accept")
 	}
@@ -1403,7 +1403,7 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 	}
 
 	// Match must be accepted in state (via preview → match antecedent chain).
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	if !eng.State().IsMatchAccepted(matchMsg.ID) {
 		t.Error("step 7 (buyer-accept): match should be accepted in state after buyer-accept via preview path")
@@ -1418,7 +1418,7 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Step 8 assertion: delivered state tracked.
@@ -1429,8 +1429,8 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 	// --- Step 9: Buyer sends settle(complete) ---
 	sellerBalanceBefore := cs.Balance(h.seller.PublicKeyHex())
 	operatorBalanceBefore := cs.Balance(h.operator.PublicKeyHex())
-	preScripSettleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
-	preBurnMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
+	preScripSettleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	preBurnMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
 
 	completeP, _ := json.Marshal(map[string]any{"entry_id": entry.EntryID})
 	completeMsg := h.sendMessage(h.buyer, completeP,
@@ -1441,7 +1441,7 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completeMsgRec, err := h.st.GetMessage(completeMsg.ID)
@@ -1487,11 +1487,11 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 	}
 
 	// Campfire log must have scrip-settle and scrip-burn messages.
-	afterScripSettleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	afterScripSettleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 	if len(afterScripSettleMsgs) <= len(preScripSettleMsgs) {
 		t.Error("step 10 (complete): scrip-settle message not found in campfire log")
 	}
-	afterBurnMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
+	afterBurnMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBurn}})
 	if len(afterBurnMsgs) <= len(preBurnMsgs) {
 		t.Error("step 10 (complete): scrip-burn message not found in campfire log")
 	}
@@ -1516,7 +1516,7 @@ func sendBuyerAcceptViaPreview(t *testing.T, h *testHarness, eng *exchange.Engin
 		},
 		[]string{previewMsgID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(msg.ID)
 	if err != nil {
@@ -1606,7 +1606,7 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("step 1: listing messages: %v", err)
 	}
@@ -1645,7 +1645,7 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 	}
 
 	// --- Step 3: Buyer buys; engine matches ---
-	preMatchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	h.startEngine(eng, ctx, cancel)
@@ -1659,7 +1659,7 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 	matchMsg := waitForMatchMessage(t, h, preMatchMsgs, 2*time.Second)
 	cancel()
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Step 4: Buyer sends preview-request; engine emits settle(preview) ---
@@ -1678,10 +1678,10 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 		t.Fatalf("step 4: DispatchForTest preview-request: %v", err)
 	}
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	previewMsgs, _ := h.st.ListMessages(h.cfID, 0,
+	previewMsgs, _ := h.st.ListMessages(0,
 		store.MessageFilter{Tags: []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrPreview}})
 	if len(previewMsgs) == 0 {
 		t.Fatal("step 4: no preview message emitted")
@@ -1691,7 +1691,7 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 	// --- Step 5: Buyer accepts preview; scrip hold created ---
 	buyerAcceptMsg := sendBuyerAcceptViaPreview(t, h, eng, previewRec.ID, entry.EntryID)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	if !eng.State().IsMatchAccepted(matchMsg.ID) {
@@ -1713,11 +1713,11 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Engine dispatches deliver trigger → emits content-bearing deliver.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	preCount := len(preMsgs)
 
 	deliverRec, _ := h.st.GetMessage(deliverTriggerMsg.ID)
@@ -1726,7 +1726,7 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 	}
 
 	// --- Step 7: Assert buyer receives content with correct sha256 ---
-	postMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	if len(postMsgs) <= preCount {
 		t.Fatal("step 7: engine did not emit a new settle message after deliver trigger")
 	}
@@ -1780,7 +1780,7 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 			deliveredHash, originalHash)
 	}
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Step 8: Buyer sends settle(complete); seller scrip balance increases ---
@@ -1798,7 +1798,7 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 		[]string{deliverTriggerMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	completeMsgRec, err := h.st.GetMessage(completeMsg.ID)

@@ -66,7 +66,7 @@ func taskCompletionRateFixture(t *testing.T, seed int) (h *testHarness, eng *exc
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -76,7 +76,7 @@ func taskCompletionRateFixture(t *testing.T, seed int) (h *testHarness, eng *exc
 	if err := eng.AutoAcceptPut(putMsg.ID, 3500, time.Now().Add(24*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
 	}
-	msgs, _ = h.st.ListMessages(h.cfID, 0)
+	msgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	inv := eng.State().Inventory()
@@ -100,10 +100,10 @@ func taskCompletionRateFixture(t *testing.T, seed int) (h *testHarness, eng *exc
 		t.Fatalf("DispatchForTest(buy): %v", err)
 	}
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
-	matchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(matchMsgs) == 0 {
 		t.Fatal("DispatchForTest(buy) did not emit a match message")
 	}
@@ -146,7 +146,7 @@ func TestTaskCompletionRate_AcceptedNotCompleted(t *testing.T) {
 		[]string{exchange.TagSettle, "exchange:phase:buyer-accept"},
 		[]string{matchMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// With 1 accepted, 0 completed: rate should be 0.0.
@@ -190,7 +190,7 @@ func TestTaskCompletionRate_AfterComplete(t *testing.T) {
 		[]string{exchange.TagSettle, "exchange:phase:buyer-accept"},
 		[]string{matchMsg.ID},
 	)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Verify rate is 0.0 before complete.
@@ -209,7 +209,7 @@ func TestTaskCompletionRate_AfterComplete(t *testing.T) {
 		[]string{exchange.TagSettle, "exchange:phase:deliver"},
 		[]string{buyerAcceptMsg.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Step 7: buyer completes.
@@ -219,7 +219,7 @@ func TestTaskCompletionRate_AfterComplete(t *testing.T) {
 		[]string{exchange.TagSettle, "exchange:phase:complete"},
 		[]string{deliverMsg.ID},
 	)
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// After complete: rate = 1/1 = 1.0.

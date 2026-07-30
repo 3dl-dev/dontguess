@@ -157,7 +157,7 @@ func driveV2Deliver(t *testing.T, h *testHarness, eng *exchange.Engine, seller, 
 		[]string{exchange.TagPut, "exchange:content-type:code"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, 2100, time.Now().Add(72*time.Hour)); err != nil {
@@ -184,9 +184,9 @@ func driveV2Deliver(t *testing.T, h *testHarness, eng *exchange.Engine, seller, 
 		t.Fatalf("DispatchForTest buy: %v", err)
 	}
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
-	matchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	matchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(matchMsgs) == 0 {
 		t.Fatal("no match message emitted for the v2 entry")
 	}
@@ -207,7 +207,7 @@ func driveV2Deliver(t *testing.T, h *testHarness, eng *exchange.Engine, seller, 
 		[]string{matchRec.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Operator deliver trigger — with a DECOY buyer field that must be ignored.
@@ -224,7 +224,7 @@ func driveV2Deliver(t *testing.T, h *testHarness, eng *exchange.Engine, seller, 
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	return deliverTrigger, entryID, cek
 }
@@ -233,7 +233,7 @@ func driveV2Deliver(t *testing.T, h *testHarness, eng *exchange.Engine, seller, 
 // key_wrap (the §3.4 confidential shape), parsed. Nil if none was emitted.
 func findV2DeliverPayload(t *testing.T, h *testHarness) *v2DeliverPayload {
 	t.Helper()
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagPhasePrefix + exchange.SettlePhaseStrDeliver},
 	})
 	for i := range msgs {

@@ -63,7 +63,7 @@ func TestShim_AddMessageAndListMessages(t *testing.T) {
 	if n != 1 {
 		t.Errorf("AddMessage returned %d, want 1", n)
 	}
-	got, err := s.ListMessages("cf1", 0)
+	got, err := s.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -72,35 +72,35 @@ func TestShim_AddMessageAndListMessages(t *testing.T) {
 	}
 }
 
-// TestShim_ListMessages_CampfireFilter verifies cfID scoping: a non-empty cfID
-// matches only that campfire; "" matches all.
-func TestShim_ListMessages_CampfireFilter(t *testing.T) {
+// TestShim_ListMessages_ReturnsEveryRecordRegardlessOfCampfireID replaces
+// TestShim_ListMessages_CampfireFilter, which verified a capability that
+// dontguess-ab6 deliberately removed.
+//
+// The old cfID scoping is gone: campfire is retired, the stored value was
+// vestigial ("local" or "" across the whole live log), and this method had zero
+// non-test callers, so the filter never ran in production. What still matters —
+// and is what this test now guards — is that removing the filter did not make
+// ListMessages DROP anything: every record comes back whatever its historical
+// CampfireID says, including the mixed values already on disk.
+func TestShim_ListMessages_ReturnsEveryRecordRegardlessOfCampfireID(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
 	for _, r := range []store.MessageRecord{
 		rec("a", "cf1", 10),
 		rec("b", "cf2", 11),
-		rec("c", "cf1", 12),
+		rec("c", "", 12), // the shape new records now have
 	} {
 		if _, err := s.AddMessage(r); err != nil {
 			t.Fatalf("AddMessage %s: %v", r.ID, err)
 		}
 	}
 
-	cf1, err := s.ListMessages("cf1", 0)
+	all, err := s.ListMessages(0)
 	if err != nil {
-		t.Fatalf("ListMessages cf1: %v", err)
-	}
-	if got := ids(cf1); got != "a,c" {
-		t.Errorf("cf1 ids = %q, want %q", got, "a,c")
-	}
-
-	all, err := s.ListMessages("", 0)
-	if err != nil {
-		t.Fatalf("ListMessages all: %v", err)
+		t.Fatalf("ListMessages: %v", err)
 	}
 	if got := ids(all); got != "a,b,c" {
-		t.Errorf("all ids = %q, want %q", got, "a,b,c")
+		t.Errorf("ids = %q, want %q — a record must never be filtered out by its historical CampfireID", got, "a,b,c")
 	}
 }
 
@@ -120,7 +120,7 @@ func TestShim_ListMessages_SinceIsExclusive(t *testing.T) {
 	}
 
 	// since == 20 must EXCLUDE the record at exactly 20 and include only 30.
-	got, err := s.ListMessages("cf1", 20)
+	got, err := s.ListMessages(20)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestShim_ListMessages_SinceIsExclusive(t *testing.T) {
 	}
 
 	// since == 0 returns everything (all timestamps > 0).
-	all, _ := s.ListMessages("cf1", 0)
+	all, _ := s.ListMessages(0)
 	if g := ids(all); g != "a,b,c" {
 		t.Errorf("since=0 ids = %q, want %q", g, "a,b,c")
 	}
@@ -152,7 +152,7 @@ func TestShim_ListMessages_TagOrMatch(t *testing.T) {
 	}
 
 	// Single tag: only records carrying exchange:match (OR against their tag set).
-	match, err := s.ListMessages("cf1", 0, store.MessageFilter{Tags: []string{"exchange:match"}})
+	match, err := s.ListMessages(0, store.MessageFilter{Tags: []string{"exchange:match"}})
 	if err != nil {
 		t.Fatalf("ListMessages match: %v", err)
 	}
@@ -161,19 +161,19 @@ func TestShim_ListMessages_TagOrMatch(t *testing.T) {
 	}
 
 	// Multi-tag OR: put OR settle.
-	orRes, _ := s.ListMessages("cf1", 0, store.MessageFilter{Tags: []string{"exchange:put", "exchange:settle"}})
+	orRes, _ := s.ListMessages(0, store.MessageFilter{Tags: []string{"exchange:put", "exchange:settle"}})
 	if g := ids(orRes); g != "a,d" {
 		t.Errorf("tag OR ids = %q, want %q", g, "a,d")
 	}
 
 	// Case-insensitive match, matching campfire's LOWER() comparison.
-	ci, _ := s.ListMessages("cf1", 0, store.MessageFilter{Tags: []string{"EXCHANGE:MATCH"}})
+	ci, _ := s.ListMessages(0, store.MessageFilter{Tags: []string{"EXCHANGE:MATCH"}})
 	if g := ids(ci); g != "b,c" {
 		t.Errorf("case-insensitive tag ids = %q, want %q", g, "b,c")
 	}
 
 	// Empty Tags disables tag filtering.
-	none, _ := s.ListMessages("cf1", 0, store.MessageFilter{Tags: nil})
+	none, _ := s.ListMessages(0, store.MessageFilter{Tags: nil})
 	if g := ids(none); g != "a,b,c,d" {
 		t.Errorf("empty-tags ids = %q, want %q", g, "a,b,c,d")
 	}
@@ -196,7 +196,7 @@ func TestShim_ListMessages_OrderStableByTimestamp(t *testing.T) {
 			t.Fatalf("AddMessage %s: %v", r.ID, err)
 		}
 	}
-	got, _ := s.ListMessages("cf1", 0)
+	got, _ := s.ListMessages(0)
 	// Ascending timestamp; the ts=10 tie keeps append order x,y.
 	if g := ids(got); g != "x,y,mid,late" {
 		t.Errorf("order ids = %q, want %q", g, "x,y,mid,late")
@@ -216,7 +216,7 @@ func TestShim_ListMessages_OnlyFirstFilterApplied(t *testing.T) {
 			t.Fatalf("AddMessage %s: %v", r.ID, err)
 		}
 	}
-	got, _ := s.ListMessages("cf1", 0,
+	got, _ := s.ListMessages(0,
 		store.MessageFilter{Tags: []string{"exchange:put"}},
 		store.MessageFilter{Tags: []string{"exchange:match"}},
 	)

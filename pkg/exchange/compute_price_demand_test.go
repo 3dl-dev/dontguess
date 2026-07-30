@@ -73,7 +73,7 @@ func completeBuyTransactionForBuyer(
 	// DispatchForTest(buy) calls handleBuy synchronously: emits the match message
 	// to the store and applies it to engine state inline (matchToBuyer/matchToEntry
 	// are populated before this call returns).
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(buyRec)); err != nil {
 		t.Fatalf("completeBuyTransactionForBuyer: DispatchForTest(buy): %v", err)
 	}
@@ -82,7 +82,7 @@ func completeBuyTransactionForBuyer(
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMsgs) {
 			break
 		}
@@ -155,7 +155,7 @@ func completeBuyTransactionForBuyer(
 	)
 
 	// Rebuild state from the full message log to reflect this completed transaction.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 }
 
@@ -213,7 +213,7 @@ func seedDemandEntry(t *testing.T, h *testHarness, eng *exchange.Engine) (entryI
 		nil,
 	)
 
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	if err := eng.AutoAcceptPut(putMsg.ID, putPrice, time.Now().Add(72*time.Hour)); err != nil {

@@ -276,7 +276,7 @@ func TestDemandOnly_WhitespaceCaseVariantsCollapse(t *testing.T) {
 	}
 
 	// (D1 invariant re-asserted — finding e) ZERO scrip moved; price/demand unmoved.
-	scripMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
+	scripMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripBuyHold}})
 	if len(scripMsgs) != 0 {
 		t.Fatalf("demand-only registration moved scrip: %d scrip-buy-hold messages, want 0", len(scripMsgs))
 	}
@@ -331,13 +331,13 @@ func TestBuyMiss_FundedOfferMatchesWhitespaceCaseVariantPut(t *testing.T) {
 	// engine-set standing offer) so pendingPuts holds it for handlePut.
 	eng.State().Apply(exchange.FromStoreRecord(putRec))
 
-	preSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preSettle, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	if err := eng.DispatchForTest(exchange.FromStoreRecord(putRec)); err != nil {
 		t.Fatalf("DispatchForTest put: %v", err)
 	}
 
 	// A put-accept must have been emitted → the variant put matched the offer.
-	postSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postSettle, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	var putAccept *store.MessageRecord
 	for i := range postSettle {
 		for _, tag := range postSettle[i].Tags {

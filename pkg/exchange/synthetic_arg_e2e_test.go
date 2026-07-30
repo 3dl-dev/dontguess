@@ -68,7 +68,7 @@ func TestSyntheticArg_BuyWithFlag_TagsResponse(t *testing.T) {
 	h := newTestHarness(t)
 	eng := h.newEngine()
 
-	existing, err := h.st.ListMessages(h.cfID, 0)
+	existing, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages for replay: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestSyntheticArg_BuyWithFlag_TagsResponse(t *testing.T) {
 	}
 
 	// Read buy-miss responses and find the one for our buy.
-	allMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagBuyMiss},
 	})
 	if err != nil {
@@ -132,7 +132,7 @@ func TestSyntheticArg_BuyWithoutFlag_NoTag(t *testing.T) {
 	h := newTestHarness(t)
 	eng := h.newEngine()
 
-	existing, err := h.st.ListMessages(h.cfID, 0)
+	existing, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages for replay: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestSyntheticArg_BuyWithoutFlag_NoTag(t *testing.T) {
 		t.Fatalf("dispatch buy{no synthetic}: %v", err)
 	}
 
-	allMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagBuyMiss},
 	})
 	if err != nil {
@@ -192,7 +192,7 @@ func TestSyntheticArg_PutWithFlag_TagsResponse(t *testing.T) {
 	h := newTestHarness(t)
 	eng := h.newEngine()
 
-	existing, err := h.st.ListMessages(h.cfID, 0)
+	existing, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages for replay: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestSyntheticArg_PutWithFlag_TagsResponse(t *testing.T) {
 	}
 
 	// Step 3: find the put-accept settle and assert exchange:synthetic.
-	settleMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	settleMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagSettle},
 	})
 	if err != nil {
@@ -263,7 +263,7 @@ func TestSyntheticArg_PutWithoutFlag_NoTag(t *testing.T) {
 	h := newTestHarness(t)
 	eng := h.newEngine()
 
-	existing, err := h.st.ListMessages(h.cfID, 0)
+	existing, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages for replay: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestSyntheticArg_PutWithoutFlag_NoTag(t *testing.T) {
 	}
 
 	// Step 3: find the put-accept settle and assert NO exchange:synthetic.
-	settleMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	settleMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagSettle},
 	})
 	if err != nil {

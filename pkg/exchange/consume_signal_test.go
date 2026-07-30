@@ -42,7 +42,7 @@ func TestConsumeSignal_RecordedAndQueryablePerEntry(t *testing.T) {
 	)
 
 	// Replay to pick up the put, then auto-accept.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestConsumeSignal_RecordedAndQueryablePerEntry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	preMatchMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatchMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	// Await the engine goroutine's exit after cancel (below) before Step 5 sends
 	// the settle(complete) and dispatches it explicitly. Without this wait the
 	// step-2 poll loop lingers and can ALSO ingest+dispatch the complete message
@@ -82,7 +82,7 @@ func TestConsumeSignal_RecordedAndQueryablePerEntry(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMatchMsgs) {
 			break
 		}
@@ -111,7 +111,7 @@ func TestConsumeSignal_RecordedAndQueryablePerEntry(t *testing.T) {
 	}
 
 	// Re-sync state.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Step 3: Buyer sends buyer-accept ---
@@ -129,7 +129,7 @@ func TestConsumeSignal_RecordedAndQueryablePerEntry(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Step 4: Operator delivers content ---
@@ -147,12 +147,12 @@ func TestConsumeSignal_RecordedAndQueryablePerEntry(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// --- Step 5: Buyer completes (the consume event) ---
 	// Record consume-message count before sending complete.
-	preConsumeMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
+	preConsumeMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
 	preConsumeCount := len(preConsumeMsgs)
 
 	completePayload, _ := json.Marshal(map[string]any{
@@ -170,7 +170,7 @@ func TestConsumeSignal_RecordedAndQueryablePerEntry(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Dispatch the complete message through the engine to trigger emitConsumeSignal.
@@ -180,7 +180,7 @@ func TestConsumeSignal_RecordedAndQueryablePerEntry(t *testing.T) {
 	}
 
 	// --- Assertion 1: exchange:consume message was emitted ---
-	postConsumeMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
+	postConsumeMsgs, err := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagConsume}})
 	if err != nil {
 		t.Fatalf("listing consume messages: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestConsumeSignal_LiveStateReflectedWithoutReplay(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	if err := eng.AutoAcceptPut(putMsg.ID, 8400, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut: %v", err)
@@ -307,7 +307,7 @@ func TestConsumeSignal_LiveStateReflectedWithoutReplay(t *testing.T) {
 		[]string{buyMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	buyerAcceptPayload, _ := json.Marshal(map[string]any{
@@ -323,7 +323,7 @@ func TestConsumeSignal_LiveStateReflectedWithoutReplay(t *testing.T) {
 		[]string{matchMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	deliverPayload, _ := json.Marshal(map[string]any{
@@ -339,7 +339,7 @@ func TestConsumeSignal_LiveStateReflectedWithoutReplay(t *testing.T) {
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ = h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ = h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// Verify live state has NO consume signal yet.

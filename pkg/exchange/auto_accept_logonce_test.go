@@ -67,7 +67,7 @@ func sendUnderCapPut(t *testing.T, h *testHarness, desc string, tokenCost int64)
 // replayAll replays all campfire messages into the engine state.
 func replayAll(t *testing.T, h *testHarness, eng *exchange.Engine) {
 	t.Helper()
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestAutoAccept_Prune(t *testing.T) {
 	logBuf.Reset()
 	putID2 := sendOverCapPut(t, h, "prune-test result 2", overCapCost)
 	// Force replay to pick up new put.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}

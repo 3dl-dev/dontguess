@@ -95,23 +95,23 @@ func (s *Store) GetMessage(id string) (*MessageRecord, error) {
 	return nil, nil
 }
 
-// ListMessages returns the records for campfireID whose Timestamp is strictly
-// greater than since, optionally tag-filtered, ordered by Timestamp ascending.
-// It reproduces the exact semantics of the campfire store's ListMessages that
-// the exchange tests depend on:
+// ListMessages returns records whose Timestamp is strictly greater than since,
+// optionally tag-filtered, ordered by Timestamp ascending.
 //
-//   - campfireID == "" matches every campfire; otherwise records must match
-//     campfireID exactly.
 //   - since is an exclusive lower bound: only records with Timestamp > since
-//     are returned (campfire uses `timestamp > afterTimestamp`).
-//   - filters is variadic but only the first filter is applied, exactly like
-//     campfire (which reads filter[0]). Within that filter, Tags uses OR
-//     semantics (a record matches if it carries any listed tag,
-//     case-insensitive); an empty Tags disables tag filtering.
+//     are returned.
+//   - filters is variadic but only the first filter is applied. Within that
+//     filter, Tags uses OR semantics (a record matches if it carries any listed
+//     tag, case-insensitive); an empty Tags disables tag filtering.
 //   - results are ordered by Timestamp ascending; ties preserve append order
-//     (stable sort), matching campfire's `ORDER BY timestamp` over an
-//     insertion-ordered table.
-func (s *Store) ListMessages(campfireID string, since int64, filters ...MessageFilter) ([]MessageRecord, error) {
+//     (stable sort).
+//
+// The leading campfireID parameter was removed in dontguess-ab6. Campfire is
+// retired and the value was vestigial: across the live log it held only "local"
+// and "", and this method — its sole consumer — had zero non-test callers, so
+// the filter never ran in production. Keeping it meant every caller had to
+// invent a campfire id to pass.
+func (s *Store) ListMessages(since int64, filters ...MessageFilter) ([]MessageRecord, error) {
 	recs, err := s.ReadAll()
 	if err != nil {
 		return nil, err
@@ -122,9 +122,6 @@ func (s *Store) ListMessages(campfireID string, since int64, filters ...MessageF
 	}
 	out := make([]MessageRecord, 0, len(recs))
 	for _, r := range recs {
-		if campfireID != "" && r.CampfireID != campfireID {
-			continue
-		}
 		if r.Timestamp <= since {
 			continue
 		}

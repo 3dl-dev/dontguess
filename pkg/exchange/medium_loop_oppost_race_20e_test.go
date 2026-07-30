@@ -68,7 +68,7 @@ func seedAcceptedEntryNoAssign(t *testing.T, h *testHarness, eng *exchange.Engin
 		},
 		[]string{putMsg.ID},
 	)
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("seedAcceptedEntryNoAssign: listing messages: %v", err)
 	}

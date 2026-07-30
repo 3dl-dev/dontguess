@@ -82,7 +82,7 @@ func buildHighReuseSettleChain(
 		t.Fatalf("buildHighReuseSettleChain: Replay: %v", err)
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -124,7 +124,7 @@ func buildHighReuseSettleChain(
 		[]string{buyerAcceptMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	return res, deliverMsg, salePrice
@@ -179,7 +179,7 @@ func TestSettle_HighReuseResidualIs20Pct(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	rec, err := h.st.GetMessage(completeMsg.ID)
@@ -270,7 +270,7 @@ func TestSettle_StandardResidualIs10Pct(t *testing.T) {
 		[]string{deliverMsg.ID},
 	)
 
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	rec, err := h.st.GetMessage(completeMsg.ID)

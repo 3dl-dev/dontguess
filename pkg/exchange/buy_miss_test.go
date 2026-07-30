@@ -40,7 +40,7 @@ func TestBuyMiss_EmitsBuyMissWhenNoInventory(t *testing.T) {
 	)
 
 	// Count existing match-tagged messages before engine runs.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	preCount := len(preMsgs)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -52,7 +52,7 @@ func TestBuyMiss_EmitsBuyMissWhenNoInventory(t *testing.T) {
 	var buyMissMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		buyMissMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+		buyMissMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 		if len(buyMissMsgs) > preCount {
 			break
 		}
@@ -138,7 +138,7 @@ func TestBuyMiss_NoDuplicateOffer(t *testing.T) {
 	// Wait for two buy-miss messages.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 		if len(msgs) >= 2 {
 			break
 		}
@@ -190,7 +190,7 @@ func TestBuyMiss_StandingOfferE2E(t *testing.T) {
 		nil,
 	)
 
-	preBuyMiss, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	preBuyMiss, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -201,7 +201,7 @@ func TestBuyMiss_StandingOfferE2E(t *testing.T) {
 	var buyMissMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		buyMissMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+		buyMissMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 		if len(buyMissMsgs) > len(preBuyMiss) {
 			break
 		}
@@ -234,14 +234,14 @@ func TestBuyMiss_StandingOfferE2E(t *testing.T) {
 	// ------------------------------------------------------------------
 	// Step 3: Wait for auto-accept (put-accept message in the log).
 	// ------------------------------------------------------------------
-	preSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	preSettle, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagSettle},
 	})
 
 	var settleMsgs []store.MessageRecord
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		settleMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		settleMsgs, _ = h.st.ListMessages(0, store.MessageFilter{
 			Tags: []string{exchange.TagSettle},
 		})
 		if len(settleMsgs) > len(preSettle) {
@@ -295,7 +295,7 @@ func TestBuyMiss_StandingOfferE2E(t *testing.T) {
 	// Step 4: Inventory must contain the newly accepted entry.
 	// ------------------------------------------------------------------
 	// Replay state to pick up the auto-accept.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	inv := eng.State().Inventory()
@@ -316,7 +316,7 @@ func TestBuyMiss_StandingOfferE2E(t *testing.T) {
 	// ------------------------------------------------------------------
 	// Step 5: Putter receives scrip (scrip-put-pay message in log).
 	// ------------------------------------------------------------------
-	putPayMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	putPayMsgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{scrip.TagScripPutPay},
 	})
 	if len(putPayMsgs) == 0 {
@@ -398,7 +398,7 @@ func TestBuyMiss_OfferExpiry(t *testing.T) {
 		[]string{exchange.TagPut},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	rec, _ := h.st.GetMessage(putMsg.ID)
@@ -411,7 +411,7 @@ func TestBuyMiss_OfferExpiry(t *testing.T) {
 	}
 
 	// No settle messages should have been emitted.
-	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	settleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	for _, sm := range settleMsgs {
 		for _, tag := range sm.Tags {
 			if tag == "exchange:phase:put-accept" {
@@ -442,7 +442,7 @@ func TestBuyMiss_ThirdPartyFulfillerAccepted(t *testing.T) {
 	eng := h.newEngine()
 
 	// Replay the initial exchange bootstrap messages.
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// Inject a standing offer associating the task with h.buyer as the buyer.
@@ -476,7 +476,7 @@ func TestBuyMiss_ThirdPartyFulfillerAccepted(t *testing.T) {
 	}
 
 	// A put-accept settle MUST have been emitted for the third-party fulfiller.
-	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	settleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	var putAcceptMsg *store.MessageRecord
 	for i := range settleMsgs {
 		if hasTag(settleMsgs[i].Tags, "exchange:phase:put-accept") {
@@ -535,7 +535,7 @@ func TestBuyMiss_ClaimedOfferRejectsSecondFulfillment(t *testing.T) {
 
 	// Replay existing (empty) state, then inject a live funded standing offer
 	// as if handleBuyMiss had already created it for h.buyer.
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 	offer := &exchange.BuyMissOffer{
 		TaskHash:  taskHash,
@@ -612,7 +612,7 @@ func TestBuyMiss_ClaimedOfferRejectsSecondFulfillment(t *testing.T) {
 	}
 
 	// No second exchange:buy-miss-tagged put-accept must exist for the second put.
-	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	settleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	for _, sm := range settleMsgs {
 		if hasTag(sm.Tags, exchange.TagBuyMiss) && hasTag(sm.Tags, "exchange:phase:put-accept") {
 			// Antecedent must be the FIRST put, never the second — confirms only
@@ -656,7 +656,7 @@ func TestBuyMiss_TokenCostCapped(t *testing.T) {
 
 	// Replay existing state then inject the standing offer. Use Apply (not Replay)
 	// for subsequent messages to preserve the injected offer in state.
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// Inject a standing offer for the buyer.
@@ -669,7 +669,7 @@ func TestBuyMiss_TokenCostCapped(t *testing.T) {
 	}
 	eng.State().SetBuyMissOffer(offer)
 
-	preSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preSettle, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 
 	// Buyer puts with an inflated token_cost (100× above the operator cap).
 	// Content size = 2× inflatedCost bytes so the put passes applyPut's content-size
@@ -695,7 +695,7 @@ func TestBuyMiss_TokenCostCapped(t *testing.T) {
 	}
 
 	// Find the put-accept message.
-	postSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	postSettle, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	var putAcceptMsg *store.MessageRecord
 	for i := range postSettle {
 		alreadySeen := false
@@ -746,7 +746,7 @@ func TestBuyMiss_NoContentRejected(t *testing.T) {
 	eng := h.newEngine()
 
 	// Replay existing state.
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// Inject a standing offer for the buyer.
@@ -787,7 +787,7 @@ func TestBuyMiss_NoContentRejected(t *testing.T) {
 	}
 
 	// No put-accept must have been emitted — the buy-miss offer must not be fulfilled.
-	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	settleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	for _, sm := range settleMsgs {
 		if hasTag(sm.Tags, "exchange:phase:put-accept") {
 			t.Errorf("unexpected put-accept emitted for put with no content: msg %s", sm.ID)
@@ -811,7 +811,7 @@ func TestBuyMiss_ExpiredOfferSkipped(t *testing.T) {
 	eng := h.newEngine()
 
 	// Replay existing state.
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// Inject an already-expired offer.
@@ -855,7 +855,7 @@ func TestBuyMiss_ExpiredOfferSkipped(t *testing.T) {
 	}
 
 	// No put-accept must have been emitted.
-	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	settleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	for _, sm := range settleMsgs {
 		if hasTag(sm.Tags, "exchange:phase:put-accept") {
 			t.Errorf("unexpected put-accept emitted for expired offer: msg %s", sm.ID)
@@ -1145,7 +1145,7 @@ func TestBuyMiss_AutoAcceptEmitsCompressionAssign(t *testing.T) {
 	eng := h.newEngine()
 
 	// Replay current state (empty).
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	// Inject a standing buy-miss offer for the seller (seller will do the work).
@@ -1177,7 +1177,7 @@ func TestBuyMiss_AutoAcceptEmitsCompressionAssign(t *testing.T) {
 	}
 
 	// Verify a compression assign was emitted.
-	assignMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	assignMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 	var compressionAssign *store.MessageRecord
 	for i := range assignMsgs {
 		var p struct {
@@ -1244,7 +1244,7 @@ func TestBuyMiss_AutoAcceptEmitsHotCompressionAssignToSeller(t *testing.T) {
 		nil,
 	)
 
-	preBuyMiss, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	preBuyMiss, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	h.startEngine(eng, ctx, cancel)
@@ -1253,7 +1253,7 @@ func TestBuyMiss_AutoAcceptEmitsHotCompressionAssignToSeller(t *testing.T) {
 	var buyMissMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		buyMissMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+		buyMissMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 		if len(buyMissMsgs) > len(preBuyMiss) {
 			break
 		}
@@ -1267,7 +1267,7 @@ func TestBuyMiss_AutoAcceptEmitsHotCompressionAssignToSeller(t *testing.T) {
 	// Step 2: Seller puts the result matching the buy-miss task description.
 	// The sender must match the BuyerKey of the standing offer (h.seller).
 	// -----------------------------------------------------------------------
-	preAssigns, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+	preAssigns, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 	preAssignCount := len(preAssigns)
 
 	// h.seller sends the put — matches BuyerKey so the engine auto-accepts.
@@ -1283,7 +1283,7 @@ func TestBuyMiss_AutoAcceptEmitsHotCompressionAssignToSeller(t *testing.T) {
 	var assignMsgs []store.MessageRecord
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		assignMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
+		assignMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagAssign}})
 		// Look for a new assign with task_type="compress" for this put entry.
 		var found bool
 		for i := range assignMsgs {
@@ -1417,7 +1417,7 @@ func TestBuyMiss_SellerBalanceAfterStandingOfferFulfillment(t *testing.T) {
 		nil,
 	)
 
-	preBuyMiss, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	preBuyMiss, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1427,13 +1427,13 @@ func TestBuyMiss_SellerBalanceAfterStandingOfferFulfillment(t *testing.T) {
 	// Wait for the buy-miss offer to appear.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 		if len(msgs) > len(preBuyMiss) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	buyMissMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
+	buyMissMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagBuyMiss}})
 	if len(buyMissMsgs) <= len(preBuyMiss) {
 		cancel()
 		t.Fatal("step 1: no buy-miss offer emitted")
@@ -1447,10 +1447,10 @@ func TestBuyMiss_SellerBalanceAfterStandingOfferFulfillment(t *testing.T) {
 	)
 
 	// Step 3: Wait for the put-accept settle message.
-	preSettle, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	preSettle, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+		msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 		if len(msgs) > len(preSettle) {
 			break
 		}
@@ -1472,7 +1472,7 @@ func TestBuyMiss_SellerBalanceAfterStandingOfferFulfillment(t *testing.T) {
 	}
 	cancel()
 
-	settleMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
+	settleMsgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagSettle}})
 	if len(settleMsgs) <= len(preSettle) {
 		t.Fatal("step 3: no put-accept settle message emitted")
 	}

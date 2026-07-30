@@ -39,7 +39,7 @@ func TestLocalStore_FoldsIdenticallyToCampfireStore(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestLocalStore_FoldsIdenticallyToCampfireStore(t *testing.T) {
 	eng.State().Apply(exchange.FromStoreRecord(buyRec))
 
 	// --- run the engine so it emits a real match message ---
-	preMatch, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	preMatch, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	done := make(chan struct{})
 	go func() {
@@ -78,7 +78,7 @@ func TestLocalStore_FoldsIdenticallyToCampfireStore(t *testing.T) {
 	var matchMsgs []store.MessageRecord
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		matchMsgs, _ = h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+		matchMsgs, _ = h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 		if len(matchMsgs) > len(preMatch) {
 			break
 		}
@@ -91,7 +91,7 @@ func TestLocalStore_FoldsIdenticallyToCampfireStore(t *testing.T) {
 	}
 
 	// --- Canonical message log: everything the campfire store recorded. ---
-	allMsgs, err := h.st.ListMessages(h.cfID, 0)
+	allMsgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing all messages: %v", err)
 	}

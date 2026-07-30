@@ -68,7 +68,7 @@ func TestApplyPut_OversizeContentOffloadedToBlossom(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	pending := eng.State().PendingPuts()
@@ -135,7 +135,7 @@ func TestApplyPut_OversizeContentWithoutBlobStoreStaysInline(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	pending := eng.State().PendingPuts()
@@ -166,7 +166,7 @@ func TestApplyPut_SmallContentNeverOffloadedEvenWithBlobStore(t *testing.T) {
 		[]string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
 		nil,
 	)
-	msgs, _ := h.st.ListMessages(h.cfID, 0)
+	msgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(msgs))
 
 	pending := eng.State().PendingPuts()

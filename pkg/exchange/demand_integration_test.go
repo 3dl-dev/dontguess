@@ -40,7 +40,7 @@ func TestDemand_Integration(t *testing.T) {
 	eng := h.newEngine()
 
 	// Replay existing state (convention declarations etc. from Init).
-	existing, err := h.st.ListMessages(h.cfID, 0)
+	existing, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages for replay: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestDemand_Integration(t *testing.T) {
 	}
 
 	// Read exchange:buy-miss messages from the store — the production read path.
-	allMsgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	allMsgs, err := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagBuyMiss},
 	})
 	if err != nil {

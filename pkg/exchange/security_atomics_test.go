@@ -183,7 +183,7 @@ func TestAssignAccept_NoBountyOnReplay(t *testing.T) {
 	)
 
 	// Replay state to materialize the lifecycle up to AssignCompleted.
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 
 	// 4. First accept — write to store, replay state (transitions to AssignAccepted),

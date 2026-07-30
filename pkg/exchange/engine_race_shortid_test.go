@@ -91,7 +91,7 @@ func TestEngine_AutoAcceptAndRejectPut_NoDoubleAccept(t *testing.T) {
 
 	// Count settle put-accept messages for this put.
 	// Must be exactly 0 or 1 — never > 1.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestRunAutoAccept_ShortPutMsgID(t *testing.T) {
 	}
 
 	// Replay messages into engine state so the put appears as pending.
-	stMsgs, err := h.st.ListMessages(h.cfID, 0)
+	stMsgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}

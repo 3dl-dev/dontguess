@@ -69,7 +69,7 @@ func waitForMatchCount(t *testing.T, h *testHarness, preExisting int, wantCount 
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		msgs, err := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+		msgs, err := h.st.ListMessages(0, store.MessageFilter{
 			Tags: []string{exchange.TagMatch},
 		})
 		if err != nil {
@@ -80,7 +80,7 @@ func waitForMatchCount(t *testing.T, h *testHarness, preExisting int, wantCount 
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	return msgs
@@ -122,7 +122,7 @@ func TestEngine_TierFilter_OnlyMatchingTierIsCandidate(t *testing.T) {
 	)
 
 	// Replay and accept all three puts.
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestEngine_TierFilter_OnlyMatchingTierIsCandidate(t *testing.T) {
 	}
 
 	// Count pre-existing match messages.
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	preMatchCount := len(preMsgs)
@@ -242,7 +242,7 @@ func TestEngine_TierFilter_Absent_MatchesAll(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestEngine_TierFilter_Absent_MatchesAll(t *testing.T) {
 		t.Fatalf("expected 3 inventory entries, got %d", len(inv))
 	}
 
-	preMsgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{
+	preMsgs, _ := h.st.ListMessages(0, store.MessageFilter{
 		Tags: []string{exchange.TagMatch},
 	})
 	preMatchCount := len(preMsgs)
@@ -340,7 +340,7 @@ func TestEngine_TierFilter_InvalidTierOnPut_DroppedToEmpty(t *testing.T) {
 		nil,
 	)
 
-	msgs, err := h.st.ListMessages(h.cfID, 0)
+	msgs, err := h.st.ListMessages(0)
 	if err != nil {
 		t.Fatalf("listing messages: %v", err)
 	}

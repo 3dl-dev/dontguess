@@ -38,7 +38,7 @@ import (
 // dispatch) for a single message.
 func replayAndDispatch(t *testing.T, h *testHarness, eng *exchange.Engine, msg *exchange.Message) error {
 	t.Helper()
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	rec, err := h.st.GetMessage(msg.ID)
 	if err != nil {
@@ -49,14 +49,14 @@ func replayAndDispatch(t *testing.T, h *testHarness, eng *exchange.Engine, msg *
 
 func countScripSettle(t *testing.T, h *testHarness) int {
 	t.Helper()
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{scrip.TagScripSettle}})
 	return len(msgs)
 }
 
 // lastMatchID returns the message ID of the most-recent exchange:match message.
 func lastMatchID(t *testing.T, h *testHarness) string {
 	t.Helper()
-	msgs, _ := h.st.ListMessages(h.cfID, 0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
+	msgs, _ := h.st.ListMessages(0, store.MessageFilter{Tags: []string{exchange.TagMatch}})
 	if len(msgs) == 0 {
 		t.Fatal("no match message on log")
 	}
@@ -346,7 +346,7 @@ func TestHoldEmitFailure_DoesNotMint(t *testing.T) {
 	// closing the store; the only store access left in the buyer-accept dispatch
 	// is the scrip-buy-hold emit (an Append), which we want to fail.
 	acceptMsg := sendBuyerAcceptForMatch(t, h, h.buyer, matchID, entry.EntryID)
-	allMsgs, _ := h.st.ListMessages(h.cfID, 0)
+	allMsgs, _ := h.st.ListMessages(0)
 	eng.State().Replay(exchange.FromStoreRecords(allMsgs))
 	acceptRec, err := h.st.GetMessage(acceptMsg.ID)
 	if err != nil {
