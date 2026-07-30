@@ -27,7 +27,6 @@ func TestEngine_FederationGuardWarning(t *testing.T) {
 	warned := make(chan struct{}, 1)
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:             h.cfID,
 		LocalStore:             h.st,
 		OperatorPublicKey:      h.operator.pubKeyHex,
 		BrokeredMatchMode:      true,
@@ -82,7 +81,6 @@ func TestEngine_FederationGuardNoWarning(t *testing.T) {
 			var logs []string
 
 			eng := exchange.NewEngine(exchange.EngineOptions{
-				CampfireID:             h.cfID,
 				LocalStore:             h.st,
 				OperatorPublicKey:      h.operator.pubKeyHex,
 				BrokeredMatchMode:      tc.brokeredMatchMode,

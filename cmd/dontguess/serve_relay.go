@@ -1,7 +1,7 @@
 package main
 
 // serve_relay.go is the M2 WIRING KEYSTONE (dontguess-4bd): it composes the
-// merged pkg/relay single-relay transport around the campfire-free local
+// merged pkg/relay single-relay transport around the local
 // exchange engine (WriteClient=nil + LocalStore set). It is the integration
 // boundary where the Intake (subscribe leg), the Outbox (publish leg), the
 // shared Sequencer, and the operator's local fold compose into one operator

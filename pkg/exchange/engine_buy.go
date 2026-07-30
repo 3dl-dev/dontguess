@@ -13,7 +13,7 @@ import (
 
 // handleBuy responds to an exchange:buy request with an exchange:match message.
 //
-// The buy message is sent as a campfire future (--future). The engine responds
+// The buy message is sent as a future (--future). The engine responds
 // with --fulfills <buy-msg-id> to complete the future.
 //
 // If ScripStore is configured, the buyer's scrip balance is pre-decremented
@@ -21,7 +21,7 @@ import (
 // the buy is rejected with ErrBudgetExceeded and no match is emitted.
 func (e *Engine) handleBuy(msg *Message) error {
 	// Guard: if this order was already matched (a match message exists in the
-	// campfire log for this buy), return immediately. This prevents
+	// event log for this buy), return immediately. This prevents
 	// double-dispatch on engine restart when a buy message is re-applied via
 	// poll after the corresponding match was already written to the log during
 	// a previous run (fix for dontguess-vd0 / dontguess-bf0).
@@ -470,7 +470,7 @@ func (e *Engine) emitMatchResponse(msg *Message, task string, semanticMatches []
 // handleBuyMiss handles the zero-match path for a buy request.
 //
 // It records a standing buy-miss offer in state and emits an exchange:buy-miss
-// message back to the campfire (fulfilling the buy future) with:
+// message back to the buyer (fulfilling the buy future) with:
 //   - offered_price_rate: BuyMissOfferRate (70% of token_cost)
 //   - task_hash: SHA-256 of the task description
 //   - expires_at: now + BuyMissOfferTTL

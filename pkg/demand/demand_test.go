@@ -68,10 +68,13 @@ func TestAssignCluster(t *testing.T) {
 	}{
 		{"audit test suite for untested endpoints, missing error paths, edge case gaps in ops/welcome-center-server", "audit"},
 		{"RPT review of campfire SDK surface", "review"},
-		{"campfire SDK convention declaration lifecycle", "campfire"},
+		// dontguess-ab6: the campfire cluster is removed. A task that used to land
+		// there now falls through to "other" — asserted so the removal is pinned,
+		// not merely absent.
+		{"campfire SDK convention declaration lifecycle", "other"},
 		{"convention declaration revoke/supersede authorization", "convention"},
 		{"FROST threshold key ceremony for cold wallet signing", "security"},
-		{"fix convention.Server subscribe cursor and implement warm-worker EventSink", "campfire"},
+		{"fix convention.Server subscribe cursor and implement warm-worker EventSink", "other"},
 		{"GateEvaluator pattern — which endpoints need auth gates?", "security"},
 		{"something completely unrelated to any cluster", "other"},
 		{"test-gap scan for missing test coverage in pkg/exchange", "test-gap"},
@@ -141,12 +144,12 @@ func TestBuildBacklog_ClusterAssignment(t *testing.T) {
 			t.Errorf("cluster %q count = %d, want %d", name, got[name], wantCount)
 		}
 	}
-	check("campfire", 2)
 	check("audit", 3)
 	check("convention", 1)
 	check("review", 1)
 	check("security", 1)
-	check("other", 1)
+	// dontguess-ab6: the two former campfire-cluster tasks now fall through here.
+	check("other", 3)
 }
 
 func TestBuildBacklog_SortedByCountDescending(t *testing.T) {
@@ -375,13 +378,15 @@ func TestBuildBacklog_Representative84(t *testing.T) {
 	}
 
 	wantClusters := map[string]int{
-		"campfire":   12,
 		"audit":      9,
 		"convention": 8,
 		"review":     6,
 		"security":   3,
 		"test-gap":   2,
-		"other":      otherCount,
+		// dontguess-ab6: the campfire cluster is removed, so its 12 fixture tasks
+		// now land in "other". The fixture keeps them — they are real historical
+		// misses — and the expectation moves rather than the data.
+		"other": otherCount + 12,
 	}
 	for cluster, want := range wantClusters {
 		if got[cluster] != want {

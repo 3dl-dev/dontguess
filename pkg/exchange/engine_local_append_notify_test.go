@@ -34,7 +34,6 @@ func newNotifyTestEngine(t *testing.T, onAppend func()) *Engine {
 	}
 	t.Cleanup(func() { ls.Close() }) //nolint:errcheck
 	eng := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: newReservationID(),
 		PollInterval:      time.Hour,

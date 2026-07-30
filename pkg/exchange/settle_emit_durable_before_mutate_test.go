@@ -41,7 +41,6 @@ func TestPerformScripSettlement_EmitsDurableRecordBeforeBalanceMutationFails(t *
 	// Phase 1: build the settle chain (put → accept → buy → match →
 	// buyer-accept → deliver) using a real, healthy CampfireScripStore.
 	eng1 := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -62,7 +61,6 @@ func TestPerformScripSettlement_EmitsDurableRecordBeforeBalanceMutationFails(t *
 		err:  scrip.ErrConflict,
 	}
 	eng2 := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        failStore,

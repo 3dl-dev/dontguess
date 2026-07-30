@@ -18,17 +18,16 @@ func openTestStore(t *testing.T) *store.Store {
 	return s
 }
 
-func rec(id, cfID string, ts int64, tags ...string) store.MessageRecord {
+func rec(id string, ts int64, tags ...string) store.MessageRecord {
 	if tags == nil {
 		tags = []string{}
 	}
 	return store.MessageRecord{
-		ID:         id,
-		CampfireID: cfID,
-		Sender:     "sender-" + id,
-		Payload:    []byte(`{"k":"` + id + `"}`),
-		Tags:       tags,
-		Timestamp:  ts,
+		ID:        id,
+		Sender:    "sender-" + id,
+		Payload:   []byte(`{"k":"` + id + `"}`),
+		Tags:      tags,
+		Timestamp: ts,
 	}
 }
 
@@ -56,7 +55,7 @@ func TestShim_NowNano(t *testing.T) {
 func TestShim_AddMessageAndListMessages(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	n, err := s.AddMessage(rec("a", "cf1", 10, "exchange:put"))
+	n, err := s.AddMessage(rec("a", 10, "exchange:put"))
 	if err != nil {
 		t.Fatalf("AddMessage: %v", err)
 	}
@@ -86,9 +85,9 @@ func TestShim_ListMessages_ReturnsEveryRecordRegardlessOfCampfireID(t *testing.T
 	t.Parallel()
 	s := openTestStore(t)
 	for _, r := range []store.MessageRecord{
-		rec("a", "cf1", 10),
-		rec("b", "cf2", 11),
-		rec("c", "", 12), // the shape new records now have
+		rec("a", 10),
+		rec("b", 11),
+		rec("c", 12), // the shape new records now have
 	} {
 		if _, err := s.AddMessage(r); err != nil {
 			t.Fatalf("AddMessage %s: %v", r.ID, err)
@@ -110,9 +109,9 @@ func TestShim_ListMessages_SinceIsExclusive(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
 	for _, r := range []store.MessageRecord{
-		rec("a", "cf1", 10),
-		rec("b", "cf1", 20),
-		rec("c", "cf1", 30),
+		rec("a", 10),
+		rec("b", 20),
+		rec("c", 30),
 	} {
 		if _, err := s.AddMessage(r); err != nil {
 			t.Fatalf("AddMessage %s: %v", r.ID, err)
@@ -141,10 +140,10 @@ func TestShim_ListMessages_TagOrMatch(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
 	for _, r := range []store.MessageRecord{
-		rec("a", "cf1", 10, "exchange:put"),
-		rec("b", "cf1", 11, "exchange:match"),
-		rec("c", "cf1", 12, "exchange:buy", "exchange:match"),
-		rec("d", "cf1", 13, "exchange:settle"),
+		rec("a", 10, "exchange:put"),
+		rec("b", 11, "exchange:match"),
+		rec("c", 12, "exchange:buy", "exchange:match"),
+		rec("d", 13, "exchange:settle"),
 	} {
 		if _, err := s.AddMessage(r); err != nil {
 			t.Fatalf("AddMessage %s: %v", r.ID, err)
@@ -187,10 +186,10 @@ func TestShim_ListMessages_OrderStableByTimestamp(t *testing.T) {
 	s := openTestStore(t)
 	// Append out of timestamp order, with a tie at ts=10 (x before y).
 	for _, r := range []store.MessageRecord{
-		rec("late", "cf1", 30),
-		rec("x", "cf1", 10),
-		rec("y", "cf1", 10),
-		rec("mid", "cf1", 20),
+		rec("late", 30),
+		rec("x", 10),
+		rec("y", 10),
+		rec("mid", 20),
 	} {
 		if _, err := s.AddMessage(r); err != nil {
 			t.Fatalf("AddMessage %s: %v", r.ID, err)
@@ -209,8 +208,8 @@ func TestShim_ListMessages_OnlyFirstFilterApplied(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
 	for _, r := range []store.MessageRecord{
-		rec("a", "cf1", 10, "exchange:put"),
-		rec("b", "cf1", 11, "exchange:match"),
+		rec("a", 10, "exchange:put"),
+		rec("b", 11, "exchange:match"),
 	} {
 		if _, err := s.AddMessage(r); err != nil {
 			t.Fatalf("AddMessage %s: %v", r.ID, err)
@@ -229,15 +228,15 @@ func TestShim_ListMessages_OnlyFirstFilterApplied(t *testing.T) {
 func TestShim_GetMessage(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	if _, err := s.AddMessage(rec("a", "cf1", 10, "exchange:put")); err != nil {
+	if _, err := s.AddMessage(rec("a", 10, "exchange:put")); err != nil {
 		t.Fatalf("AddMessage: %v", err)
 	}
 	got, err := s.GetMessage("a")
 	if err != nil {
 		t.Fatalf("GetMessage: %v", err)
 	}
-	if got == nil || got.ID != "a" || got.CampfireID != "cf1" {
-		t.Fatalf("GetMessage(a) = %+v, want record a", got)
+	if got == nil || got.ID != "a" {
+		t.Fatalf("GetMessage(\"a\") = %+v, want the record with ID \"a\"", got)
 	}
 
 	// Not found: nil record, nil error.

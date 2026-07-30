@@ -40,12 +40,11 @@ func injectMsg(t *testing.T, h *testHarness, tag, senderKey string) *store.Messa
 	t.Helper()
 	payload, _ := json.Marshal(map[string]any{})
 	rec := store.MessageRecord{
-		ID:         fmt.Sprintf("denial-test-%s-%s-%d", tag, senderKey, time.Now().UnixNano()),
-		CampfireID: h.cfID,
-		Sender:     senderKey,
-		Payload:    payload,
-		Tags:       []string{tag},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        fmt.Sprintf("denial-test-%s-%s-%d", tag, senderKey, time.Now().UnixNano()),
+		Sender:    senderKey,
+		Payload:   payload,
+		Tags:      []string{tag},
+		Timestamp: time.Now().UnixNano(),
 	}
 	if _, err := h.st.AddMessage(rec); err != nil {
 		t.Fatalf("AddMessage tag=%s: %v", tag, err)

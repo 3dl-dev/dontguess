@@ -40,12 +40,11 @@ func addScripMintMsg(t *testing.T, h *testHarness, agentKey string, amount int64
 		t.Fatalf("marshal scrip-mint payload: %v", err)
 	}
 	rec := store.MessageRecord{
-		ID:         fmt.Sprintf("mint-%s-%d-%d", agentKey[:8], amount, time.Now().UnixNano()),
-		CampfireID: h.cfID,
-		Sender:     h.operator.PublicKeyHex(),
-		Payload:    rawPayload,
-		Tags:       []string{"dontguess:scrip-mint"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        fmt.Sprintf("mint-%s-%d-%d", agentKey[:8], amount, time.Now().UnixNano()),
+		Sender:    h.operator.PublicKeyHex(),
+		Payload:   rawPayload,
+		Tags:      []string{"dontguess:scrip-mint"},
+		Timestamp: time.Now().UnixNano(),
 	}
 	if _, err := h.st.AddMessage(rec); err != nil {
 		t.Fatalf("AddMessage (scrip-mint): %v", err)
@@ -73,12 +72,11 @@ func addScripLoanMintMsg(t *testing.T, h *testHarness, borrowerKey, loanID strin
 		t.Fatalf("marshal scrip-loan-mint payload: %v", err)
 	}
 	rec := store.MessageRecord{
-		ID:         "loan-mint-" + loanID,
-		CampfireID: h.cfID,
-		Sender:     h.operator.PublicKeyHex(),
-		Payload:    rawPayload,
-		Tags:       []string{scrip.TagScripLoanMint},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        "loan-mint-" + loanID,
+		Sender:    h.operator.PublicKeyHex(),
+		Payload:   rawPayload,
+		Tags:      []string{scrip.TagScripLoanMint},
+		Timestamp: time.Now().UnixNano(),
 	}
 	if _, err := h.st.AddMessage(rec); err != nil {
 		t.Fatalf("AddMessage (scrip-loan-mint): %v", err)
@@ -102,7 +100,6 @@ func addScripPutPayMsg(t *testing.T, h *testHarness, putMsgID, seller string, am
 	}
 	rec := store.MessageRecord{
 		ID:          fmt.Sprintf("put-pay-%s-%d-%d", seller[:8], amount, time.Now().UnixNano()),
-		CampfireID:  h.cfID,
 		Sender:      h.operator.PublicKeyHex(),
 		Payload:     rawPayload,
 		Tags:        []string{scrip.TagScripPutPay},
@@ -224,7 +221,6 @@ func TestBuyerAccept_DecrementsScripAfterPreview(t *testing.T) {
 	// Seed one inventory entry; put_price = 5600, computed sale price = 5600*120/100 = 6720.
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -330,7 +326,6 @@ func TestBuyerAccept_InsufficientScripCoveredByCredit(t *testing.T) {
 	h := newTestHarness(t)
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -439,7 +434,6 @@ func TestSettle_AdjustsScripOnComplete(t *testing.T) {
 	h := newTestHarness(t)
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -592,7 +586,6 @@ func TestRestart_NoDoubleHoldOnBuyerAccept(t *testing.T) {
 
 	cs0 := newCampfireScripStore(t, h)
 	eng0 := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs0,
@@ -663,12 +656,11 @@ func TestRestart_NoDoubleHoldOnBuyerAccept(t *testing.T) {
 		t.Fatalf("marshal buy-hold payload: %v", err)
 	}
 	crashHoldRec := store.MessageRecord{
-		ID:         "crash-buy-hold-" + matchMsg.ID,
-		CampfireID: h.cfID,
-		Sender:     h.operator.PublicKeyHex(),
-		Payload:    buyHoldPayload,
-		Tags:       []string{scrip.TagScripBuyHold},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        "crash-buy-hold-" + matchMsg.ID,
+		Sender:    h.operator.PublicKeyHex(),
+		Payload:   buyHoldPayload,
+		Tags:      []string{scrip.TagScripBuyHold},
+		Timestamp: time.Now().UnixNano(),
 	}
 	if _, err := h.st.AddMessage(crashHoldRec); err != nil {
 		t.Fatalf("inject crash buy-hold message: %v", err)
@@ -691,7 +683,6 @@ func TestRestart_NoDoubleHoldOnBuyerAccept(t *testing.T) {
 	// which triggers handleSettleBuyerAcceptScrip.
 	// The fix: findExistingBuyerAcceptHold finds the log entry and skips DecrementBudget.
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -737,7 +728,6 @@ func TestSettle_FakeSellerKeyIgnored(t *testing.T) {
 	h := newTestHarness(t)
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -870,7 +860,6 @@ func TestEngine_AssignFullLifecycleBountyPaid(t *testing.T) {
 
 	// Build engine with the CampfireScripStore.
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs2,

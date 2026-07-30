@@ -64,7 +64,6 @@ func matchCount(t *testing.T, h *testHarness) int {
 func newSignalBoundEngine(t *testing.T, h *testHarness, cs *scrip.LocalScripStore, minBuyBalance int64) *exchange.Engine {
 	t.Helper()
 	return exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,

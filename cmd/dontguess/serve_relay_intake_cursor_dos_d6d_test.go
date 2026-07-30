@@ -88,7 +88,6 @@ func TestIntakeCursor_RejectedFutureEventDoesNotPoison_d6d(t *testing.T) {
 		t.Fatalf("NewLocalScripStore: %v", err)
 	}
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		OperatorSigner:    operator,

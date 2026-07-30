@@ -44,7 +44,7 @@ type RankedResult struct {
 //
 // Signals are always observational — they measure what agents actually did, not
 // what they rated. All fields are derived from non-spoofable, antecedent-anchored
-// message chains in the exchange campfire log.
+// message chains in the exchange event log.
 type BehavioralSignals struct {
 	// ConsumeCount is the number of exchange:consume signals emitted for this
 	// entry (TagConsume / ConsumeCountByEntry in pkg/exchange/hitrate.go).
@@ -150,7 +150,7 @@ type RankInput struct {
 	Price int64
 	// SellerReputation is the seller's derived reputation score (0-100).
 	SellerReputation int
-	// PutTimestamp is the campfire-observed receipt time of the put (nanoseconds).
+	// PutTimestamp is the observed receipt time of the put (nanoseconds).
 	PutTimestamp int64
 	// Signals carries optional behavioral signals for this entry.
 	// Zero value (both fields 0) means no signals are available — the entry

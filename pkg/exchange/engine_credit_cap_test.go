@@ -80,7 +80,6 @@ func TestEnsureCreditForShortfall_PerBuyerCapRefusesFurtherCredit(t *testing.T) 
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.PublicKeyHex(),
 		ScripStore:        cs,
@@ -139,7 +138,6 @@ func TestEnsureCreditForShortfall_JustUnderCapStillSucceeds(t *testing.T) {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.PublicKeyHex(),
 		ScripStore:        cs,
@@ -174,7 +172,6 @@ func TestApplyRepayment_ReducesLoanOutstandingAndCanFullyRepay(t *testing.T) {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.PublicKeyHex(),
 		ScripStore:        cs,
@@ -253,7 +250,6 @@ func TestPaySellerForBuyMiss_WithholdsForOutstandingLoan(t *testing.T) {
 
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,

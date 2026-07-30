@@ -68,13 +68,12 @@ func v2PutPayload(desc string, tokenCost int64) []byte {
 func appendPut(t *testing.T, ls *dgstore.Store, operator identity.Signer, payload []byte, ts int64) {
 	t.Helper()
 	rec := dgstore.Record{
-		ID:         randomLocalMsgID(t),
-		CampfireID: "local",
-		Sender:     operator.PubKeyHex(),
-		Payload:    payload,
-		Tags:       []string{exchange.TagPut, "exchange:content-type:code"},
-		Timestamp:  ts,
-		Origin:     "local",
+		ID:        randomLocalMsgID(t),
+		Sender:    operator.PubKeyHex(),
+		Payload:   payload,
+		Tags:      []string{exchange.TagPut, "exchange:content-type:code"},
+		Timestamp: ts,
+		Origin:    "local",
 	}
 	if err := ls.Append(rec); err != nil {
 		t.Fatalf("append put: %v", err)
@@ -259,7 +258,7 @@ func TestClimbWatermark_ReconstructTrueClimbPoint_MixedInterleavedLog(t *testing
 	appendPut(t, ls, operator, localPutPayload("plaintext two", 8001), 2)
 	appendPut(t, ls, operator, v2PutPayload("encrypted three", 9000), 3)
 	if err := ls.Append(dgstore.Record{
-		ID: randomLocalMsgID(t), CampfireID: "local", Sender: operator.PubKeyHex(),
+		ID: randomLocalMsgID(t), Sender: operator.PubKeyHex(),
 		Payload: []byte(`{"buy_id":"b1","entry_id":"e1"}`),
 		Tags:    []string{exchange.TagMatch}, Timestamp: 4, Origin: "local",
 	}); err != nil {

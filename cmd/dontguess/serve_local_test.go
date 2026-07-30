@@ -109,7 +109,6 @@ func TestServeLocal_PutBuyMatch_NoCampfire(t *testing.T) {
 	t.Cleanup(func() { ls.Close() }) //nolint:errcheck
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		PollInterval:      20 * time.Millisecond,
@@ -121,12 +120,11 @@ func TestServeLocal_PutBuyMatch_NoCampfire(t *testing.T) {
 	sellerKey := randomLocalMsgID(t)
 	putID := randomLocalMsgID(t)
 	if err := ls.Append(dgstore.Record{
-		ID:         putID,
-		CampfireID: "local",
-		Sender:     sellerKey,
-		Payload:    localPutPayload("Go HTTP handler unit test generator", 8000),
-		Tags:       []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        putID,
+		Sender:    sellerKey,
+		Payload:   localPutPayload("Go HTTP handler unit test generator", 8000),
+		Tags:      []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("appending put: %v", err)
 	}
@@ -144,12 +142,11 @@ func TestServeLocal_PutBuyMatch_NoCampfire(t *testing.T) {
 	buyerKey := randomLocalMsgID(t)
 	buyID := randomLocalMsgID(t)
 	if err := ls.Append(dgstore.Record{
-		ID:         buyID,
-		CampfireID: "local",
-		Sender:     buyerKey,
-		Payload:    localBuyPayload("Generate unit tests for a Go HTTP handler", 50000),
-		Tags:       []string{exchange.TagBuy},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        buyID,
+		Sender:    buyerKey,
+		Payload:   localBuyPayload("Generate unit tests for a Go HTTP handler", 50000),
+		Tags:      []string{exchange.TagBuy},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("appending buy: %v", err)
 	}

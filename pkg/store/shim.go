@@ -1,25 +1,11 @@
 package store
 
-// This file provides a campfire-store-COMPATIBLE surface over the
-// campfire-free pkg/store log (dontguess-657). It exists so that the
-// pkg/exchange test harness — which historically observed operator egress via
-// the campfire SDK store package — can observe the same egress through this
-// local, zero-campfire store with a mechanical import swap and no call-site
-// changes.
+// This file provides the message-oriented surface the pkg/exchange test harness
+// uses to observe operator egress (dontguess-657): MessageRecord, MessageFilter,
+// AddMessage, GetMessage, ListMessages, NowNano and StorePath.
 //
-// The names, signatures, and semantics below intentionally mirror the subset
-// of the campfire store package the exchange tests use:
-//
-//	store.MessageRecord               -> MessageRecord (alias for Record)
-//	store.MessageFilter{Tags: ...}    -> MessageFilter
-//	(*store.Store).AddMessage(rec)    -> (*Store).AddMessage
-//	(*store.Store).GetMessage(id)     -> (*Store).GetMessage
-//	(*store.Store).ListMessages(...)  -> (*Store).ListMessages
-//	store.NowNano()                   -> NowNano()
-//	store.StorePath(dir)              -> StorePath(dir)
-//
-// Zero campfire dependency: this file imports only the standard library, in
-// keeping with the pkg/store package invariant (see store.go package doc).
+// It imports only the standard library, in keeping with the pkg/store package
+// invariant (see store.go package doc).
 
 import (
 	"path/filepath"
@@ -27,27 +13,27 @@ import (
 	"time"
 )
 
-// MessageRecord is a campfire-store-compatible alias for Record.
+// MessageRecord is the message-oriented alias for Record.
 //
-// The campfire store's MessageRecord and pkg/store's Record share the same
+// MessageRecord and Record share the same
 // Message-relevant field subset (ID, CampfireID, Sender, Payload, Tags,
 // Antecedents, Timestamp, Instance), so an alias — rather than a separate type
 // — lets exchange test files that build store.MessageRecord{...} literals and
 // pass []store.MessageRecord to exchange.FromStoreRecords keep compiling
 // unchanged after the import swap.
 //
-// Note: the campfire MessageRecord additionally carries Signature, Provenance,
+// Note: some historical record shapes additionally carried Signature, Provenance,
 // ReceivedAt, and SenderCampfireID fields that this store does not model —
 // those are cf-SDK boundary concerns (SQLite NOT NULL constraints, relay
 // provenance) with no meaning in the single-writer local log. Test literals
 // that set those fields must drop them (dontguess-657).
 type MessageRecord = Record
 
-// MessageFilter mirrors the tag-filter subset of the campfire store's
+// MessageFilter is the tag-filter subset of the
 // MessageFilter used by the exchange tests. Only Tags is modeled because that
 // is the only field the tests use.
 //
-// Tags uses OR semantics, exactly matching campfire ListMessages: a record
+// Tags uses OR semantics: a record
 // matches the filter if it carries ANY of the listed tags (case-insensitive).
 // An empty Tags means no tag filtering.
 type MessageFilter struct {
@@ -55,20 +41,20 @@ type MessageFilter struct {
 }
 
 // NowNano returns the current wall-clock time in nanoseconds since the Unix
-// epoch, matching campfire store.NowNano. Used by the exchange tests to stamp
+// epoch. Used by the exchange tests to stamp
 // synthetic record timestamps.
 func NowNano() int64 { return time.Now().UnixNano() }
 
 // StorePath returns the conventional path of the local event log within dir,
-// matching the shape of campfire store.StorePath (which returns the backing
-// store file path for a config dir). For the campfire-free log this is the
+// returning the backing
+// store file path for a config dir. For this log that is the
 // append-only events.jsonl file.
 func StorePath(dir string) string { return filepath.Join(dir, "events.jsonl") }
 
-// AddMessage appends rec to the log, mirroring the campfire store's
+// AddMessage appends rec to the log, using the
 // AddMessage. It returns 1 (the number of records appended) on success so the
-// signature stays shaped like campfire's (count/bool, error) return; every
-// exchange test call site discards the first value. Unlike campfire's
+// (count/bool, error) return shape; every
+// exchange test call site discards the first value. Unlike the historical
 // INSERT OR IGNORE, this is an unconditional append — the single-writer local
 // log has no dedup requirement (see package doc).
 func (s *Store) AddMessage(rec MessageRecord) (int64, error) {
@@ -79,7 +65,7 @@ func (s *Store) AddMessage(rec MessageRecord) (int64, error) {
 }
 
 // GetMessage returns a copy of the record with the given ID, or (nil, nil) if
-// no such record exists — matching campfire store.GetMessage's not-found
+// no such record exists — the not-found
 // contract (nil record, nil error). It reads the current on-disk log.
 func (s *Store) GetMessage(id string) (*MessageRecord, error) {
 	recs, err := s.ReadAll()
@@ -106,11 +92,9 @@ func (s *Store) GetMessage(id string) (*MessageRecord, error) {
 //   - results are ordered by Timestamp ascending; ties preserve append order
 //     (stable sort).
 //
-// The leading campfireID parameter was removed in dontguess-ab6. Campfire is
-// retired and the value was vestigial: across the live log it held only "local"
-// and "", and this method — its sole consumer — had zero non-test callers, so
-// the filter never ran in production. Keeping it meant every caller had to
-// invent a campfire id to pass.
+// A leading scope-id parameter was removed in dontguess-ab6: the value was
+// vestigial (only "local" and "" ever existed) and this method — its sole
+// consumer — had zero non-test callers, so the filter never ran in production.
 func (s *Store) ListMessages(since int64, filters ...MessageFilter) ([]MessageRecord, error) {
 	recs, err := s.ReadAll()
 	if err != nil {
@@ -137,7 +121,7 @@ func (s *Store) ListMessages(since int64, filters ...MessageFilter) ([]MessageRe
 }
 
 // hasAnyTagFold reports whether recTags contains any tag in wantTags, using a
-// case-insensitive comparison — matching campfire ListMessages, which lowers
+// case-insensitive comparison, which lowers
 // both the stored tag values and the filter tags before comparing.
 func hasAnyTagFold(recTags, wantTags []string) bool {
 	for _, want := range wantTags {

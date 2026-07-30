@@ -107,7 +107,6 @@ func foldSoloLog(t *testing.T, dir, operatorKey, sellerKey, legacyKey string, re
 
 	started := make(chan struct{})
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		OnStarted:         func() { close(started) },

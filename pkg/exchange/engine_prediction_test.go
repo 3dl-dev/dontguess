@@ -48,7 +48,6 @@ func TestEngine_Prediction_FullPath(t *testing.T) {
 	// early before reaching the recordBuyerSettlement/stagePredictions block.
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,

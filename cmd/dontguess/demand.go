@@ -35,7 +35,6 @@ Reads exchange:buy-miss messages from the exchange miss log (read-only), strips
 synthetic load-test traffic (regression-*, timeout-178*, "test"-class), and
 clusters the remaining real misses by theme:
 
-  campfire    — campfire SDK, convention protocol, subscribe cursor
   audit       — test coverage gaps, missing error paths, edge case audits
   convention  — exchange convention declarations, supersede, revoke
   review      — RPT/code/design reviews

@@ -68,7 +68,7 @@ const MaxAntecedents = 64
 //   - exchange:phase:X  -> ["phase", X]
 //   - any other exchange tag -> ["x", <full-tag>] (lossless passthrough)
 //   - Payload -> Content (opaque; the adapter never parses the payload)
-//   - Timestamp/CampfireID/Instance -> dg_* preservation tags
+//   - Timestamp/Instance -> dg_* preservation tags
 //
 // Loud degradation (hard constraint #4, the dontguess-553 lesson): a message with
 // no recognised exchange operation tag is a conversion failure and returns an
@@ -176,12 +176,6 @@ func ToNostrEvent(msg *proto.Message) (*Event, error) {
 	// Preservation tag for the exact nanosecond Timestamp, which has no
 	// nostr-native home (created_at is seconds).
 	tags = append(tags, []string{tagDGTimestamp, strconv.FormatInt(msg.Timestamp, 10)})
-	// dg_cf (CampfireID) is NO LONGER EMITTED (dontguess-ab6). Campfire is retired
-	// and the field was vestigial: across the entire live log it held exactly two
-	// values, "local" and "", neither carrying any information. Nothing in the
-	// runtime reads it — ListMessages is its only consumer and has zero non-test
-	// callers. Reading it back is retained below so events already on the relay
-	// still round-trip exactly.
 	if msg.Instance != "" {
 		tags = append(tags, []string{tagDGInstance, msg.Instance})
 	}
@@ -298,12 +292,6 @@ func FromNostrEvent(ev *Event) (*proto.Message, error) {
 				} else {
 					return nil, fmt.Errorf("nostr: FromNostrEvent: bad %s tag %q: %w", tagDGTimestamp, t[1], err)
 				}
-			}
-		case tagDGCampfire:
-			// Still READ for backward compatibility with events already published
-			// to the relay; never written again (see ToNostrEvent).
-			if len(t) >= 2 {
-				msg.CampfireID = t[1]
 			}
 		case tagDGInstance:
 			if len(t) >= 2 {

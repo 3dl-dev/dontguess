@@ -258,7 +258,7 @@ func (s *State) beginReplayLocked(msgs []Message, replaySet map[string]struct{})
 	s.coOccurrence = make(map[string]*coOccurrenceMap)
 	// Note: priceAdjustments and brokerMatchIDs are intentionally NOT reset on
 	// Replay. They are externally written (by the fast pricing loop and engine
-	// respectively), not derived from the campfire log.
+	// respectively), not derived from the event log.
 	// wireToStore is likewise NOT reset on Replay (dontguess-55c GAP 1): the
 	// wire→store alias is a deterministic function of the operator log + the
 	// operator signer, but State has no signer to re-derive it — the Outbox
@@ -266,10 +266,10 @@ func (s *State) beginReplayLocked(msgs []Message, replaySet map[string]struct{})
 	// would strand every in-flight wire-id-tagged settle until the next publish.
 	s.brokeredAcceptedOrders = 0
 	s.brokeredCompletions = 0
-	// senderHopDepth is re-derived from the campfire log on Replay.
+	// senderHopDepth is re-derived from the event log on Replay.
 	// Reset it so the replay loop rebuilds it cleanly from messages.
 	s.senderHopDepth = make(map[string][]int)
-	// contentHashIndex is rebuilt from the campfire log on Replay.
+	// contentHashIndex is rebuilt from the event log on Replay.
 	// The replay loop re-runs applyPut for every exchange:put message, which
 	// repopulates the index from the canonical log.
 	s.contentHashIndex = make(map[string]struct{})
@@ -280,7 +280,7 @@ func (s *State) beginReplayLocked(msgs []Message, replaySet map[string]struct{})
 	s.consumeCounted = make(map[string]struct{})
 	s.disputeCounted = make(map[string]struct{})
 	// repriceEvents/repriceCounted (dontguess-b2b) are derived purely from the
-	// campfire log's TagReprice messages, so they reset here like the other
+	// event log's TagReprice messages, so they reset here like the other
 	// fold accumulators — a full Replay rebuilds the repricing audit trail from
 	// scratch, which is exactly the "rollback from the event log alone"
 	// property the migration's mandatory audit trail depends on.

@@ -64,7 +64,6 @@ func newXDGTestEngine(t *testing.T, dgHome string) *exchange.Engine {
 	}
 
 	return exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        localStore,
 		OperatorPublicKey: operatorIdentity.PubKeyHex(),
 		Logger:            t.Logf,

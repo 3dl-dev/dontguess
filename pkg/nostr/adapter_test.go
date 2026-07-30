@@ -28,7 +28,6 @@ func mkMsg(opTag string, extraTags []string, antecedents []string) *proto.Messag
 	tags := append([]string{opTag}, extraTags...)
 	return &proto.Message{
 		ID:          sampleID,
-		CampfireID:  "campfire-xyz",
 		Sender:      sampleSender,
 		Payload:     []byte(`{"description":"flock contention test pattern for Go","content_hash":"sha256:deadbeef","token_cost":1600}`),
 		Tags:        tags,
@@ -81,9 +80,6 @@ func assertRoundTrip(t *testing.T, in *proto.Message) *Event {
 	// and nothing in the runtime reads it (ListMessages has zero non-test callers).
 	// Reading an INBOUND dg_cf is still supported for events already published to
 	// the relay; that is pinned by TestDGCampfireStillReadInboundForBackCompat.
-	if out.CampfireID != "" {
-		t.Errorf("CampfireID: got %q, want \"\" — dg_cf must no longer be emitted", out.CampfireID)
-	}
 	if out.Instance != in.Instance {
 		t.Errorf("Instance: got %q want %q", out.Instance, in.Instance)
 	}
@@ -220,7 +216,6 @@ func TestRoundTrip_EveryOperatorEmittableOp(t *testing.T) {
 			for _, antes := range [][]string{nil, {sampleAnte0}, {sampleAnte0, sampleAnte1}} {
 				in := &proto.Message{
 					ID:          sampleID,
-					CampfireID:  "campfire-xyz",
 					Sender:      sampleSender, // operator key in practice
 					Payload:     []byte(`{"entry_id":"e-123","buyer_key":"` + sampleSender + `"}`),
 					Tags:        append([]string(nil), tc.tags...),
@@ -365,7 +360,6 @@ func TestOperatorLocalIdSenderOmitsPTag(t *testing.T) {
 		Tags:        []string{exchange.TagSettle, "exchange:phase:put-accept", "exchange:verdict:accepted"},
 		Antecedents: []string{sampleAnte0},
 		Timestamp:   1784215384169701254,
-		CampfireID:  "local",
 	}
 	ev, err := ToNostrEvent(in)
 	if err != nil {
@@ -550,12 +544,11 @@ func TestLoudDegradation(t *testing.T) {
 func TestFoldedMessageDrivesUnchangedEngine(t *testing.T) {
 	// A put with valid payload, folded through the unchanged State.
 	put := &proto.Message{
-		ID:         sampleID,
-		Sender:     sampleSender,
-		CampfireID: "cf",
-		Payload:    []byte(`{"description":"flock contention test pattern for Go","content":"aGVsbG8gd29ybGQgY29udGVudCBwYXlsb2FkIGZvciB0ZXN0aW5n","token_cost":1600,"content_type":"code"}`),
-		Tags:       []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  1_717_000_000_000_000_000,
+		ID:        sampleID,
+		Sender:    sampleSender,
+		Payload:   []byte(`{"description":"flock contention test pattern for Go","content":"aGVsbG8gd29ybGQgY29udGVudCBwYXlsb2FkIGZvciB0ZXN0aW5n","token_cost":1600,"content_type":"code"}`),
+		Tags:      []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: 1_717_000_000_000_000_000,
 	}
 	ev, err := ToNostrEvent(put)
 	if err != nil {
@@ -588,7 +581,6 @@ func TestBuyMissMarkerRoundTripsAndFoldsAsMatch(t *testing.T) {
 	buyMiss := &proto.Message{
 		ID:          sampleID,
 		Sender:      sampleSender, // operator broadcast
-		CampfireID:  "cf",
 		Payload:     []byte(`{"task_hash":"abcd","offered_price_rate":70,"buy_msg_id":"` + buyMsgID + `"}`),
 		Tags:        []string{exchange.TagMatch, exchange.TagBuyMiss},
 		Antecedents: []string{buyMsgID},
@@ -683,42 +675,31 @@ func hasStr(s []string, v string) bool {
 	return false
 }
 
-// TestDGCampfireNotEmitted pins the write half of the dontguess-ab6 contract:
-// no new event carries a dg_cf tag.
-func TestDGCampfireNotEmitted(t *testing.T) {
+// TestNoDGCampfireTagAnywhere pins the end state of dontguess-ab6: dg_cf is
+// neither emitted nor consumed. The CampfireID field is gone from the message
+// type entirely, so a dg_cf tag arriving on a historical relay event is simply
+// ignored — it must not be an error, and there is no longer anywhere to put it.
+func TestNoDGCampfireTagAnywhere(t *testing.T) {
 	t.Parallel()
+
 	in := mkMsg(exchange.TagPut, nil, nil)
-	in.CampfireID = "campfire-xyz"
 	ev, err := ToNostrEvent(in)
 	if err != nil {
 		t.Fatalf("ToNostrEvent: %v", err)
 	}
 	for _, tg := range ev.Tags {
 		if len(tg) >= 1 && tg[0] == "dg_cf" {
-			t.Fatalf("a dg_cf tag was emitted (%v) — campfire is retired and the field is vestigial", tg)
+			t.Fatalf("a dg_cf tag was emitted (%v)", tg)
 		}
 	}
-}
 
-// TestDGCampfireStillReadInboundForBackCompat pins the read half. Events carrying
-// dg_cf are already published to the relay and are immutable; refusing to read
-// them would silently drop a field from history. Emission stops; ingestion does
-// not change.
-func TestDGCampfireStillReadInboundForBackCompat(t *testing.T) {
-	t.Parallel()
-	in := mkMsg(exchange.TagPut, nil, nil)
-	ev, err := ToNostrEvent(in)
-	if err != nil {
-		t.Fatalf("ToNostrEvent: %v", err)
-	}
-	// Simulate an event published before this change.
-	ev.Tags = append(ev.Tags, []string{"dg_cf", "campfire-legacy"})
-
+	// An event published before the field was removed must still parse cleanly.
+	ev.Tags = append(ev.Tags, []string{"dg_cf", "legacy-value"})
 	back, err := FromNostrEvent(ev)
 	if err != nil {
-		t.Fatalf("FromNostrEvent: %v", err)
+		t.Fatalf("FromNostrEvent rejected a historical event carrying dg_cf: %v — old events are immutable and must stay ingestible", err)
 	}
-	if back.CampfireID != "campfire-legacy" {
-		t.Fatalf("inbound dg_cf = %q, want %q — historical events must still read back intact", back.CampfireID, "campfire-legacy")
+	if back.ID != in.ID {
+		t.Fatalf("round-trip ID = %q, want %q", back.ID, in.ID)
 	}
 }

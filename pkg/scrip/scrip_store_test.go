@@ -66,12 +66,11 @@ func addMsg(t *testing.T, env *testEnv, sender, op string, payload any, tags ...
 	env.seq++
 	allTags := append([]string{op}, tags...)
 	if err := env.st.Append(dgstore.Record{
-		ID:         fmt.Sprintf("msg-%d", env.seq),
-		CampfireID: env.campfireID,
-		Sender:     sender,
-		Payload:    rawPayload,
-		Tags:       allTags,
-		Timestamp:  env.seq,
+		ID:        fmt.Sprintf("msg-%d", env.seq),
+		Sender:    sender,
+		Payload:   rawPayload,
+		Tags:      allTags,
+		Timestamp: env.seq,
 	}); err != nil {
 		t.Fatalf("append(%s): %v", op, err)
 	}
@@ -88,12 +87,11 @@ func buildMsg(t *testing.T, campfireID, sender, op string, payload any, tags ...
 	}
 	allTags := append([]string{op}, tags...)
 	return proto.Message{
-		ID:         randomID(t),
-		CampfireID: campfireID,
-		Sender:     sender,
-		Payload:    rawPayload,
-		Tags:       allTags,
-		Timestamp:  time.Now().UnixNano(),
+		ID:        randomID(t),
+		Sender:    sender,
+		Payload:   rawPayload,
+		Tags:      allTags,
+		Timestamp: time.Now().UnixNano(),
 	}
 }
 
@@ -1282,12 +1280,11 @@ func TestLoanMint_LiveMode(t *testing.T) {
 	}
 
 	liveMsg := proto.Message{
-		ID:         "loan-live-msg-id",
-		CampfireID: env.campfireID,
-		Sender:     env.operatorKey,
-		Payload:    payloadBytes,
-		Tags:       []string{scrip.TagScripLoanMint},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        "loan-live-msg-id",
+		Sender:    env.operatorKey,
+		Payload:   payloadBytes,
+		Tags:      []string{scrip.TagScripLoanMint},
+		Timestamp: time.Now().UnixNano(),
 	}
 	cs.ApplyMessage(&liveMsg)
 
@@ -1943,12 +1940,11 @@ func TestLoanRepay_ConcurrentPartialRepay_NoPrincipalDoubleDecrement(t *testing.
 			t.Fatalf("marshal repay payload: %v", err)
 		}
 		return proto.Message{
-			ID:         fmt.Sprintf("repay-concurrent-%d", idx),
-			CampfireID: env.campfireID,
-			Sender:     env.operatorKey,
-			Payload:    rawPayload,
-			Tags:       []string{scrip.TagScripLoanRepay},
-			Timestamp:  time.Now().UnixNano(),
+			ID:        fmt.Sprintf("repay-concurrent-%d", idx),
+			Sender:    env.operatorKey,
+			Payload:   rawPayload,
+			Tags:      []string{scrip.TagScripLoanRepay},
+			Timestamp: time.Now().UnixNano(),
 		}
 	}
 

@@ -312,7 +312,6 @@ func TestStatus_ExchangeReader(t *testing.T) {
 		n++
 		rec := dgstore.Record{
 			ID:          fmt.Sprintf("test-%d-%s", n, tag),
-			CampfireID:  "local",
 			Sender:      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
 			Payload:     []byte(`{}`),
 			Tags:        []string{tag},

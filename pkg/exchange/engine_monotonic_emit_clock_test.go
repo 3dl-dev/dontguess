@@ -75,7 +75,6 @@ func TestSendLocalOperatorMessage_EmitsStrictlyIncreasingTimestamps(t *testing.T
 	operatorKey := newReservationID()
 	seller := newReservationID()
 	eng := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		Logger:            func(format string, args ...any) { t.Logf("[engine] "+format, args...) },
@@ -86,12 +85,11 @@ func TestSendLocalOperatorMessage_EmitsStrictlyIncreasingTimestamps(t *testing.T
 
 	appendPut := func(id string, tokenCost int64) {
 		if err := ls.Append(dgstore.Record{
-			ID:         id,
-			CampfireID: "local",
-			Sender:     seller,
-			Payload:    localBuyDropPutPayload(t, "monotonic clock fixture "+id, tokenCost),
-			Tags:       []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
-			Timestamp:  1, // fixed, well in the past — irrelevant to this test
+			ID:        id,
+			Sender:    seller,
+			Payload:   localBuyDropPutPayload(t, "monotonic clock fixture "+id, tokenCost),
+			Tags:      []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
+			Timestamp: 1, // fixed, well in the past — irrelevant to this test
 		}); err != nil {
 			t.Fatalf("append put %s: %v", id, err)
 		}

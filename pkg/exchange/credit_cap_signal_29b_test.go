@@ -162,7 +162,6 @@ func TestEnsureCreditForShortfall_OverCapIncrementsDegradationCounter(t *testing
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.PublicKeyHex(),
 		ScripStore:        cs,

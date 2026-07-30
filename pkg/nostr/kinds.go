@@ -88,7 +88,6 @@ const (
 	// adapter-internal; a pure-nostr future may drop them, but while the unchanged
 	// engine consumes proto.Message they preserve full fidelity.
 	tagDGTimestamp = "dg_ts"       // exact Message.Timestamp (nanoseconds)
-	tagDGCampfire  = "dg_cf"       // Message.CampfireID
 	tagDGInstance  = "dg_instance" // Message.Instance (tainted self-asserted role)
 	// tagDGAntecedents carries the FULL ordered antecedent list, comma-joined, and
 	// is emitted only when at least one antecedent is not a 32-byte hex id (i.e. a

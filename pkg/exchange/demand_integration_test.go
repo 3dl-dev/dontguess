@@ -156,8 +156,10 @@ func TestDemand_Integration(t *testing.T) {
 	t.Logf("demand backlog: total=%d real=%d synthetic=%d clusters=%v",
 		bl.TotalMisses, bl.RealMisses, bl.SyntheticExcluded, clusterCounts)
 
-	if clusterCounts["campfire"] == 0 {
-		t.Error("expected campfire cluster in backlog")
+	// dontguess-ab6: the campfire cluster is removed. Assert it is ABSENT rather
+	// than simply dropping the check, so a reintroduction is caught.
+	if _, present := clusterCounts["campfire"]; present {
+		t.Errorf("campfire cluster reappeared in the backlog: %v", clusterCounts)
 	}
 	if clusterCounts["audit"] == 0 {
 		t.Error("expected audit cluster in backlog")

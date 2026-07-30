@@ -56,7 +56,7 @@ func writeExchangeLog(t *testing.T, recs []dgstore.Record) string {
 func buyRec(id, task string, ts int64) dgstore.Record {
 	payload, _ := json.Marshal(map[string]any{"task": task, "budget": 50000})
 	return dgstore.Record{
-		ID: id, CampfireID: "local", Sender: "buyer-" + id,
+		ID: id, Sender: "buyer-" + id,
 		Payload: payload, Tags: []string{exchange.TagBuy},
 		Antecedents: []string{}, Timestamp: ts,
 	}
@@ -74,7 +74,7 @@ func hitMatchRec(id, buyID, task string, ts int64) dgstore.Record {
 		}},
 	})
 	return dgstore.Record{
-		ID: id, CampfireID: "local", Sender: metricTestOperator,
+		ID: id, Sender: metricTestOperator,
 		Payload: payload, Tags: []string{exchange.TagMatch},
 		Antecedents: []string{buyID}, Timestamp: ts,
 	}
@@ -88,7 +88,7 @@ func missMatchRec(id, buyID, task string, ts int64) dgstore.Record {
 		"guide":      "No cached inference matched",
 	})
 	return dgstore.Record{
-		ID: id, CampfireID: "local", Sender: metricTestOperator,
+		ID: id, Sender: metricTestOperator,
 		Payload: payload, Tags: []string{exchange.TagBuyMiss, exchange.TagMatch},
 		Antecedents: []string{buyID}, Timestamp: ts,
 	}
@@ -106,9 +106,9 @@ func demandOnlyRec(id, buyID, buyerKey string, ts int64) dgstore.Record {
 		"expires_at":         time.Unix(0, ts).UTC().Add(exchange.DemandOnlyTTL).Format(time.RFC3339),
 	})
 	return dgstore.Record{
-		ID: id, CampfireID: "local", Sender: metricTestOperator,
-		Payload: payload,
-		Tags:    []string{exchange.TagBuyMiss, exchange.TagMatch, exchange.TagDemandOnly},
+		ID: id, Sender: metricTestOperator,
+		Payload:     payload,
+		Tags:        []string{exchange.TagBuyMiss, exchange.TagMatch, exchange.TagDemandOnly},
 		Antecedents: []string{buyID}, Timestamp: ts,
 	}
 }

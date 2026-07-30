@@ -411,7 +411,7 @@ func (s *State) AllPriceAdjustments() map[string]PriceAdjustment {
 //   - 0.0 = maximum debt / chronic defaulter (lowest priority)
 //
 // This is called externally (e.g. by the engine after scrip signals a loan
-// state change) rather than derived from the campfire log, so it survives
+// state change) rather than derived from the event log, so it survives
 // Replay and is not reset. It is intentionally NOT imported from pkg/scrip to
 // avoid a cross-package dependency — callers derive the score from loan records
 // and inject it via this hook.
@@ -470,7 +470,7 @@ func (s *State) TaskCompletionRate() float64 {
 // exchange:assign-complete for a task_type="brokered-match" assign.
 //
 // This is NOT reset on Replay — the brokerMatchIDs set is externally managed
-// by the engine (not derived from the campfire log). The engine must re-register
+// by the engine (not derived from the event log). The engine must re-register
 // all brokered match IDs after a Replay to ensure the counters are correct.
 // Thread-safe.
 func (s *State) RegisterBrokerMatch(matchMsgID string) {

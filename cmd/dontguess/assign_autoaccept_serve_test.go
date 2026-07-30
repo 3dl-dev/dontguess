@@ -103,7 +103,6 @@ func TestServeWiring_AutoAcceptAssign_TickerPaysCompletedCompression(t *testing.
 
 	ready := make(chan struct{})
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		TrustChecker:      tc,
@@ -124,12 +123,11 @@ func TestServeWiring_AutoAcceptAssign_TickerPaysCompletedCompression(t *testing.
 	origContent := "VEC_A original plaintext " + strings.Repeat("z", 375) // 400 bytes
 	putID := randomLocalMsgID(t)
 	if err := eng.IngestLocalRecord(dgstore.Record{
-		ID:         putID,
-		CampfireID: "local",
-		Sender:     seller.PubKeyHex(),
-		Payload:    serveCompressPutPayload("serve-wiring fixture: compressible doc", origContent, tokenCost),
-		Tags:       []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        putID,
+		Sender:    seller.PubKeyHex(),
+		Payload:   serveCompressPutPayload("serve-wiring fixture: compressible doc", origContent, tokenCost),
+		Tags:      []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("IngestLocalRecord(put): %v", err)
 	}
@@ -158,7 +156,6 @@ func TestServeWiring_AutoAcceptAssign_TickerPaysCompletedCompression(t *testing.
 	// Agent claims (real fold via IngestLocalRecord).
 	if err := eng.IngestLocalRecord(dgstore.Record{
 		ID:          randomLocalMsgID(t),
-		CampfireID:  "local",
 		Sender:      agent.PubKeyHex(),
 		Payload:     []byte(`{}`),
 		Tags:        []string{exchange.TagAssignClaim},
@@ -186,7 +183,6 @@ func TestServeWiring_AutoAcceptAssign_TickerPaysCompletedCompression(t *testing.
 	good := []byte("VEC_A compressed " + strings.Repeat("z", 183)) // 200 bytes
 	if err := eng.IngestLocalRecord(dgstore.Record{
 		ID:          randomLocalMsgID(t),
-		CampfireID:  "local",
 		Sender:      agent.PubKeyHex(),
 		Payload:     serveCompressResult(good),
 		Tags:        []string{exchange.TagAssignComplete},

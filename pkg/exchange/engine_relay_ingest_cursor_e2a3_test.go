@@ -98,12 +98,11 @@ func seedMatchableEntry(t *testing.T, eng *Engine, ls *dgstore.Store, desc strin
 	seller = newReservationID()
 	putID := newReservationID()
 	if err := ls.Append(dgstore.Record{
-		ID:         putID,
-		CampfireID: "local",
-		Sender:     seller,
-		Payload:    localBuyDropPutPayload(t, desc, 8000),
-		Tags:       []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        putID,
+		Sender:    seller,
+		Payload:   localBuyDropPutPayload(t, desc, 8000),
+		Tags:      []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("append put: %v", err)
 	}
@@ -148,7 +147,6 @@ func TestRelayBuyDispatchedExactlyOnce_OperatorEmitInterleave_e2a3(t *testing.T)
 
 	operatorKey := newReservationID()
 	eng := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		PollInterval:      time.Hour, // folds are driven explicitly below
@@ -184,13 +182,12 @@ func TestRelayBuyDispatchedExactlyOnce_OperatorEmitInterleave_e2a3(t *testing.T)
 	relayBuyID := newReservationID()
 	buyer := newReservationID()
 	if err := ls.BatchAppend([]dgstore.Record{{
-		ID:         relayBuyID,
-		CampfireID: "local",
-		Sender:     buyer,
-		Payload:    localBuyDropBuyPayload(t, "Generate unit tests for a Go HTTP handler", 50000),
-		Tags:       []string{TagBuy},
-		Timestamp:  time.Now().UnixNano(),
-		Origin:     "relay",
+		ID:        relayBuyID,
+		Sender:    buyer,
+		Payload:   localBuyDropBuyPayload(t, "Generate unit tests for a Go HTTP handler", 50000),
+		Tags:      []string{TagBuy},
+		Timestamp: time.Now().UnixNano(),
+		Origin:    "relay",
 	}}); err != nil {
 		t.Fatalf("relay BatchAppend buy: %v", err)
 	}
@@ -266,7 +263,6 @@ func TestOperatorSkipSurvivesRestart_e2a3(t *testing.T) {
 
 	// --- Engine 1: build a log with a matched member buy + an operator consume. ---
 	eng1 := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		PollInterval:      time.Hour,
@@ -283,12 +279,11 @@ func TestOperatorSkipSurvivesRestart_e2a3(t *testing.T) {
 	buyID := newReservationID()
 	buyer := newReservationID()
 	if err := ls.Append(dgstore.Record{
-		ID:         buyID,
-		CampfireID: "local",
-		Sender:     buyer,
-		Payload:    localBuyDropBuyPayload(t, "Generate unit tests for a Go HTTP handler", 50000),
-		Tags:       []string{TagBuy},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        buyID,
+		Sender:    buyer,
+		Payload:   localBuyDropBuyPayload(t, "Generate unit tests for a Go HTTP handler", 50000),
+		Tags:      []string{TagBuy},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("append buy: %v", err)
 	}
@@ -311,7 +306,6 @@ func TestOperatorSkipSurvivesRestart_e2a3(t *testing.T) {
 
 	// --- Engine 2: a FRESH engine replays the SAME log (process restart). ---
 	eng2 := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		PollInterval:      time.Hour,
@@ -341,13 +335,12 @@ func TestOperatorSkipSurvivesRestart_e2a3(t *testing.T) {
 	// observed eng1's emits.
 	newBuyID := newReservationID()
 	if err := ls.BatchAppend([]dgstore.Record{{
-		ID:         newBuyID,
-		CampfireID: "local",
-		Sender:     newReservationID(),
-		Payload:    localBuyDropBuyPayload(t, "Generate unit tests for a Go HTTP handler", 50000),
-		Tags:       []string{TagBuy},
-		Timestamp:  time.Now().UnixNano(),
-		Origin:     "relay",
+		ID:        newBuyID,
+		Sender:    newReservationID(),
+		Payload:   localBuyDropBuyPayload(t, "Generate unit tests for a Go HTTP handler", 50000),
+		Tags:      []string{TagBuy},
+		Timestamp: time.Now().UnixNano(),
+		Origin:    "relay",
 	}}); err != nil {
 		t.Fatalf("post-restart relay buy: %v", err)
 	}

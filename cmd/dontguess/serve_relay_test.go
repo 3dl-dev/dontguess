@@ -254,7 +254,6 @@ func (r *fakeRelayConn) receivedByKind(kind int) []*identity.Event {
 func signExchangeEvent(t *testing.T, signer identity.Signer, tags, antecedents []string, payload []byte) *identity.Event {
 	t.Helper()
 	msg := &proto.Message{
-		CampfireID:  "local",
 		Sender:      signer.PubKeyHex(),
 		Payload:     payload,
 		Tags:        tags,
@@ -324,7 +323,6 @@ func TestRelayRoundTrip_PutBuyMatchSettle_Folds(t *testing.T) {
 	buyer, _ := identity.Generate()
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		PollInterval:      5 * time.Millisecond,
@@ -445,13 +443,12 @@ func TestRelayRestartReseed_NoDoubleFold(t *testing.T) {
 	persistOperatorMatch := func(t *testing.T, ls *dgstore.Store, operator identity.Signer) (string, dgstore.Record) {
 		t.Helper()
 		rec := dgstore.Record{
-			ID:         randomLocalMsgID(t),
-			CampfireID: "local",
-			Sender:     operator.PubKeyHex(),
-			Payload:    []byte(`{"buy_id":"b1","entry_id":"e1"}`),
-			Tags:       []string{exchange.TagMatch},
-			Timestamp:  time.Now().UnixNano(),
-			Origin:     "local",
+			ID:        randomLocalMsgID(t),
+			Sender:    operator.PubKeyHex(),
+			Payload:   []byte(`{"buy_id":"b1","entry_id":"e1"}`),
+			Tags:      []string{exchange.TagMatch},
+			Timestamp: time.Now().UnixNano(),
+			Origin:    "local",
 		}
 		if err := ls.Append(rec); err != nil {
 			t.Fatalf("append operator match: %v", err)
@@ -601,7 +598,6 @@ func TestRelayHotPath_BuyMatchP99_UnderBlockedRelay(t *testing.T) {
 	buyer, _ := identity.Generate()
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		PollInterval:      2 * time.Millisecond,
@@ -621,7 +617,7 @@ func TestRelayHotPath_BuyMatchP99_UnderBlockedRelay(t *testing.T) {
 			localPutPayload(fmt.Sprintf("Go HTTP handler unit test generator variant %d", i), 8000))
 		putMsg, _ := nostr.FromNostrEvent(identityToNostrEvent(putEv))
 		if err := ls.Append(dgstore.Record{
-			ID: putMsg.ID, CampfireID: "local", Sender: putMsg.Sender,
+			ID: putMsg.ID, Sender: putMsg.Sender,
 			Payload: putMsg.Payload, Tags: putMsg.Tags, Timestamp: putMsg.Timestamp,
 		}); err != nil {
 			t.Fatalf("append put %d: %v", i, err)
@@ -673,7 +669,7 @@ func TestRelayHotPath_BuyMatchP99_UnderBlockedRelay(t *testing.T) {
 			localBuyPayload("Generate unit tests for a Go HTTP handler", 50000))
 		buyMsg, _ := nostr.FromNostrEvent(identityToNostrEvent(buyEv))
 		if err := ls.Append(dgstore.Record{
-			ID: buyMsg.ID, CampfireID: "local", Sender: buyMsg.Sender,
+			ID: buyMsg.ID, Sender: buyMsg.Sender,
 			Payload: buyMsg.Payload, Tags: buyMsg.Tags, Timestamp: buyMsg.Timestamp,
 		}); err != nil {
 			t.Fatalf("append buy %d: %v", i, err)
@@ -798,7 +794,6 @@ func TestRelayForcedDisconnect_ReconnectResubscribeIngestPublishResume(t *testin
 	buyer, _ := identity.Generate()
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		PollInterval:      5 * time.Millisecond,
@@ -1036,13 +1031,12 @@ func TestRelayInFlightPublishAtDrop_FailedAndRetried_NoWedge(t *testing.T) {
 	// One operator record queued for publish (Origin=local) — the event that will
 	// be in flight when the connection drops.
 	rec := dgstore.Record{
-		ID:         randomLocalMsgID(t),
-		CampfireID: "local",
-		Sender:     operator.PubKeyHex(),
-		Payload:    []byte(`{"buy_id":"b1","entry_id":"e1"}`),
-		Tags:       []string{exchange.TagMatch},
-		Timestamp:  time.Now().UnixNano(),
-		Origin:     "local",
+		ID:        randomLocalMsgID(t),
+		Sender:    operator.PubKeyHex(),
+		Payload:   []byte(`{"buy_id":"b1","entry_id":"e1"}`),
+		Tags:      []string{exchange.TagMatch},
+		Timestamp: time.Now().UnixNano(),
+		Origin:    "local",
 	}
 	if err := ls.Append(rec); err != nil {
 		t.Fatalf("append operator match: %v", err)
@@ -1125,13 +1119,12 @@ func TestGuardOperatorKeyMigration_WarnsOnCampfireEraRecords(t *testing.T) {
 
 	appendRec := func(sender, origin string) {
 		if err := ls.Append(dgstore.Record{
-			ID:         randomLocalMsgID(t),
-			CampfireID: "local",
-			Sender:     sender,
-			Payload:    []byte(`{}`),
-			Tags:       []string{exchange.TagPut},
-			Timestamp:  time.Now().UnixNano(),
-			Origin:     origin,
+			ID:        randomLocalMsgID(t),
+			Sender:    sender,
+			Payload:   []byte(`{}`),
+			Tags:      []string{exchange.TagPut},
+			Timestamp: time.Now().UnixNano(),
+			Origin:    origin,
 		}); err != nil {
 			t.Fatalf("append: %v", err)
 		}
@@ -1166,7 +1159,7 @@ func TestGuardOperatorKeyMigration_WarnsOnCampfireEraRecords(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ls2.Close() })
 	if err := ls2.Append(dgstore.Record{
-		ID: randomLocalMsgID(t), CampfireID: "local", Sender: current.PubKeyHex(),
+		ID: randomLocalMsgID(t), Sender: current.PubKeyHex(),
 		Payload: []byte(`{}`), Tags: []string{exchange.TagPut}, Timestamp: time.Now().UnixNano(), Origin: "local",
 	}); err != nil {
 		t.Fatalf("append clean: %v", err)

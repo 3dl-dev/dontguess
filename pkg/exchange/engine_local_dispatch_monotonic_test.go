@@ -52,7 +52,6 @@ func TestLocalDispatchCursorMonotonic_StaleSnapshotNoDoubleConsume(t *testing.T)
 	seller := newReservationID()
 	buyer := newReservationID()
 	eng := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		PollInterval:      20 * time.Millisecond,
@@ -67,12 +66,11 @@ func TestLocalDispatchCursorMonotonic_StaleSnapshotNoDoubleConsume(t *testing.T)
 	// --- Seed inventory: put1 + auto-accept → one matchable entry. ---
 	put1 := newReservationID()
 	if err := ls.Append(dgstore.Record{
-		ID:         put1,
-		CampfireID: "local",
-		Sender:     seller,
-		Payload:    localBuyDropPutPayload(t, "Go HTTP handler unit test generator", 8000),
-		Tags:       []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        put1,
+		Sender:    seller,
+		Payload:   localBuyDropPutPayload(t, "Go HTTP handler unit test generator", 8000),
+		Tags:      []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("append put1: %v", err)
 	}
@@ -92,12 +90,11 @@ func TestLocalDispatchCursorMonotonic_StaleSnapshotNoDoubleConsume(t *testing.T)
 	// emitConsumeSignal walks is under our control.
 	buyID := newReservationID()
 	if err := ls.Append(dgstore.Record{
-		ID:         buyID,
-		CampfireID: "local",
-		Sender:     buyer,
-		Payload:    localBuyDropBuyPayload(t, "medieval French troubadour poetry translation", 400),
-		Tags:       []string{TagBuy},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        buyID,
+		Sender:    buyer,
+		Payload:   localBuyDropBuyPayload(t, "medieval French troubadour poetry translation", 400),
+		Tags:      []string{TagBuy},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("append buy: %v", err)
 	}
@@ -108,7 +105,6 @@ func TestLocalDispatchCursorMonotonic_StaleSnapshotNoDoubleConsume(t *testing.T)
 	})
 	if err := ls.Append(dgstore.Record{
 		ID:          matchID,
-		CampfireID:  "local",
 		Sender:      operatorKey,
 		Payload:     matchPayload,
 		Tags:        []string{TagMatch},
@@ -126,7 +122,6 @@ func TestLocalDispatchCursorMonotonic_StaleSnapshotNoDoubleConsume(t *testing.T)
 	})
 	if err := ls.Append(dgstore.Record{
 		ID:          buyerAcceptID,
-		CampfireID:  "local",
 		Sender:      buyer,
 		Payload:     buyerAcceptPayload,
 		Tags:        []string{TagSettle, TagPhasePrefix + SettlePhaseStrBuyerAccept, TagVerdictPrefix + "accepted"},
@@ -144,7 +139,6 @@ func TestLocalDispatchCursorMonotonic_StaleSnapshotNoDoubleConsume(t *testing.T)
 	})
 	if err := ls.Append(dgstore.Record{
 		ID:          deliverID,
-		CampfireID:  "local",
 		Sender:      operatorKey,
 		Payload:     deliverPayload,
 		Tags:        []string{TagSettle, TagPhasePrefix + SettlePhaseStrDeliver},
@@ -185,7 +179,6 @@ func TestLocalDispatchCursorMonotonic_StaleSnapshotNoDoubleConsume(t *testing.T)
 	})
 	if err := ls.Append(dgstore.Record{
 		ID:          completeID,
-		CampfireID:  "local",
 		Sender:      buyer,
 		Payload:     completePayload,
 		Tags:        []string{TagSettle, TagPhasePrefix + SettlePhaseStrComplete, TagVerdictPrefix + "accepted"},

@@ -77,7 +77,6 @@ func newIndividualTierEngineWithOperator(t *testing.T) (*exchange.Engine, string
 	t.Cleanup(func() { _ = ls.Close() })
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		PollInterval:      20 * time.Millisecond,
@@ -140,7 +139,6 @@ func foldPutAcceptNoHot(t *testing.T, eng *exchange.Engine, operatorKey, putID s
 	}
 	if err := eng.IngestLocalRecord(dgstore.Record{
 		ID:          randomLocalMsgID(t),
-		CampfireID:  "local",
 		Sender:      operatorKey,
 		Payload:     payload,
 		Tags:        []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrPutAccept, exchange.TagVerdictPrefix + "accepted"},
@@ -505,12 +503,11 @@ func TestOpListAssigns_Individual_SurfacesOpenCompressAssign(t *testing.T) {
 	const tokenCost int64 = 15000
 	putID := randomLocalMsgID(t)
 	if err := eng.IngestLocalRecord(dgstore.Record{
-		ID:         putID,
-		CampfireID: "local",
-		Sender:     "seller-" + putID[:8],
-		Payload:    localPutPayload("assign-list fixture: python asyncio debugging guide", tokenCost),
-		Tags:       []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:python"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        putID,
+		Sender:    "seller-" + putID[:8],
+		Payload:   localPutPayload("assign-list fixture: python asyncio debugging guide", tokenCost),
+		Tags:      []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:python"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("IngestLocalRecord(put): %v", err)
 	}

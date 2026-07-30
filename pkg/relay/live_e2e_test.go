@@ -221,7 +221,6 @@ func TestLiveRelay_FullExchangeLoop_OverRealRelay(t *testing.T) {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        lsA,
 		OperatorPublicKey: operator.PubKeyHex(),
 		ScripStore:        scripStore,
@@ -235,7 +234,7 @@ func TestLiveRelay_FullExchangeLoop_OverRealRelay(t *testing.T) {
 	// allowlist and must not reach the relay).
 	injectForeign := func(id, sender string, payload []byte, tags, antecedents []string) {
 		if err := lsA.Append(dgstore.Record{
-			ID: id, CampfireID: "local", Sender: sender, Payload: payload,
+			ID: id, Sender: sender, Payload: payload,
 			Tags: tags, Antecedents: antecedents, Timestamp: time.Now().UnixNano(), Origin: "relay",
 		}); err != nil {
 			t.Fatalf("inject foreign %s: %v", id, err)
@@ -304,7 +303,7 @@ func TestLiveRelay_FullExchangeLoop_OverRealRelay(t *testing.T) {
 	contentRef := "sha256:" + fmt.Sprintf("%064x", sha256.Sum256([]byte("delivered-content-"+entryID)))
 	deliverID := newHexID(t)
 	if err := lsA.Append(dgstore.Record{
-		ID: deliverID, CampfireID: "local", Sender: operator.PubKeyHex(),
+		ID: deliverID, Sender: operator.PubKeyHex(),
 		Payload: mustJSON(t, map[string]any{
 			"phase": exchange.SettlePhaseStrDeliver, "entry_id": entryID,
 			"content_ref": contentRef, "content_size": 20000,

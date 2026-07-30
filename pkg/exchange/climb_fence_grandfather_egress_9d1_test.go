@@ -64,7 +64,6 @@ func egressTestEngine(t *testing.T) (*Engine, *dgstore.Store, string) {
 	t.Cleanup(func() { ls.Close() }) //nolint:errcheck
 	operatorKey := newReservationID()
 	eng := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		Logger:            func(format string, args ...any) { t.Logf("[engine] "+format, args...) },

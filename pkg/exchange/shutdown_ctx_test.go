@@ -274,7 +274,6 @@ func TestEngine_HandlerCtxIsBackground_BeforeStart(t *testing.T) {
 	cs := newCampfireScripStore(t, h)
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -314,12 +313,11 @@ func TestEngine_HandlerCtxIsBackground_BeforeStart(t *testing.T) {
 	// engineCtx() should return context.Background() since e.ctx is nil.
 	// The handler must not panic and should complete successfully.
 	if err := eng.DispatchForTest(&exchange.Message{
-		ID:         buyMsg.ID,
-		CampfireID: h.cfID,
-		Sender:     h.buyer.PublicKeyHex(),
-		Payload:    buyPayloadBytes,
-		Tags:       []string{exchange.TagBuy},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        buyMsg.ID,
+		Sender:    h.buyer.PublicKeyHex(),
+		Payload:   buyPayloadBytes,
+		Tags:      []string{exchange.TagBuy},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("DispatchForTest returned unexpected error: %v", err)
 	}

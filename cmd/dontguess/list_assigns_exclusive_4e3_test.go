@@ -38,7 +38,6 @@ func foldAssign(t *testing.T, eng *exchange.Engine, operatorKey, taskType, exclu
 	}
 	if err := eng.IngestLocalRecord(dgstore.Record{
 		ID:          assignID,
-		CampfireID:  "local",
 		Sender:      operatorKey,
 		Payload:     payload,
 		Tags:        []string{exchange.TagAssign},

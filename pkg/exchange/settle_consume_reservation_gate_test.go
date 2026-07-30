@@ -38,7 +38,6 @@ func TestSettleComplete_RedeliveryDoesNotDoubleEmitConsumeSignal(t *testing.T) {
 	h := newTestHarness(t)
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -111,7 +110,6 @@ func TestSettleComplete_NoConsumeSignalWithoutLiveReservation(t *testing.T) {
 	h := newTestHarness(t)
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,

@@ -13,7 +13,7 @@ import (
 // and pkg/scrip (exchange imports scrip; scrip cannot import exchange).
 type Message = proto.Message
 
-// FromStoreRecord converts a campfire-free dgstore.Record to a dontguess
+// FromStoreRecord converts a dgstore.Record to a dontguess
 // *Message. The exchange engine and tests read operator egress and ingest from
 // the local pkg/store log (dontguess-657), so the conversion boundary is the
 // dgstore Record rather than the retired campfire store.MessageRecord.

@@ -1,10 +1,10 @@
 // Package exchange implements the DontGuess exchange operator lifecycle.
 //
 // Nostr-first (docs/design/nostr-first-rebuild-decision.md): an exchange is no
-// longer a campfire. `dontguess init` bootstraps the operator's OWN home under
+// longer remote. `dontguess init` bootstraps the operator's OWN home under
 // DG_HOME — a persistent secp256k1 (nostr) operator identity, the local
 // append-only event store (pkg/store), and a config file recording the relay
-// URLs the operator federates over. There is no campfire creation, beacon,
+// URLs the operator federates over. There is no beacon,
 // naming registration, or convention promotion here.
 package exchange
 
@@ -56,7 +56,7 @@ func (t Tier) RequiresRelay() bool {
 	return t == TierTeam || t == TierFleet
 }
 
-// Config is the local operator config written after init. It is campfire-free:
+// Config is the local operator config written after init. It is :
 // it records the operator's nostr identity, the relay URLs the operator serves,
 // and the local store path.
 type Config struct {
@@ -157,7 +157,7 @@ const MaxMinReputation = 50
 // `--min-buy-balance 1` (this constant). See docs/design/nostr-admission-scrip-rehome-3b8.md §8-D1.
 const DefaultMinBuyBalance int64 = 1
 
-// InitOptions controls the campfire-free Init operation.
+// InitOptions controls the Init operation.
 type InitOptions struct {
 	// DGHome is the operator home directory. If empty, it resolves to the
 	// DG_HOME environment variable, then $HOME/.dontguess.
@@ -221,7 +221,7 @@ func LoadConfig(dgHome string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Init bootstraps the operator's own DontGuess home campfire-free:
+// Init bootstraps the operator's own DontGuess home :
 //
 //	(a) operator identity — a persistent secp256k1 (nostr) key at
 //	    $DG_HOME/nostr-operator.key, minted on first run and REUSED (never

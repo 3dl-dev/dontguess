@@ -658,7 +658,6 @@ func TestSmallContentDispute_ScripRefundPath(t *testing.T) {
 	h := newTestHarness(t)
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -838,7 +837,6 @@ func TestSmallContentDispute_MissingEntry_SilentlyDropped(t *testing.T) {
 	h := newTestHarness(t)
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,

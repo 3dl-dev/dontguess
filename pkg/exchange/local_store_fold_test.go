@@ -114,7 +114,6 @@ func TestLocalStore_FoldsIdenticallyToCampfireStore(t *testing.T) {
 	for _, rec := range allMsgs {
 		err := localStore.Append(dgstore.Record{
 			ID:          rec.ID,
-			CampfireID:  rec.CampfireID,
 			Sender:      rec.Sender,
 			Payload:     rec.Payload,
 			Tags:        rec.Tags,

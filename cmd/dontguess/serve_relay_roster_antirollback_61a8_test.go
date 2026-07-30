@@ -125,7 +125,6 @@ func TestRelayRosterAntiRollback_SurvivesRestart_61a8(t *testing.T) {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		TrustChecker:      tc2,

@@ -136,7 +136,6 @@ func newCompressFixture(t *testing.T, allowAgent bool, origBytes int) *compressF
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		// OperatorSigner deliberately omitted: it arms encryptedRequired, which

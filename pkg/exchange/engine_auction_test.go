@@ -245,7 +245,6 @@ func TestEngine_AuctionVickreyPrice_PaymentCorrectness(t *testing.T) {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,

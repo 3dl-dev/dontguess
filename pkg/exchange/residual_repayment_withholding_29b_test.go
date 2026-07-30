@@ -48,7 +48,6 @@ func TestSettleResidual_WithholdsForOutstandingLoan(t *testing.T) {
 
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,

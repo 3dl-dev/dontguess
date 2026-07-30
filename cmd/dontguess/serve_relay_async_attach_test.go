@@ -90,7 +90,6 @@ func TestServeStartup_OperatorSocketRespondsUnder1s_WithDeadRelayLeg(t *testing.
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        localStore,
 		OperatorPublicKey: operatorIdentity.PubKeyHex(),
 		Logger:            t.Logf,

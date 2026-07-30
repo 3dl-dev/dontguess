@@ -389,7 +389,7 @@ func (e *Engine) performScripSettlement(ctx context.Context, msg *Message, selle
 // are operator-authored and never causally concurrent with each other)
 // would let the tie-break scramble true emission order on rebuild, breaking
 // fold determinism. This is the operator's own single-writer local clock —
-// no cross-process coordination is needed (relay/campfire-delivered events
+// no cross-process coordination is needed (relay-delivered events
 // carry their own transport timestamp, assigned upstream, not here).
 func (e *Engine) nextMonotonicTimestamp() int64 {
 	e.emitClockMu.Lock()
@@ -765,7 +765,7 @@ func buyerAcceptRejectGuide(reason string) string {
 }
 
 // restoreExistingHold re-hydrates an in-memory reservation when a scrip-buy-hold
-// was already written to the campfire log on a previous engine run. This prevents
+// was already written to the event log on a previous engine run. This prevents
 // double-charging the buyer on restart.
 //
 // The restored Amount is the ORIGINAL amount that was held at buyer-accept time
@@ -1007,7 +1007,7 @@ func (e *Engine) sendPreviewResponse(msg *Message, matchMsgID string, entry *Inv
 // handleSettleDeliverContent processes a settle(deliver) message from the operator.
 //
 // When the operator sends a settle(deliver) trigger (without a content field),
-// the engine emits a new settle(deliver) message to the campfire with the full
+// the engine emits a new settle(deliver) message to the event log with the full
 // content from the inventory entry. The buyer can identify this message by the
 // phase tag and the antecedent chain (operator's deliver → buyer-accept → match).
 //

@@ -52,7 +52,6 @@ func newInsuredMatchFixture(t *testing.T, guaranteeSeconds int) *insuredMatchFix
 	h := newTestHarness(t)
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -141,7 +140,6 @@ func (f *insuredMatchFixture) dispatchCompleteWithTimestamp(t *testing.T, delive
 	completeP, _ := json.Marshal(map[string]any{"entry_id": f.entryID})
 	completeMsg := &exchange.Message{
 		ID:          fmt.Sprintf("complete-%064x", ts&0xffffffff),
-		CampfireID:  f.h.cfID,
 		Sender:      f.h.buyer.PublicKeyHex(),
 		Payload:     completeP,
 		Tags:        []string{exchange.TagSettle, exchange.TagPhasePrefix + exchange.SettlePhaseStrComplete},

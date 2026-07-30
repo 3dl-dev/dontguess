@@ -56,12 +56,11 @@ func buildDeliverChainMessages(t *testing.T, ls *dgstore.Store, operatorKey, sel
 
 	buyID := newReservationID()
 	mustAppend(t, ls, dgstore.Record{
-		ID:         buyID,
-		CampfireID: "local",
-		Sender:     buyer,
-		Payload:    localBuyDropBuyPayload(t, "medieval French troubadour poetry translation", 400),
-		Tags:       []string{TagBuy},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        buyID,
+		Sender:    buyer,
+		Payload:   localBuyDropBuyPayload(t, "medieval French troubadour poetry translation", 400),
+		Tags:      []string{TagBuy},
+		Timestamp: time.Now().UnixNano(),
 	})
 
 	matchID := newReservationID()
@@ -70,7 +69,6 @@ func buildDeliverChainMessages(t *testing.T, ls *dgstore.Store, operatorKey, sel
 	})
 	mustAppend(t, ls, dgstore.Record{
 		ID:          matchID,
-		CampfireID:  "local",
 		Sender:      operatorKey,
 		Payload:     matchPayload,
 		Tags:        []string{TagMatch},
@@ -86,7 +84,6 @@ func buildDeliverChainMessages(t *testing.T, ls *dgstore.Store, operatorKey, sel
 	})
 	mustAppend(t, ls, dgstore.Record{
 		ID:          buyerAcceptID,
-		CampfireID:  "local",
 		Sender:      buyer,
 		Payload:     buyerAcceptPayload,
 		Tags:        []string{TagSettle, TagPhasePrefix + SettlePhaseStrBuyerAccept, TagVerdictPrefix + "accepted"},
@@ -102,7 +99,6 @@ func buildDeliverChainMessages(t *testing.T, ls *dgstore.Store, operatorKey, sel
 	})
 	mustAppend(t, ls, dgstore.Record{
 		ID:          deliverID,
-		CampfireID:  "local",
 		Sender:      operatorKey,
 		Payload:     deliverPayload,
 		Tags:        []string{TagSettle, TagPhasePrefix + SettlePhaseStrDeliver},
@@ -142,7 +138,6 @@ func TestFoldDoubleApply_SettleDeliverEntryCounter(t *testing.T) {
 	buyer := newReservationID()
 
 	eng := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		Logger:            func(format string, args ...any) { t.Logf("[engine] "+format, args...) },
@@ -153,12 +148,11 @@ func TestFoldDoubleApply_SettleDeliverEntryCounter(t *testing.T) {
 
 	put1 := newReservationID()
 	mustAppend(t, ls, dgstore.Record{
-		ID:         put1,
-		CampfireID: "local",
-		Sender:     seller,
-		Payload:    localBuyDropPutPayload(t, "Go HTTP handler unit test generator", 8000),
-		Tags:       []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        put1,
+		Sender:    seller,
+		Payload:   localBuyDropPutPayload(t, "Go HTTP handler unit test generator", 8000),
+		Tags:      []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: time.Now().UnixNano(),
 	})
 	if err := eng.AutoAcceptPut(put1, 5600, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut(put1): %v", err)
@@ -369,7 +363,6 @@ func TestFoldDoubleApply_SmallContentDisputeCounter(t *testing.T) {
 	buyer := newReservationID()
 
 	eng := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		Logger:            func(format string, args ...any) { t.Logf("[engine] "+format, args...) },
@@ -383,12 +376,11 @@ func TestFoldDoubleApply_SmallContentDisputeCounter(t *testing.T) {
 	// and applySettleSmallContentDispute's isSmall check passes.
 	put1 := newReservationID()
 	mustAppend(t, ls, dgstore.Record{
-		ID:         put1,
-		CampfireID: "local",
-		Sender:     seller,
-		Payload:    localBuyDropPutPayload(t, "one-line shell alias", 250),
-		Tags:       []string{TagPut, "exchange:content-type:code", "exchange:domain:shell"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        put1,
+		Sender:    seller,
+		Payload:   localBuyDropPutPayload(t, "one-line shell alias", 250),
+		Tags:      []string{TagPut, "exchange:content-type:code", "exchange:domain:shell"},
+		Timestamp: time.Now().UnixNano(),
 	})
 	if err := eng.AutoAcceptPut(put1, 180, time.Now().Add(72*time.Hour)); err != nil {
 		t.Fatalf("AutoAcceptPut(put1): %v", err)
@@ -410,7 +402,6 @@ func TestFoldDoubleApply_SmallContentDisputeCounter(t *testing.T) {
 	})
 	mustAppend(t, ls, dgstore.Record{
 		ID:          disputeID,
-		CampfireID:  "local",
 		Sender:      buyer,
 		Payload:     disputePayload,
 		Tags:        []string{TagSettle, TagPhasePrefix + SettlePhaseStrSmallContentDispute},

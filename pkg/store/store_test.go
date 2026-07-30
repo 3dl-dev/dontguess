@@ -20,9 +20,9 @@ func TestStore_AppendReadAll_PreservesOrderAndFields(t *testing.T) {
 	t.Cleanup(func() { s.Close() }) //nolint:errcheck
 
 	recs := []store.Record{
-		{ID: "a", CampfireID: "cf1", Sender: "sender-a", Payload: []byte(`{"n":1}`), Tags: []string{"exchange:put"}, Timestamp: 100},
-		{ID: "b", CampfireID: "cf1", Sender: "sender-b", Payload: []byte(`{"n":2}`), Tags: []string{"exchange:buy"}, Antecedents: []string{"a"}, Timestamp: 200, Instance: "worker-1"},
-		{ID: "c", CampfireID: "cf1", Sender: "sender-a", Payload: []byte(`{"n":3}`), Tags: []string{"exchange:match"}, Antecedents: []string{"b"}, Timestamp: 300},
+		{ID: "a", Sender: "sender-a", Payload: []byte(`{"n":1}`), Tags: []string{"exchange:put"}, Timestamp: 100},
+		{ID: "b", Sender: "sender-b", Payload: []byte(`{"n":2}`), Tags: []string{"exchange:buy"}, Antecedents: []string{"a"}, Timestamp: 200, Instance: "worker-1"},
+		{ID: "c", Sender: "sender-a", Payload: []byte(`{"n":3}`), Tags: []string{"exchange:match"}, Antecedents: []string{"b"}, Timestamp: 300},
 	}
 	for _, r := range recs {
 		if err := s.Append(r); err != nil {
@@ -402,7 +402,6 @@ func TestRecord_ToMessage_IgnoresOriginAndSeq(t *testing.T) {
 	t.Parallel()
 	base := store.Record{
 		ID:          "a",
-		CampfireID:  "cf1",
 		Sender:      "s1",
 		Payload:     []byte(`{"n":1}`),
 		Tags:        []string{"exchange:put"},

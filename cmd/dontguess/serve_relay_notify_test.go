@@ -72,7 +72,6 @@ func TestRelayNotify_OperatorMatchPublishesOnFoldNotTick(t *testing.T) {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		PollInterval:      5 * time.Millisecond,

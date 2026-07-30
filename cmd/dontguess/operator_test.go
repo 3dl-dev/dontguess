@@ -94,7 +94,6 @@ func conventionDirForOpTest(t *testing.T) string {
 // newEngine returns a campfire-free exchange.Engine wired to the harness.
 func (h *opTestHarness) newEngine() *exchange.Engine {
 	opts := exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator,
 		Logger: func(format string, args ...any) {
@@ -146,7 +145,6 @@ func (h *opTestHarness) sendHeldPut(eng *exchange.Engine, desc string, tokenCost
 
 	rec := store.MessageRecord{
 		ID:          msgID,
-		CampfireID:  h.cfID,
 		Sender:      h.seller,
 		Payload:     payload,
 		Tags:        []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},

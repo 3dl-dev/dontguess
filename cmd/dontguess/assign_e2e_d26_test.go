@@ -299,7 +299,6 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 
 	notifier := &appendNotifier{}
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID: "local",
 		LocalStore: ls,
 		// OperatorPublicKey (NOT OperatorSigner): state.OperatorKey must be set
 		// for the operator-only assign apply* guards (applyAssign/
@@ -332,12 +331,11 @@ func TestE2E_AssignDoor_d26_ListClaimComplete_ScripIncreases(t *testing.T) {
 	putID := randomLocalMsgID(t)
 	const tokenCost int64 = 20000
 	if err := eng.IngestLocalRecord(dgstore.Record{
-		ID:         putID,
-		CampfireID: "local",
-		Sender:     seller.PubKeyHex(),
-		Payload:    localPutPayload("assign-door fixture: rust borrow checker cheatsheet", tokenCost),
-		Tags:       []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:rust"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        putID,
+		Sender:    seller.PubKeyHex(),
+		Payload:   localPutPayload("assign-door fixture: rust borrow checker cheatsheet", tokenCost),
+		Tags:      []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:rust"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("IngestLocalRecord(put): %v", err)
 	}

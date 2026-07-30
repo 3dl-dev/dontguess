@@ -13,7 +13,7 @@ var initForce bool
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize the DontGuess operator home (campfire-free)",
+	Short: "Initialize the DontGuess operator home",
 	Long: `Bootstrap this operator's own DontGuess home under $DG_HOME:
 
   1. operator identity — a persistent secp256k1 (nostr) key at
@@ -22,8 +22,7 @@ var initCmd = &cobra.Command{
   3. config — records the operator pubkey and the relay URLs the operator
      serves (from DONTGUESS_RELAY_URLS / DONTGUESS_RELAY_URL).
 
-This is campfire-free: no campfire, beacon, naming registry, or convention
-promotion. init is idempotent — the operator key is never overwritten. Running
+init is idempotent — the operator key is never overwritten. Running
 'dontguess serve' also bootstraps the same identity + store on first run, so
 'init' is optional; use it to provision (and inspect) the operator home ahead
 of time.
@@ -56,7 +55,7 @@ func runInit(_ *cobra.Command, _ []string) error {
 		return enc.Encode(cfg)
 	}
 
-	fmt.Printf("DontGuess operator home initialized (campfire-free)\n")
+	fmt.Printf("DontGuess operator home initialized\n")
 	fmt.Printf("  home:     %s\n", dgHome)
 	fmt.Printf("  operator: %s\n", cfg.OperatorKeyHex)
 	fmt.Printf("  npub:     %s\n", cfg.OperatorNpub)

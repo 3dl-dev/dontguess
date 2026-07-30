@@ -166,7 +166,6 @@ func (h *testHarness) sendMessage(sender *testAgent, payload []byte, tags []stri
 	// it (and operator egress) via h.st.ListMessages.
 	rec := store.MessageRecord{
 		ID:          id,
-		CampfireID:  h.cfID,
 		Sender:      sender.pubKeyHex,
 		Payload:     payload,
 		Tags:        tags,
@@ -198,7 +197,6 @@ func (h *testHarness) newEngine() *exchange.Engine {
 // the same store, no campfire.
 func (h *testHarness) newEngineWithOpts(override func(*exchange.EngineOptions)) *exchange.Engine {
 	opts := exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		Logger: func(format string, args ...any) {

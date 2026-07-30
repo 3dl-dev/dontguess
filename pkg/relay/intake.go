@@ -181,7 +181,6 @@ func sequencedToRelayRecord(s exchange.Sequenced) store.Record {
 	m := s.Msg
 	return store.Record{
 		ID:          m.ID,
-		CampfireID:  m.CampfireID,
 		Sender:      m.Sender,
 		Payload:     m.Payload,
 		Tags:        m.Tags,

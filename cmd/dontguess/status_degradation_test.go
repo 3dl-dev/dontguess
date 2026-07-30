@@ -156,7 +156,6 @@ func TestOperatorSocket_Metrics_TrustDenialProbe(t *testing.T) {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator,
 		TrustChecker:      checker,
@@ -199,7 +198,6 @@ func TestOperatorSocket_Metrics_TrustDenialProbe(t *testing.T) {
 	})
 	rec := store.MessageRecord{
 		ID:          hex.EncodeToString(idBytes),
-		CampfireID:  h.cfID,
 		Sender:      h.seller,
 		Payload:     payload,
 		Tags:        []string{exchange.TagPut, "exchange:content-type:text"},

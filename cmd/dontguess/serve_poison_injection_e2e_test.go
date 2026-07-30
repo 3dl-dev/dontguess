@@ -151,7 +151,6 @@ func teamTierServeStackRevoked(t *testing.T, ls *dgstore.Store, storePath string
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		PollInterval:      5 * time.Millisecond,

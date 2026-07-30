@@ -49,12 +49,11 @@ func seedOneAcceptedEntry(t *testing.T, dgHome, putID string, tokenCost int64) {
 
 	sellerKey := randomLocalMsgID(t)
 	if err := ls.Append(dgstore.Record{
-		ID:         putID,
-		CampfireID: "local",
-		Sender:     sellerKey,
-		Payload:    localPutPayload("reprice-migration fixture entry", tokenCost),
-		Tags:       []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        putID,
+		Sender:    sellerKey,
+		Payload:   localPutPayload("reprice-migration fixture entry", tokenCost),
+		Tags:      []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("appending put: %v", err)
 	}

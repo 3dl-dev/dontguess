@@ -171,7 +171,6 @@ func TestBuyMiss_StandingOfferE2E(t *testing.T) {
 	// Wire a real CampfireScripStore so we can verify scrip payments.
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -523,7 +522,6 @@ func TestBuyMiss_ClaimedOfferRejectsSecondFulfillment(t *testing.T) {
 
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -644,7 +642,6 @@ func TestBuyMiss_TokenCostCapped(t *testing.T) {
 	taskHash := exchange.TaskDescriptionHash(task)
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		MaxTokenCost:      maxTokenCost,
@@ -1400,7 +1397,6 @@ func TestBuyMiss_SellerBalanceAfterStandingOfferFulfillment(t *testing.T) {
 	// Build the scrip store after the mint message is in the log.
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,

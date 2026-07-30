@@ -111,8 +111,6 @@ const Layer0MaxConversionRate = 0.05
 
 // EngineOptions configures an exchange engine.
 type EngineOptions struct {
-	// CampfireID is the exchange campfire's public key hex.
-	CampfireID string
 	// OperatorPublicKey is the hex-encoded Ed25519 public key of the exchange
 	// operator. It populates State.OperatorKey on startup so operator-emitted
 	// records (match/put-accept/settle/…) are attributed to it. The engine has
@@ -131,7 +129,7 @@ type EngineOptions struct {
 	// the TrustChecker typed-nil precedent). nil ⇒ the legacy plaintext path
 	// stays legal and byte-for-byte unchanged.
 	OperatorSigner identity.Signer
-	// LocalStore is the campfire-free append-only event log (pkg/store) that is
+	// LocalStore is the append-only event log (pkg/store) that is
 	// the engine's SOLE ingest and egress path.
 	//
 	// INGEST: replayAll and the poll loop (run) read exclusively from
@@ -460,7 +458,7 @@ type Engine struct {
 	localMu sync.Mutex
 	// localMsgByID indexes every message the engine has ingested from
 	// LocalStore (dontguess-275), by ID. LocalStore (pkg/store) has no
-	// campfire Get/GetMessage to fall back on, so fetchMessage and
+	// remote Get/GetMessage to fall back on, so fetchMessage and
 	// sendLocalOperatorMessage use this index instead. Populated by
 	// replayAllLocal (startup) and pollLocalStore (ongoing); only relevant
 	// when EngineOptions.LocalStore is configured. Guarded by localMu.
@@ -806,7 +804,7 @@ func (e *Engine) State() *State {
 	return e.state
 }
 
-// LocalStore returns the engine's campfire-free append-only event log
+// LocalStore returns the engine's append-only event log
 // (EngineOptions.LocalStore), or nil when the engine was not configured with
 // one. READ-ONLY accessor — callers (e.g. the individual-tier IPC handler,
 // cmd/dontguess OpPut/OpBuy, dontguess-2b4) use it to ReadAll the log to
@@ -1014,7 +1012,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	// replayAll (replayAllLocal) folded the entire log into State without
 	// dispatching; dispatchPendingOrders below dispatches the pending buys, and
 	// the puts/settles/matches already in the log need no live dispatch (their
-	// effect is fully captured by the fold) — exactly how the campfire path
+	// effect is fully captured by the fold) — exactly how the prior path
 	// treats a startup replay + dispatchPendingOrders. Records appended AFTER
 	// startup are what the poll loop dispatches, from this cursor forward.
 	// Seeding here (before dispatchPendingOrders, whose handlers may append
@@ -1077,7 +1075,7 @@ func (e *Engine) indexLocalMessages(msgs []Message) {
 }
 
 // replayAll rebuilds state by replaying the full LocalStore event log — the
-// sole, campfire-free ingest path (see replayAllLocal). A nil LocalStore is a
+// sole, ingest path (see replayAllLocal). A nil LocalStore is a
 // no-op: a state-only test engine that never serves has nothing to replay.
 func (e *Engine) replayAll() error {
 	if e.opts.LocalStore == nil {
@@ -1102,7 +1100,7 @@ func (e *Engine) refreshBeforeOperatorOp() error {
 }
 
 // replayAllLocal loads every record currently in LocalStore (pkg/store) and
-// rebuilds state from it — the campfire-free ingest path (dontguess-275). A
+// rebuilds state from it — the ingest path (dontguess-275). A
 // single local writer appends put/buy/settle/match/etc. records to an
 // append-only JSONL log; append order is fold order (pkg/store package doc),
 // so replaying the full log in order reproduces the same state a campfire
@@ -1139,7 +1137,7 @@ func (e *Engine) replayAllLocal() error {
 	return nil
 }
 
-// run is the main event loop: it polls the campfire-free LocalStore event log
+// run is the main event loop: it polls the LocalStore event log
 // on a ticker (runLocal), folding and dispatching newly-appended records and
 // running expiry sweeps on the same cadence. A nil LocalStore blocks until
 // shutdown so Start still honors its run-until-cancelled contract.
@@ -1151,7 +1149,7 @@ func (e *Engine) run(ctx context.Context) error {
 	return e.runLocal(ctx)
 }
 
-// runLocal is the campfire-free event loop (dontguess-275). LocalStore
+// runLocal is the event loop (dontguess-275). LocalStore
 // (pkg/store) has no subscribe/notify mechanism, so instead of a channel of
 // pushed messages, runLocal polls the store on a ticker and applies+dispatches
 // whatever is new since the last replay/poll (pollLocalStore). Expiry sweeps
@@ -1624,7 +1622,7 @@ func (e *Engine) recordTrustDenial(op Operation, phase SettlePhase, err error) s
 }
 
 // sendOperatorMessage emits an operator-authored message (match/put-accept/
-// settle/…) by appending it directly to LocalStore — the sole, campfire-free
+// settle/…) by appending it directly to LocalStore — the sole,
 // egress path (sendLocalOperatorMessage). Returns a dontguess *Message so
 // callers don't depend on any store record type.
 func (e *Engine) sendOperatorMessage(payload []byte, tags []string, antecedents []string) (*Message, error) {
@@ -1635,7 +1633,7 @@ func (e *Engine) sendOperatorMessage(payload []byte, tags []string, antecedents 
 }
 
 // sendLocalOperatorMessage appends an operator-emitted message (match,
-// put-accept, settle, etc.) directly to LocalStore — the fully campfire-free
+// put-accept, settle, etc.) directly to LocalStore — the fully
 // egress path (dontguess-275).
 //
 // The message ID is a random 32-hex-char string (same generator as
@@ -1651,7 +1649,6 @@ func (e *Engine) sendLocalOperatorMessage(payload []byte, tags []string, anteced
 	}
 	msg := &Message{
 		ID:          newReservationID(),
-		CampfireID:  e.opts.CampfireID,
 		Sender:      e.state.OperatorKey,
 		Payload:     payload,
 		Tags:        tags,
@@ -1692,7 +1689,6 @@ func (e *Engine) sendLocalOperatorMessage(payload []byte, tags []string, anteced
 func (e *Engine) appendLocalRecord(msg *Message) error {
 	rec := dgstore.Record{
 		ID:          msg.ID,
-		CampfireID:  msg.CampfireID,
 		Sender:      msg.Sender,
 		Payload:     msg.Payload,
 		Tags:        msg.Tags,

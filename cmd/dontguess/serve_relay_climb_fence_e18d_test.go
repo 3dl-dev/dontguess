@@ -87,13 +87,12 @@ func TestClimbEgressFence_PreClimbPlaintextNeverRepublished(t *testing.T) {
 	// provable plaintext leak.
 	for i := 0; i < n; i++ {
 		rec := dgstore.Record{
-			ID:         randomLocalMsgID(t),
-			CampfireID: "local",
-			Sender:     operator.PubKeyHex(),
-			Payload:    localPutPayload(secret+" pre-climb plaintext put variant", 8000+int64(i)),
-			Tags:       []string{exchange.TagPut, "exchange:content-type:code"},
-			Timestamp:  time.Now().UnixNano() + int64(i),
-			Origin:     "local",
+			ID:        randomLocalMsgID(t),
+			Sender:    operator.PubKeyHex(),
+			Payload:   localPutPayload(secret+" pre-climb plaintext put variant", 8000+int64(i)),
+			Tags:      []string{exchange.TagPut, "exchange:content-type:code"},
+			Timestamp: time.Now().UnixNano() + int64(i),
+			Origin:    "local",
 		}
 		if err := ls.Append(rec); err != nil {
 			t.Fatalf("append pre-climb put %d: %v", i, err)
@@ -150,13 +149,12 @@ func TestClimbEgressFence_PreClimbPlaintextNeverRepublished(t *testing.T) {
 	//    watermark (a fleet-era emission). It MUST publish — the fence blocks only
 	//    the pre-climb corpus, never post-climb egress.
 	postRec := dgstore.Record{
-		ID:         randomLocalMsgID(t),
-		CampfireID: "local",
-		Sender:     operator.PubKeyHex(),
-		Payload:    []byte(`{"buy_id":"b1","entry_id":"e1"}`),
-		Tags:       []string{exchange.TagMatch},
-		Timestamp:  time.Now().UnixNano() + 1_000,
-		Origin:     "local",
+		ID:        randomLocalMsgID(t),
+		Sender:    operator.PubKeyHex(),
+		Payload:   []byte(`{"buy_id":"b1","entry_id":"e1"}`),
+		Tags:      []string{exchange.TagMatch},
+		Timestamp: time.Now().UnixNano() + 1_000,
+		Origin:    "local",
 	}
 	if err := ls.Append(postRec); err != nil {
 		t.Fatalf("append post-climb record: %v", err)

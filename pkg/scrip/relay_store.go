@@ -48,7 +48,7 @@ func (e *balanceEntry) etag() string {
 }
 
 // LocalScripStore implements SpendingStore backed by a scrip operation message
-// log read from the campfire-free local event log (pkg/store, dgstore.Store) —
+// log read from the local event log (pkg/store, dgstore.Store) —
 // the relay/local transport for the nostr-first migration (dontguess-203).
 //
 // State is derived by replaying all scrip operation messages in the log's
@@ -64,7 +64,7 @@ func (e *balanceEntry) etag() string {
 //
 // LocalScripStore is safe for concurrent use.
 type LocalScripStore struct {
-	// localStore is the campfire-free append-only event log (pkg/store) whose
+	// localStore is the append-only event log (pkg/store) whose
 	// single-writer append order Replay folds to build balance state. It is the
 	// sole message source.
 	localStore *dgstore.Store
@@ -132,7 +132,7 @@ type LocalScripStore struct {
 	loansByBorrower map[string][]string    // borrowerKey -> []loanID
 }
 
-// NewLocalScripStore creates a LocalScripStore backed by the campfire-free
+// NewLocalScripStore creates a LocalScripStore backed by the
 // relay/local event log (pkg/store) and replays it to build initial balance
 // state (the nostr-first migration, dontguess-203). operatorKey is the public
 // key hex of the exchange operator; only messages from this sender are accepted
@@ -157,7 +157,7 @@ func NewLocalScripStore(localStore *dgstore.Store, operatorKey string) (*LocalSc
 // It resets all balances and re-derives them from scratch.
 // Called on construction; can be called again to resync.
 //
-// The message source is the campfire-free localStore (dontguess-203): its
+// The message source is the localStore (dontguess-203): its
 // single-writer append order is the deterministic fold order.
 //
 // Replay holds replayMu exclusively for the entire operation so that no

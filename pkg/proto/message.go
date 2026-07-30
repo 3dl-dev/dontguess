@@ -9,13 +9,11 @@ package proto
 //
 // Internally all state processing and engine handlers operate on *Message so
 // that exchange logic is decoupled from any transport boundary type. The
-// store->Message conversion lives at the campfire-free dgstore boundary
+// store->Message conversion lives at the dgstore boundary
 // (pkg/store.Record.ToMessage / pkg/exchange.FromStoreRecord, dontguess-657).
 type Message struct {
 	// ID is the message ID (hex-encoded public key hash).
 	ID string
-	// CampfireID is the exchange this message belongs to.
-	CampfireID string
 	// Sender is the hex-encoded Ed25519 public key of the sender.
 	Sender string
 	// Payload is the raw JSON message body.

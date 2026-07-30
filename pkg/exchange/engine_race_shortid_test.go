@@ -150,7 +150,6 @@ func TestRunAutoAccept_ShortPutMsgID(t *testing.T) {
 	)
 	rec := store.MessageRecord{
 		ID:          shortID,
-		CampfireID:  h.cfID,
 		Sender:      h.seller.pubKeyHex,
 		Payload:     payload,
 		Tags:        []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},

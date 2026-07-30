@@ -12,7 +12,7 @@
 //
 // SpendingStore is transport-agnostic by design: it names no relay or
 // local-store type in its method signatures. relay_store.go's LocalScripStore
-// is the implementation on file, constructed over a campfire-free relay/local
+// is the implementation on file, constructed over a local
 // event log (NewLocalScripStore, dontguess-203).
 package scrip
 

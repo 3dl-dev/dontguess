@@ -80,7 +80,6 @@ func TestAdmitRoundTrip_BothGatesLive_NoRestart_c10(t *testing.T) {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		TrustChecker:      tc,

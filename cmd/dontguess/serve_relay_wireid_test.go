@@ -160,7 +160,6 @@ func newWireIDStack(t *testing.T, ctx context.Context, ls *dgstore.Store, operat
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:               "local",
 		LocalStore:               ls,
 		OperatorPublicKey:        operator.PubKeyHex(),
 		ScripStore:               ss,

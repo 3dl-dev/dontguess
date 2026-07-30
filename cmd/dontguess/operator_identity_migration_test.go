@@ -43,12 +43,11 @@ func writeSoloEraLog(t *testing.T, ls *dgstore.Store, legacyKey string) (putID, 
 	sellerKey = randomLocalMsgID(t)
 	putID = randomLocalMsgID(t)
 	if err := ls.Append(dgstore.Record{
-		ID:         putID,
-		CampfireID: "local",
-		Sender:     sellerKey,
-		Payload:    localPutPayload("Go HTTP handler unit test generator", 8000),
-		Tags:       []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        putID,
+		Sender:    sellerKey,
+		Payload:   localPutPayload("Go HTTP handler unit test generator", 8000),
+		Tags:      []string{exchange.TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("appending solo put: %v", err)
 	}
@@ -58,7 +57,6 @@ func writeSoloEraLog(t *testing.T, ls *dgstore.Store, legacyKey string) (putID, 
 	// AutoAcceptPut emits the operator put-accept with Sender == legacyKey, exactly
 	// as a solo home's auto-accept loop did.
 	solo := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: legacyKey,
 		PollInterval:      20 * time.Millisecond,
@@ -86,7 +84,6 @@ func newClimbEngine(t *testing.T, ls *dgstore.Store, operator *identity.Secp256k
 		t.Fatalf("NewLocalScripStore: %v", err)
 	}
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:               "local",
 		LocalStore:               ls,
 		OperatorPublicKey:        nostrKey,
 		OperatorSigner:           operator,
@@ -241,12 +238,11 @@ func appendScripMint(t *testing.T, ls *dgstore.Store, sender, recipient string, 
 		t.Fatalf("marshal mint payload: %v", err)
 	}
 	if err := ls.Append(dgstore.Record{
-		ID:         randomLocalMsgID(t),
-		CampfireID: "local",
-		Sender:     sender,
-		Payload:    payload,
-		Tags:       []string{scrip.TagScripMint},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        randomLocalMsgID(t),
+		Sender:    sender,
+		Payload:   payload,
+		Tags:      []string{scrip.TagScripMint},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("append scrip mint: %v", err)
 	}

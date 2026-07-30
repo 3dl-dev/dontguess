@@ -83,7 +83,6 @@ func TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed(t
 	// Phase 1: build the settle chain (put → accept → buy → match →
 	// buyer-accept → deliver) using a real CampfireScripStore.
 	eng1 := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -106,7 +105,6 @@ func TestSettle_SellerAddBudgetFailureAfterDurableEmit_NoRestoreNoSettleFailed(t
 		err:  scrip.ErrConflict, // arbitrary non-nil error
 	}
 	eng2 := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        failStore,
@@ -272,7 +270,6 @@ func TestSettle_OperatorAddBudgetFailureAfterDurableEmit_NoRollbackNoRestore(t *
 
 	// Phase 1: build the settle chain using a real CampfireScripStore.
 	eng1 := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -299,7 +296,6 @@ func TestSettle_OperatorAddBudgetFailureAfterDurableEmit_NoRollbackNoRestore(t *
 		operatorErr: scrip.ErrConflict,
 	}
 	eng2 := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        failStore,

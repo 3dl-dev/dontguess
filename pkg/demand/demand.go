@@ -5,10 +5,9 @@
 //
 // # Clustering
 //
-// Misses are grouped by theme using keyword matching across seven pre-defined
+// Misses are grouped by theme using keyword matching across pre-defined
 // clusters derived from the §4 analysis in the measurement review doc:
 //
-//	campfire   (12 real misses)
 //	audit      (9)
 //	convention (8)
 //	review     (6)
@@ -73,7 +72,7 @@ type BacklogItem struct {
 	Task string `json:"task"`
 	// TaskHash is the SHA-256 hash of the task (from payload).
 	TaskHash string `json:"task_hash"`
-	// Cluster is the theme label (campfire, audit, convention, review,
+	// Cluster is the theme label (audit, convention, review,
 	// security, test-gap, other).
 	Cluster string `json:"cluster"`
 	// OfferedPriceRate is the exchange's standing offer rate (70 = 70%
@@ -115,23 +114,20 @@ type Backlog struct {
 //  1. security/FROST: "frost", "cryptograph", "cold wallet" are unambiguous
 //     signals. "auth gate" and "authentication gate" are checked before audit
 //     (which also catches "endpoint").
-//  2. review: "rpt review", "code review", "design review" — checked before
-//     campfire to claim "RPT review of campfire SDK surface" as a review task.
+//  2. review: "rpt review", "code review", "design review".
 //  3. convention: "revoke", "supersede" are unambiguous exchange convention
 //     operations. "exchange convention" catches other convention tasks.
 //  4. test-gap: "test gap", "test strategy" — checked before audit since both
 //     deal with testing; the specific phrase is more selective.
 //  5. audit: "audit", "missing error", "edge case", "error path" — broad
-//     coverage-gap vocabulary, checked before campfire.
-//  6. campfire: broadest named cluster; catches campfire SDK / protocol tasks
-//     after all more specific clusters have claimed their tasks.
+//     coverage-gap vocabulary, checked last.
 var clusterRules = []struct {
 	name     string
 	keywords []string
 }{
 	// security: FROST, cryptographic ceremonies, and auth gates
 	{"security", []string{"frost", "cryptograph", "cold wallet", "signing ceremony", "auth gate", "authentication gate"}},
-	// review: RPT, code review, design review — before campfire
+	// review: RPT, code review, design review
 	{"review", []string{"rpt review", "code review", "design review", "rpt "}},
 	// convention: exchange convention operation lifecycle
 	{"convention", []string{"revoke", "supersede", "exchange convention", "convention:put", "convention:buy", "convention:assign"}},
@@ -139,8 +135,6 @@ var clusterRules = []struct {
 	{"test-gap", []string{"test gap", "test-gap", "test strategy", "test pattern"}},
 	// audit: coverage audits, endpoint audits, missing error paths
 	{"audit", []string{"audit", "missing error", "edge case gap", "edge case", "error path", "untested endpoint", "missing path"}},
-	// campfire: campfire SDK, protocol, subscribe, and convention server
-	{"campfire", []string{"campfire", "cf-protocol", "cf protocol", "campfire sdk", "convention server", "subscribe cursor", "convention declaration"}},
 }
 
 // IsSynthetic reports whether a task description represents synthetic load-test

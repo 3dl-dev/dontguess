@@ -76,7 +76,6 @@ func TestAppendLocalRecordAtomic_ConcurrentFoldNoDoubleApply(t *testing.T) {
 
 	operatorKey := newReservationID()
 	eng := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		// No run() loop — folds are driven explicitly by the goroutines below.

@@ -39,7 +39,6 @@ func TestLocalBuyNotDroppedByAutoAcceptRebuild(t *testing.T) {
 
 	operatorKey := newReservationID()
 	eng := NewEngine(EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		PollInterval:      20 * time.Millisecond,
@@ -57,12 +56,11 @@ func TestLocalBuyNotDroppedByAutoAcceptRebuild(t *testing.T) {
 	put1 := newReservationID()
 	seller := newReservationID()
 	if err := ls.Append(dgstore.Record{
-		ID:         put1,
-		CampfireID: "local",
-		Sender:     seller,
-		Payload:    localBuyDropPutPayload(t, "Go HTTP handler unit test generator", 8000),
-		Tags:       []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        put1,
+		Sender:    seller,
+		Payload:   localBuyDropPutPayload(t, "Go HTTP handler unit test generator", 8000),
+		Tags:      []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("append put1: %v", err)
 	}
@@ -79,12 +77,11 @@ func TestLocalBuyNotDroppedByAutoAcceptRebuild(t *testing.T) {
 	buyID := newReservationID()
 	buyer := newReservationID()
 	if err := ls.Append(dgstore.Record{
-		ID:         buyID,
-		CampfireID: "local",
-		Sender:     buyer,
-		Payload:    localBuyDropBuyPayload(t, "Generate unit tests for a Go HTTP handler", 50000),
-		Tags:       []string{TagBuy},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        buyID,
+		Sender:    buyer,
+		Payload:   localBuyDropBuyPayload(t, "Generate unit tests for a Go HTTP handler", 50000),
+		Tags:      []string{TagBuy},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("append buy: %v", err)
 	}
@@ -95,12 +92,11 @@ func TestLocalBuyNotDroppedByAutoAcceptRebuild(t *testing.T) {
 	// dispatching it.
 	put2 := newReservationID()
 	if err := ls.Append(dgstore.Record{
-		ID:         put2,
-		CampfireID: "local",
-		Sender:     seller,
-		Payload:    localBuyDropPutPayload(t, "Go JSON marshaller fuzz corpus", 9000),
-		Tags:       []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        put2,
+		Sender:    seller,
+		Payload:   localBuyDropPutPayload(t, "Go JSON marshaller fuzz corpus", 9000),
+		Tags:      []string{TagPut, "exchange:content-type:code", "exchange:domain:go"},
+		Timestamp: time.Now().UnixNano(),
 	}); err != nil {
 		t.Fatalf("append put2: %v", err)
 	}

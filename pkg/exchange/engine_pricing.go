@@ -627,7 +627,7 @@ func (e *Engine) RunAutoAccept(max int64, now time.Time, skippedPuts map[string]
 					shortKey(entry.PutMsgID), entry.TokenCost, max)
 				skippedPuts[entry.PutMsgID] = struct{}{}
 				// Also classify as held-for-review in State so the operator CLI
-				// can surface it via PutsHeldForReview(). No campfire message.
+				// can surface it via PutsHeldForReview(). No message emitted.
 				e.State().HoldPutForReview(entry.PutMsgID)
 			}
 			continue

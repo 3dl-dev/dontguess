@@ -34,7 +34,6 @@ func rec(id, sender, tag string, payload any, antecedents []string) dgstore.Reco
 	b, _ := json.Marshal(payload)
 	return dgstore.Record{
 		ID:          id,
-		CampfireID:  "local",
 		Sender:      sender,
 		Payload:     b,
 		Tags:        []string{tag},

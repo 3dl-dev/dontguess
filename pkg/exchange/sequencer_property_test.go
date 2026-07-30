@@ -311,7 +311,6 @@ func TestSequencer_Property_EngineIngestPrunedAntecedentFailsLoud(t *testing.T) 
 	appendAll(t, ls, broken)
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		SequencedIngest:   true,
@@ -339,7 +338,6 @@ func replayThroughEngine(t *testing.T, msgs []exchange.Message, operatorKey stri
 	appendAll(t, ls, msgs)
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operatorKey,
 		SequencedIngest:   sequenced,
@@ -356,7 +354,6 @@ func appendAll(t *testing.T, ls *dgstore.Store, msgs []exchange.Message) {
 		m := msgs[i]
 		if err := ls.Append(dgstore.Record{
 			ID:          m.ID,
-			CampfireID:  m.CampfireID,
 			Sender:      m.Sender,
 			Payload:     m.Payload,
 			Tags:        m.Tags,

@@ -277,7 +277,7 @@ type InventoryEntry struct {
 	// ExpiresAt is the authoritative expiry set by the exchange operator.
 	// Zero means no expiry.
 	ExpiresAt time.Time
-	// PutTimestamp is the campfire-observed receipt time of the put message (nanoseconds).
+	// PutTimestamp is the observed receipt time of the put message (nanoseconds).
 	PutTimestamp int64
 
 	// AcceptedProvenanceLevel is the seller's provenance level (0–3) at the time the
@@ -918,7 +918,7 @@ const (
 	NewNodeTrustThreshold = 0.6
 )
 
-// State is the in-memory materialized view of the exchange campfire log.
+// State is the in-memory materialized view of the exchange event log.
 // It is rebuilt on startup by Replay and updated incrementally by Apply.
 //
 // All mutation must go through Apply — callers must not modify exported maps
@@ -1110,7 +1110,7 @@ type State struct {
 	// completes settle(complete) and triggers emitConsumeSignal is counted here.
 	// Unlike EntryBuyerMap (which tracks distinct buyers), consume count tracks
 	// total consume events including repeat consumers.
-	// Reset on Replay — rebuilt from the campfire log.
+	// Reset on Replay — rebuilt from the event log.
 	entryConsumeCount map[string]int
 
 	// entryDeliverCount tracks the number of times each entry has been delivered
@@ -1119,7 +1119,7 @@ type State struct {
 	// the antecedent chain (deliver → buyer-accept → match → matchToEntry).
 	// Used by AllEntryBehavioralSignals to populate BehavioralSignals.DeliverCount
 	// for the false-positive demotion signal (dontguess-046).
-	// Reset on Replay — rebuilt from the campfire log.
+	// Reset on Replay — rebuilt from the event log.
 	entryDeliverCount map[string]int
 
 	// buyerDeliverCount tracks, per buyer pubkey (GLOBAL across all entries),
@@ -1135,7 +1135,7 @@ type State struct {
 	// those are left untouched.
 	// Populated at the SAME call sites as the entry-level counters
 	// (applySettleDeliver / applySettleComplete in state_settle.go).
-	// Reset on Replay — rebuilt from the campfire log.
+	// Reset on Replay — rebuilt from the event log.
 	buyerDeliverCount map[string]int
 	buyerConsumeCount map[string]int
 
@@ -1144,7 +1144,7 @@ type State struct {
 	// -> buyerKey -> count. This is what lets ExpiryCandidates identify WHICH
 	// buyers' personal completion rates are relevant to a given entry's
 	// deliver-without-consume signal (dontguess-1856).
-	// Reset on Replay — rebuilt from the campfire log.
+	// Reset on Replay — rebuilt from the event log.
 	entryDeliverBuyerCount map[string]map[string]int
 
 	// entryConsumeBuyerCount is the settle(complete) counterpart of
@@ -1156,13 +1156,13 @@ type State struct {
 	// contribution) rather than a self-referential one, so a single-episode
 	// abandonment (no track record on any other entry) is not mistaken for
 	// an established chronic griefer (dontguess-1856).
-	// Reset on Replay — rebuilt from the campfire log.
+	// Reset on Replay — rebuilt from the event log.
 	entryConsumeBuyerCount map[string]map[string]int
 
 	// priceAdjustments holds dynamic price multipliers written by the fast pricing loop.
 	// Key: entryID. The multiplier is applied on top of computePrice's base result.
 	// Stale adjustments (past ExpiresAt) are treated as 1.0x by computePrice.
-	// Not reset on Replay — externally written, not derived from the campfire log.
+	// Not reset on Replay — externally written, not derived from the event log.
 	priceAdjustments map[string]PriceAdjustment
 
 	// wireToStore aliases an operator-emitted message's on-wire CONTENT-HASH id
@@ -1290,13 +1290,13 @@ type State struct {
 	// brokerAssigns maps buy message IDs to the assign message IDs of the
 	// brokered-match task posted for that buy. Populated by applyAssign when
 	// task_type="brokered-match" and buy_msg_id is present. Derived from the
-	// campfire log (reset on Replay). Key: buyMsgID -> assignID.
+	// event log (reset on Replay). Key: buyMsgID -> assignID.
 	brokerAssigns map[string]string
 
 	// brokerMatchIDs is the set of exchange:match message IDs that were produced
 	// by a brokered-match assign (task_type="brokered-match"). Populated externally
 	// by the engine when a brokered-match assign is accepted; NOT reset on Replay
-	// (it is written by the engine, not derived from the campfire log).
+	// (it is written by the engine, not derived from the event log).
 	// Key: matchMsgID.
 	brokerMatchIDs map[string]struct{}
 

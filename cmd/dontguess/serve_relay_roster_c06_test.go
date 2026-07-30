@@ -76,7 +76,6 @@ func TestRelayRosterFold_KeySetSourceOfTruth_c06(t *testing.T) {
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		TrustChecker:      tc,

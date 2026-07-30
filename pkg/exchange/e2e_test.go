@@ -253,7 +253,6 @@ func TestE2E_BuyerReject(t *testing.T) {
 	// at buyer-accept time. A buyer who rejects after seeing the match never touches escrow.
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -528,7 +527,6 @@ func TestE2E_ScripBalances(t *testing.T) {
 	// First, seed the inventory so we can compute the price.
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -799,7 +797,6 @@ func TestE2E_SmallContentDisputePath(t *testing.T) {
 	// Wire a scrip store so we can verify the refund path.
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -1174,7 +1171,6 @@ func TestE2E_PreviewBeforePurchaseHappyPath(t *testing.T) {
 	// Wire a real CampfireScripStore so we can verify scrip movement.
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,
@@ -1581,7 +1577,6 @@ func TestE2E_ContentDeliveryRoundTrip(t *testing.T) {
 	// Wire a real CampfireScripStore for scrip balance assertions.
 	cs := newCampfireScripStore(t, h)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		ScripStore:        cs,

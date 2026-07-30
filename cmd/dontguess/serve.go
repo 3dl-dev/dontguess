@@ -60,7 +60,7 @@ var (
 	// restoring the manual `dontguess allowlist add` gate for every new agent.
 	serveNoOpenAdmission bool
 	// serveLocal is a retained no-op alias flag (dontguess-b14): the default
-	// serve path is already campfire-free/local, so --local changes nothing.
+	// serve is always local, so --local changes nothing.
 	serveLocal bool
 
 	// serveAssignAcceptInterval is how often the operator-side auto-accept-assign
@@ -100,10 +100,9 @@ var (
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Run the exchange engine",
-	Long: `Start the DontGuess exchange engine. The engine is campfire-free: ingest and
-egress both go through a local append-only event log under DG_HOME (pkg/store).
-No 'dontguess init', no campfire join, no campfire identity — the operator key
-and store file are created on first run.
+	Long: `Start the DontGuess exchange engine. Ingest and egress both go through a
+local append-only event log under DG_HOME (pkg/store). No 'dontguess init'
+required — the operator key and store file are created on first run.
 
   dontguess serve                      # default: 500ms poll, auto-accept puts
   dontguess serve --poll-interval 1s   # slower poll
@@ -126,7 +125,7 @@ func init() {
 	serveCmd.Flags().DurationVar(&servePollInterval, "poll-interval", 500*time.Millisecond, "how often to poll for new messages")
 	serveCmd.Flags().BoolVar(&serveAutoAccept, "auto-accept", true, "automatically accept all puts at token cost")
 	serveCmd.Flags().Int64Var(&serveAutoAcceptMax, "auto-accept-max-price", DefaultAutoAcceptMax, "maximum token cost to auto-accept (puts above this cap are classified as held-for-review)")
-	serveCmd.Flags().BoolVar(&serveLocal, "local", false, "no-op alias: serve is always campfire-free/local (retained for backward compatibility)")
+	serveCmd.Flags().BoolVar(&serveLocal, "local", false, "no-op alias: retained for backward compatibility, changes nothing")
 	serveCmd.Flags().DurationVar(&serveMediumLoopInterval, "medium-loop-interval", pricing.DefaultMediumLoopInterval, "how often the pricing medium loop scans inventory and posts open compression assigns for high-demand uncompressed entries")
 	serveCmd.Flags().DurationVar(&serveAssignAcceptInterval, "assign-accept-interval", DefaultAssignAcceptInterval, "how often the operator validates and pays (or rejects) completed compression assigns (auto-accept-assign ticker)")
 	serveCmd.Flags().BoolVar(&serveNoOpenAdmission, "no-open-admission", false, "require a manual `dontguess allowlist add` before a new agent may put or settle. Default OFF: at fleet tier every key is the operator's own, so the allowlist refuses your own agents and buys nothing (dontguess-f6d). Open admission never applies at federation, never grants operator authority, and never overrides a reputation floor or a for-cause revocation")
@@ -135,7 +134,7 @@ func init() {
 }
 
 func runServe(_ *cobra.Command, _ []string) error {
-	// serve is always campfire-free; --local is a retained no-op alias.
+	// --local is a retained no-op alias.
 	return runServeLocal(resolveDGHome())
 }
 
@@ -375,9 +374,9 @@ func maybePrefetchModel(logf func(string, ...any)) {
 }
 
 // runServeLocal runs the exchange engine in standalone local-only mode
-// (dontguess-275): no campfire relay, no campfire identity, no scrip network
+// (dontguess-275): no relay, no network identity, no scrip network
 // dependency. Ingest and egress both go through a local pkg/store event log
-// under dgHome instead of a campfire ReadClient/WriteClient — see
+// under dgHome instead of a remote ReadClient/WriteClient — see
 // exchange.EngineOptions.LocalStore.
 //
 // No 'dontguess init' step is required: the secp256k1 nostr operator key
@@ -455,7 +454,7 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 	// additionally federates over NIP-42 relays. The SAME nostr operator identity
 	// minted above signs the Outbox events and drives the NIP-42 handshake — there
 	// is no second identity and no engineOperatorKey swap. No relay => unchanged
-	// campfire-free single-agent mode.
+	// single-agent mode.
 	//
 	// operatorSigner is the SAME operator identity as a TRUE nil interface when no
 	// relays are attached (individual tier). Assigning the typed-nil
@@ -670,7 +669,7 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 		publishReg = &publishRegistry{}
 	}
 
-	// No ReadClient, no WriteClient — neither requires a campfire. ScripStore and
+	// No ReadClient, no WriteClient — neither requires a remote. ScripStore and
 	// TrustChecker are non-nil only on the team/federated tier (relays attached);
 	// on the individual tier they are nil, which means "skip these checks" (see
 	// their EngineOptions doc). Payment enforcement and admission fall out of the
@@ -954,14 +953,14 @@ func runServeLocalCtx(parentCtx context.Context, dgHome string) error {
 		}()
 	}
 
-	logger.Printf("exchange serving (campfire-free, tier=%s, %d relay URL(s) configured)", effectiveTier, len(relayURLs))
+	logger.Printf("exchange serving (tier=%s, %d relay URL(s) configured)", effectiveTier, len(relayURLs))
 	logger.Printf("  operator:  %s", engineOperatorKey[:16]+"...")
 	logger.Printf("  poll:      %s", servePollInterval)
 	logger.Printf("  auto-accept: %v (max %d)", serveAutoAccept, serveAutoAcceptMax)
 	logger.Printf("  store:     %s", localStorePath)
 	logger.Printf("  logging to %s + stderr (rotate at 10MB, 5 backups, 28d retention, gzip)", filepath.Join(dgHome, "dontguess.log"))
 
-	fmt.Printf("\n--- DontGuess exchange (campfire-free) ---\n")
+	fmt.Printf("\n--- DontGuess exchange ---\n")
 	fmt.Printf("STORE=%s\n", localStorePath)
 	fmt.Printf("OPERATOR_KEY=%s\n\n", engineOperatorKey)
 
@@ -1149,9 +1148,9 @@ func bindOperatorSocket(ctx context.Context, dgHome string, eng *exchange.Engine
 // runEngineLoop wires the operator-facing plumbing shared by both serve
 // paths — the auto-accept ticker, the pricing medium loop, and the engine
 // event loop itself — around an already-configured Engine. Used by both
-// runServe (campfire-backed) and runServeLocal (dontguess-275, campfire-free)
+// runServe and runServeLocal (dontguess-275)
 // so the two entrypoints differ only in how the Engine's ingest/egress are
-// wired (campfire ReadClient/WriteClient vs. LocalStore). The operator IPC
+// wired (remote ReadClient/WriteClient vs. LocalStore). The operator IPC
 // socket is bound separately by bindOperatorSocket (dontguess-347, called
 // BEFORE the relay-attach loop) rather than here.
 //

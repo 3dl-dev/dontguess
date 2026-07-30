@@ -175,7 +175,6 @@ func TestGateB_OneActionAdmit_ReflectedInBothGates_UnDesyncable_fa19(t *testing.
 	// done by the allowlistController's own operatorSigner below, so both gates are
 	// exercised with a real operator signature regardless.
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        lsA,
 		OperatorPublicKey: opHex,
 		TrustChecker:      tc,

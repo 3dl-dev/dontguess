@@ -25,7 +25,6 @@ func newEngineWithTrust(t *testing.T, checker *exchange.TrustChecker) (*testHarn
 	t.Helper()
 	h := newTestHarness(t)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		TrustChecker:      checker,
@@ -72,12 +71,11 @@ func injectPutMsg(t *testing.T, h *testHarness, senderKey string) *store.Message
 		"domains":      []string{"test"},
 	})
 	rec := store.MessageRecord{
-		ID:         "put-trust-test-" + senderKey + "-" + string(rune(time.Now().UnixNano()%1000+'a')),
-		CampfireID: h.cfID,
-		Sender:     senderKey,
-		Payload:    payload,
-		Tags:       []string{exchange.TagPut, "exchange:content-type:text"},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        "put-trust-test-" + senderKey + "-" + string(rune(time.Now().UnixNano()%1000+'a')),
+		Sender:    senderKey,
+		Payload:   payload,
+		Tags:      []string{exchange.TagPut, "exchange:content-type:text"},
+		Timestamp: time.Now().UnixNano(),
 	}
 	if _, err := h.st.AddMessage(rec); err != nil {
 		t.Fatalf("AddMessage put: %v", err)
@@ -94,12 +92,11 @@ func injectBuyMsg(t *testing.T, h *testHarness, senderKey string) *store.Message
 		"max_results": 3,
 	})
 	rec := store.MessageRecord{
-		ID:         "buy-trust-test-" + senderKey + "-" + string(rune(time.Now().UnixNano()%1000+'a')),
-		CampfireID: h.cfID,
-		Sender:     senderKey,
-		Payload:    payload,
-		Tags:       []string{exchange.TagBuy},
-		Timestamp:  time.Now().UnixNano(),
+		ID:        "buy-trust-test-" + senderKey + "-" + string(rune(time.Now().UnixNano()%1000+'a')),
+		Sender:    senderKey,
+		Payload:   payload,
+		Tags:      []string{exchange.TagBuy},
+		Timestamp: time.Now().UnixNano(),
 	}
 	if _, err := h.st.AddMessage(rec); err != nil {
 		t.Fatalf("AddMessage buy: %v", err)
@@ -307,7 +304,6 @@ func TestTrustDispatch_NilChecker_AllOperationsPass(t *testing.T) {
 	t.Parallel()
 	h := newTestHarness(t)
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: h.operator.pubKeyHex,
 		Logger: func(format string, args ...any) {

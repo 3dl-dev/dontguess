@@ -203,7 +203,7 @@ func buildConvergenceMap(msgs []exchange.Message, operatorKeyHex, legacyOperator
 	return exchange.BuildConvergenceMap(st)
 }
 
-// resolveLocalOperatorKey returns the key the local (campfire-free) operator
+// resolveLocalOperatorKey returns the key the local () operator
 // authors match/settle messages with, mirroring runServeLocal's own resolution
 // (serve.go's engineOperatorKey). Since P3 (design §6, ADV-17) that is ALWAYS the
 // persisted secp256k1 nostr operator key — solo and relay share one identity, so a

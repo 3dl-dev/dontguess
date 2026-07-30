@@ -884,7 +884,7 @@ func (s *State) applyPut(msg *Message, blobs map[string][]byte) {
 	}
 
 	// Validate TAINTED fields. Drop silently — the message is already on the
-	// campfire log; we cannot remove it. By not adding it to pendingPuts the
+	// event log; we cannot remove it. By not adding it to pendingPuts the
 	// operator's put-accept will find nothing to accept.
 	if len(payload.Description) > MaxDescriptionBytes {
 		return

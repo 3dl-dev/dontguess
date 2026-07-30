@@ -1,5 +1,5 @@
 // Package store implements the M1 (individual-tier) local event log for
-// dontguess (dontguess-331). It is the campfire-free counterpart to
+// dontguess (dontguess-331). It is the counterpart to
 // pkg/proto's FromStoreRecord boundary: an append-only file of Record values
 // that fold into exactly the same []proto.Message shape the exchange engine
 // already replays from a campfire store.
@@ -53,7 +53,6 @@ var ErrStoreClosed = errors.New("store: append after close")
 // FromStoreRecord and one that arrived via Record.ToMessage.
 type Record struct {
 	ID          string   `json:"id"`
-	CampfireID  string   `json:"campfire_id"`
 	Sender      string   `json:"sender"`
 	Payload     []byte   `json:"payload"`
 	Tags        []string `json:"tags"`
@@ -85,7 +84,6 @@ type Record struct {
 func (r Record) ToMessage() proto.Message {
 	return proto.Message{
 		ID:          r.ID,
-		CampfireID:  r.CampfireID,
 		Sender:      r.Sender,
 		Payload:     r.Payload,
 		Tags:        r.Tags,

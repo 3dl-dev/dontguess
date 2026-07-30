@@ -35,7 +35,6 @@ func (h *opTestHarness) newMintTierEngine(t *testing.T, op *identity.Secp256k1Id
 		t.Fatalf("NewLocalScripStore: %v", err)
 	}
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        h.cfID,
 		LocalStore:        h.st,
 		OperatorPublicKey: op.PubKeyHex(),
 		ScripStore:        ss,

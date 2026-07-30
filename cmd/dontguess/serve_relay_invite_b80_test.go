@@ -68,7 +68,6 @@ func newInviteStack(t *testing.T, ctx context.Context, dgHome string, ls *dgstor
 	}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:        "local",
 		LocalStore:        ls,
 		OperatorPublicKey: operator.PubKeyHex(),
 		OperatorSigner:    operator,

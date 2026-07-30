@@ -201,7 +201,6 @@ func newE2EStack(t *testing.T, ctx context.Context, ls *dgstore.Store, operator 
 	notifier := &appendNotifier{}
 
 	eng := exchange.NewEngine(exchange.EngineOptions{
-		CampfireID:               "local",
 		LocalStore:               ls,
 		OperatorPublicKey:        operator.PubKeyHex(),
 		OperatorSigner:           operator,

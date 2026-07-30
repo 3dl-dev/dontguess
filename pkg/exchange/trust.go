@@ -1,6 +1,6 @@
 // Package exchange — trust gating for exchange operations.
 //
-// This replaces the former campfire pkg/provenance dependency. The trust model
+// This replaces a former external provenance dependency. The trust model
 // is deliberately narrow (NOT a web-of-trust — a self-minted root cartel is a
 // trusted intermediary reintroduced one layer down; see
 // docs/design/convergence-sybil-defense.md §"Family 2 — Attestation Graph"):
@@ -226,15 +226,15 @@ var levelNames = map[string]TrustLevel{
 //
 // *identity.Allowlist satisfies this (its Allowed method) for the nostr fleet-npub
 // path. KeySet is the mutable, transport-agnostic implementation used by the
-// campfire-backed serve path, where keys are ed25519 and do not parse as
+// legacy serve path, where keys were ed25519 and do not parse as
 // secp256k1 x-only npubs.
 type Membership interface {
 	Allowed(hexKey string) bool
 }
 
 // KeySet is a mutable, concurrency-safe set of admitted fleet-member hex
-// pubkeys. It is the Membership used on the current campfire transport
-// (operator + campfire members) and supports runtime de-allowlisting (Remove),
+// pubkeys. It is the Membership used on the current transport
+// (operator + fleet members) and supports runtime de-allowlisting (Remove),
 // which the serve membership-refresh loop drives when a member leaves the
 // campfire.
 //
@@ -323,7 +323,7 @@ func (k *KeySet) Len() int {
 
 // Keys returns a snapshot of the admitted (lowercased) hex keys. The serve
 // membership-refresh loop uses this to diff the current allowlist against the
-// live campfire membership and revoke (Remove) keys that have departed. Safe
+// live fleet membership and revoke (Remove) keys that have departed. Safe
 // for concurrent use — the returned slice is a copy.
 func (k *KeySet) Keys() []string {
 	k.mu.RLock()
