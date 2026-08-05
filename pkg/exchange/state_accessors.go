@@ -7,6 +7,19 @@ import (
 	"time"
 )
 
+// EncryptedRequired reports the §6 team-tier fail-closed flag (set true iff
+// this engine has an OperatorSigner — see NewEngine). When true, applyPut
+// silently DROPS any legacy-plaintext put — including one submitted through
+// the individual-tier local socket, which was never encrypted in the first
+// place (dontguess-be1). Callers that can ingest individual-tier plaintext
+// puts (cmd/dontguess OpPut) must check this BEFORE attempting the ingest, so
+// a mismatch fails loud instead of vanishing into "put ... is not pending".
+func (s *State) EncryptedRequired() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.encryptedRequired
+}
+
 // Inventory returns a snapshot of all live (accepted, non-expired) inventory entries.
 // Each entry is a copy — callers may not mutate returned entries; changes would not
 // be reflected in state and could not be persisted.

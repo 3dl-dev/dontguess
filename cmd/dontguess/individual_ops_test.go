@@ -39,11 +39,13 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/3dl-dev/dontguess/pkg/exchange"
+	"github.com/3dl-dev/dontguess/pkg/identity"
 	dgstore "github.com/3dl-dev/dontguess/pkg/store"
 )
 
@@ -239,6 +241,97 @@ func TestOpBuy_Individual_GenuineMiss(t *testing.T) {
 	}
 	if !buyResp.Miss {
 		t.Fatal("OpBuy: expected miss=true against empty inventory")
+	}
+}
+
+// TestOpPut_Individual_RefusesLoudOnEncryptedRequiredOperator is the
+// regression test for dontguess-be1: a real vat2 individual-tier
+// `dontguess put` of a 32KB prior-art survey failed twice with the
+// misleading "put ... is not pending" (accept, not put-reject) against the
+// shared ~/.dontguess operator — because that operator ALSO serves team tier
+// (it has an OperatorSigner, arming state.encryptedRequired), and applyPut's
+// §6 confidentiality fail-closed gate silently drops EVERY legacy-plaintext
+// put once that flag is set, including one submitted over the individual-tier
+// local socket that never touched a relay at all. IngestLocalRecord's own
+// fold drops the put before handleOpPut's immediate AutoAcceptPut ever runs,
+// so pendingPuts never sees it and "is not pending" names no cause.
+//
+// Individual tier's own design (NewEngine's encryptedRequired comment)
+// assumes a DEDICATED engine with OperatorSigner permanently nil; a shared
+// operator promoted to team tier violates that assumption for every other
+// local project still calling OpPut against it. The fix cannot safely relax
+// the confidentiality gate itself (that would reopen exactly the downgrade
+// leak §6 exists to close) — it must fail fast, before attempting the
+// ingest, with a clear reason instead of a misleading one.
+func TestOpPut_Individual_RefusesLoudOnEncryptedRequiredOperator(t *testing.T) {
+	t.Parallel()
+
+	operator, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	dgHome := t.TempDir()
+	ls, err := dgstore.Open(filepath.Join(dgHome, "events.jsonl"))
+	if err != nil {
+		t.Fatalf("dgstore.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = ls.Close() })
+
+	// Team-tier shaped: an OperatorSigner is present, exactly like the shared
+	// production operator once it is promoted via `dontguess up --relay`. No
+	// TrustChecker/ScripStore/relay is needed to reproduce this — encryptedRequired
+	// is armed by OperatorSigner alone (ADV-7 decouple, engine_core.go NewEngine).
+	eng := exchange.NewEngine(exchange.EngineOptions{
+		LocalStore:        ls,
+		OperatorPublicKey: operator.PubKeyHex(),
+		OperatorSigner:    operator,
+		PollInterval:      20 * time.Millisecond,
+		Logger: func(format string, args ...any) {
+			t.Logf("[engine] "+format, args...)
+		},
+	})
+	if err := eng.StartupReplayForTest(); err != nil {
+		t.Fatalf("StartupReplayForTest: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = eng.RunPollLoopForTest(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	if !eng.State().EncryptedRequired() {
+		t.Fatal("test setup: expected EncryptedRequired() to be true with an OperatorSigner present")
+	}
+
+	sockPath, _ := startSocketServer(t, eng)
+
+	var resp opPutResponse
+	dialAndRequest(t, sockPath, map[string]any{
+		"op":           OpPut,
+		"description":  "Prior art survey: evolved/grown non-backprop brains",
+		"content":      base64.StdEncoding.EncodeToString([]byte("some real content")),
+		"token_cost":   550000,
+		"content_type": "exchange:content-type:code",
+	}, &resp)
+
+	if resp.OK {
+		t.Fatal("OpPut: expected OK=false against an encryptedRequired operator")
+	}
+	if strings.Contains(resp.Error, "is not pending") {
+		t.Fatalf("OpPut: got the OLD misleading error (names no cause): %q", resp.Error)
+	}
+	if !strings.Contains(resp.Error, "team tier") {
+		t.Fatalf("OpPut: expected the error to explain the operator is team-tier/encrypted, got: %q", resp.Error)
+	}
+
+	// Confirm the put never folded into pendingPuts at all — the fail-fast
+	// happens before any ingest, so nothing should be pending or in inventory.
+	if pending := eng.State().PendingPuts(); len(pending) != 0 {
+		t.Fatalf("expected zero pending puts after a refused OpPut, got %d", len(pending))
 	}
 }
 

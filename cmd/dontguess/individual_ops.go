@@ -156,6 +156,24 @@ func hasTag(tags []string, want string) bool {
 // have to wait on the auto-accept ticker. ScripStore==nil-only; never touches
 // scrip.
 func handleOpPut(eng *exchange.Engine, req operatorRequest) opPutResponse {
+	// FAIL FAST (dontguess-be1) if this engine requires encryption (it has an
+	// OperatorSigner — i.e. it is ALSO serving team tier over a relay).
+	// Individual-tier content is legacy plaintext by design (never encrypted;
+	// see randomLocalSenderKey's doc), and applyPut's §6 confidentiality
+	// fail-closed gate DROPS every legacy-plaintext put once encryption is
+	// required — unconditionally, with no way to tell "arrived over the local
+	// socket, never left this machine" from "arrived over the relay". Without
+	// this check the ingest below silently drops the put (it never folds into
+	// pendingPuts) and the caller's very next line, AutoAcceptPut, fails with
+	// the misleading "put ... is not pending" — which names no cause and sends
+	// whoever reads it chasing everything BUT the real one. Individual tier was
+	// designed assuming a dedicated engine with no OperatorSigner (see
+	// NewEngine's encryptedRequired comment); on a shared operator promoted to
+	// team tier that assumption no longer holds, so refuse here, loudly and
+	// specifically, instead of pretending to accept the put.
+	if eng.State().EncryptedRequired() {
+		return opPutResponse{OK: false, Error: "put: individual tier is unavailable on this operator — it has been promoted to team tier (relay-attached, confidentiality required), and individual-tier content is unencrypted by design. Provision a team-tier identity instead: `dontguess agent-init <name> --fleet-member --relay <urls> --operator-npub <npub>`, then `dontguess put --operator-npub <npub> ...`"}
+	}
 	if req.Description == "" {
 		return opPutResponse{OK: false, Error: "put: description is required"}
 	}
